@@ -132,12 +132,16 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                     "content": str(result_content),
                 })
         
+        # 先添加tool结果消息，再添加user文本消息。
+        # 顺序对上游严格校验器（如 DeepSeek 系 tool_call_sequence_broken）至关重要：
+        # assistant 的 tool_calls 之后必须紧跟全部对应 tool 结果，任何中间消息
+        # （包括 user 文本）都会被判为「tool calls and tool results do not match」。
+        # Anthropic 语义里 tool_result 块也应位于 user 消息的 text 块之前。
+        messages.extend(tool_results)
+
         # 添加user文本消息
         if text_parts:
             messages.append({"role": "user", "content": "\n".join(text_parts)})
-        
-        # 添加tool结果消息
-        messages.extend(tool_results)
     
     # 其他角色（system等）
     else:
@@ -146,6 +150,101 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
             messages.append({"role": role, "content": text})
     
     return messages
+
+
+def repair_tool_sequence(messages: list[dict]) -> list[dict]:
+    """修复 chat messages 中 tool_calls 与 tool 结果的配对，保证上游校验通过。
+
+    DeepSeek 系上游（CodeBuddy 11148 / tool_call_sequence_broken）要求：
+        - assistant 的每个 tool_call 必须有且仅有一条同 id 的 tool 消息回答；
+        - tool 消息必须紧跟在带 tool_calls 的 assistant 消息之后；
+        - 不能出现没有对应 tool_call 的 tool 消息。
+
+    Claude Code / CC 兼容客户端的历史并不保证这些（中断后不回结果、上下文
+    裁剪掉 tool_use 但保留结果、tool_use_id 为空等），逐条修复：
+
+        1. assistant 带 tool_calls → 其后吸收连续的 tool 消息，按 id 配对；
+           缺结果的 call 补一条占位 tool 消息（标注中断），保证 call 全部被回答；
+        2. 重复 id 的结果只保留第一条（重复 id 同样触发 11148）；
+        3. id 对不上任何 call 的孤儿结果 → 转成 user 消息保留内容（不静默丢信息）；
+        4. 无前置 tool_calls 的 tool 消息 → 同样转成 user 消息；
+        5. 结果丢失 id（空 tool_use_id）→ 按顺序认领第一个未回答的 call；
+        6. 纯 thinking 等产生的空 assistant 消息（无 text、无 tool_calls）→ 丢弃，
+           content 为 null 的 assistant 是很多校验器的硬伤；
+        7. tool_call 缺 id → 兜底生成，保证配对键存在。
+    """
+    result: list[dict] = []
+    i, n = 0, len(messages)
+    while i < n:
+        msg = messages[i]
+        role = msg.get("role")
+
+        if role == "assistant":
+            tool_calls = msg.get("tool_calls") or []
+            if not tool_calls:
+                # 空 assistant 消息（content 为 None/""）直接丢弃
+                if msg.get("content"):
+                    result.append(msg)
+                i += 1
+                continue
+
+            # id 缺失的 call 兜底生成（原地补，msg 是转换器新建的 dict）
+            for tc in tool_calls:
+                if not tc.get("id"):
+                    tc["id"] = _rand_id("call_")
+            result.append(msg)
+            expected = [tc["id"] for tc in tool_calls]
+            answered: set[str] = set()
+
+            i += 1
+            while i < n and messages[i].get("role") == "tool":
+                tid = messages[i].get("tool_call_id")
+                if not tid:
+                    # 结果丢了 id（客户端回传空 tool_use_id）：按顺序认领
+                    # 第一个未回答的 call（Anthropic 语义里结果与 call 同序）
+                    unmatched = [t for t in expected if t not in answered]
+                    if unmatched:
+                        messages[i] = {**messages[i], "tool_call_id": unmatched[0]}
+                        answered.add(unmatched[0])
+                        result.append(messages[i])
+                    # 无可认领（call 都已回答）→ 丢弃
+                elif tid in expected and tid not in answered:
+                    answered.add(tid)
+                    result.append(messages[i])
+                elif tid not in expected:
+                    # 孤儿结果：找不到发起方，转 user 保留内容
+                    result.append({
+                        "role": "user",
+                        "content": (f"[tool result without matching tool call "
+                                    f"(id={tid!r})]: {messages[i].get('content', '')}"),
+                    })
+                # 其余情况（重复 id）丢弃
+                i += 1
+
+            # 未被回答的 call 补占位结果，避免 tool_call_sequence_broken
+            for tid in expected:
+                if tid not in answered:
+                    result.append({
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "content": "[tool result missing: the call was interrupted "
+                                   "or its output was trimmed from context]",
+                    })
+            continue
+
+        if role == "tool":
+            # 前面没有带 tool_calls 的 assistant → 转 user 保留内容
+            result.append({
+                "role": "user",
+                "content": (f"[tool result without matching tool call "
+                            f"(id={msg.get('tool_call_id')!r})]: {msg.get('content', '')}"),
+            })
+            i += 1
+            continue
+
+        result.append(msg)
+        i += 1
+    return result
 
 
 def anthropic_request_to_chat(body: dict) -> dict:
@@ -169,6 +268,10 @@ def anthropic_request_to_chat(body: dict) -> dict:
     # messages转换
     for msg in body.get("messages", []):
         messages.extend(_convert_anthropic_message(msg))
+
+    # 兜底修复 tool_calls/tool 配对（中断、裁剪、混排的历史都会破坏配对，
+    # DeepSeek 系上游会以 11148 tool_call_sequence_broken 拒单）
+    messages = repair_tool_sequence(messages)
     
     # 构造Chat body
     chat: dict[str, Any] = {
