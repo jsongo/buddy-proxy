@@ -566,13 +566,16 @@ _PAGE_HTML = r"""<!DOCTYPE html>
            background: var(--card2); border: 1px solid var(--line); color: var(--text);
            padding: 9px 18px; border-radius: 10px; font-size: 13px; display: none; z-index: 99; }
   #toast.err { border-color: rgba(255,107,107,.5); color: #ffb3b3; }
-  #cal-tip { position: fixed; z-index: 60; display: none; pointer-events: none;
+  #cal-tip, #chart-tip { position: fixed; z-index: 60; display: none; pointer-events: none;
              background: #0b0e13; border: 1px solid #2d3846; color: var(--text);
              padding: 8px 11px; border-radius: 8px; font-size: 12px;
              box-shadow: 0 6px 18px rgba(0,0,0,.45); min-width: 130px; }
-  #cal-tip .t-date { color: var(--muted); margin-bottom: 4px; }
-  #cal-tip .t-p { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
-  #cal-tip .t-p i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
+  #cal-tip .t-date, #chart-tip .t-date { color: var(--muted); margin-bottom: 4px; }
+  #cal-tip .t-p, #chart-tip .t-p { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #cal-tip .t-p i, #chart-tip .t-p i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
+  #chart-tip .t-p b { font-weight: 600; }
+  .hitzone { cursor: crosshair; }
+  .hitzone:hover { fill: rgba(255,255,255,.05); }
 </style>
 </head>
 <body>
@@ -652,6 +655,7 @@ _PAGE_HTML = r"""<!DOCTYPE html>
 </div>
 <div id="toast"></div>
 <div id="cal-tip"></div>
+<div id="chart-tip"></div>
 
 <script>
 const PCOLORS = { codebuddy: '#4f8cff', trae: '#a78bfa', zcode: '#3ecf8e', doubao: '#f0b429' };
@@ -880,7 +884,8 @@ function renderDaily() {
   const daily = STATS.daily || [];
   const W = 520, H = 190, padL = 34, padB = 22, padT = 10;
   const max = Math.max(1, ...daily.map(d => d.total));
-  const bw = Math.min(34, (W - padL - 8) / daily.length - 6);
+  const slot = (W - padL - 8) / daily.length;
+  const bw = Math.min(34, slot - 6);
   const providers = [...new Set(daily.flatMap(d => Object.keys(d.by_provider)))];
   let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
   for (let i = 1; i <= 4; i++) {
@@ -891,16 +896,20 @@ function renderDaily() {
            `<text x="${padL-6}" y="${y+4}" fill="#8b96a5" font-size="10" text-anchor="end">${lbl}</text>`;
   }
   daily.forEach((d, i) => {
-    const x = padL + i * ((W - padL - 8) / daily.length) + 3;
+    const x = padL + i * slot + (slot - bw) / 2;
     let y = H - padB;
     const segH = n => (H - padB - padT) * n / max;
     for (const p of providers) {
       const n = d.by_provider[p] || 0; if (!n) continue;
       const h = segH(n);
       y -= h;
-      svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${pcolor(p)}" rx="2"><title>${d.date} · ${p}: ${n} 次</title></rect>`;
+      svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${pcolor(p)}" rx="2"/>`;
     }
     if (d.total) svg += `<text x="${x + bw/2}" y="${H - 6}" fill="#8b96a5" font-size="9.5" text-anchor="middle">${d.date.slice(5)}</text>`;
+  });
+  // 整列悬停热区：移入即显示当日明细（CSS hover 加高亮底色）
+  daily.forEach((d, i) => {
+    svg += `<rect class="hitzone" data-i="${i}" x="${padL + i * slot}" y="${padT}" width="${slot}" height="${H - padB - padT}" fill="transparent"/>`;
   });
   svg += '</svg>';
   document.getElementById('chart-daily').innerHTML = svg;
@@ -914,8 +923,8 @@ function renderModelBars() {
   const el = document.getElementById('chart-models');
   if (!models.length) { el.innerHTML = '<div class="empty">暂无请求数据</div>'; return; }
   const max = Math.max(1, ...models.map(m => m.count));
-  el.innerHTML = models.map(m => `
-    <div style="display:flex;align-items:center;gap:10px;margin:7px 0">
+  el.innerHTML = models.map((m, mi) => `
+    <div data-mi="${mi}" style="display:flex;align-items:center;gap:10px;margin:7px 0;cursor:crosshair">
       <div class="mono" style="width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.provider + '/' + m.model)}">
         <i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(m.provider)};margin-right:6px"></i>${esc(m.model)}
       </div>
@@ -972,6 +981,47 @@ document.getElementById('cal').addEventListener('mousemove', e => {
 document.getElementById('cal').addEventListener('mouseleave', () => {
   calTip.style.display = 'none';
 });
+
+// 请求趋势图表悬停 tooltip（与日历同款即时悬浮框）
+const chartTip = document.getElementById('chart-tip');
+function showChartTip(html, rect) {
+  chartTip.innerHTML = html;
+  chartTip.style.display = 'block';
+  let x = rect.left + rect.width / 2 - chartTip.offsetWidth / 2;
+  x = Math.max(8, Math.min(x, window.innerWidth - chartTip.offsetWidth - 8));
+  let y = rect.top - chartTip.offsetHeight - 8;
+  if (y < 8) y = rect.bottom + 8;
+  chartTip.style.left = x + 'px';
+  chartTip.style.top = y + 'px';
+}
+function hideChartTip() { chartTip.style.display = 'none'; }
+
+document.getElementById('chart-daily').addEventListener('mousemove', e => {
+  const hz = e.target.closest('rect.hitzone');
+  const d = hz && (STATS.daily || [])[+hz.dataset.i];
+  if (!d) { hideChartTip(); return; }
+  const lines = Object.entries(d.by_provider).sort((a, b) => b[1] - a[1])
+    .map(([p, n]) => `<div class="t-p"><i style="background:${pcolor(p)}"></i>${esc(p)}<b style="margin-left:auto;padding-left:12px">${n}</b></div>`).join('');
+  showChartTip(
+    `<div class="t-date">${esc(d.date)} · 合计 ${d.total} 次${d.errors ? ` · 错误 ${d.errors}` : ''}</div>` +
+    (lines || '<div class="t-p muted">无请求</div>'),
+    hz.getBoundingClientRect());
+});
+document.getElementById('chart-daily').addEventListener('mouseleave', hideChartTip);
+
+document.getElementById('chart-models').addEventListener('mousemove', e => {
+  const row = e.target.closest('[data-mi]');
+  const m = row && (STATS.models || [])[+row.dataset.mi];
+  if (!m) { hideChartTip(); return; }
+  showChartTip(
+    `<div class="t-date"><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(m.provider)};margin-right:6px"></i>${esc(m.provider)} / ${esc(m.model)}</div>` +
+    `<div class="t-p">请求 <b style="margin-left:auto">${m.count}</b> 次 · 错误 ${m.errors}</div>` +
+    `<div class="t-p">平均 ${fmtMs(m.avg_ms)} · 最长 ${fmtMs(m.duration_ms_max)}</div>` +
+    `<div class="t-p">Tokens <b style="margin-left:auto">↑${fmtNum(m.prompt_tokens)} ↓${fmtNum(m.completion_tokens)}</b></div>` +
+    (m.last_ts ? `<div class="t-p muted">最近 ${fmtTime(m.last_ts)}</div>` : ''),
+    row.getBoundingClientRect());
+});
+document.getElementById('chart-models').addEventListener('mouseleave', hideChartTip);
 
 function renderGroups() {
   const el = document.getElementById('groups');
