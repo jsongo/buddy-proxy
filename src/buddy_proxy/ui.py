@@ -849,10 +849,17 @@ function renderBenefits() {
       const bar = hasBar ? `<div class="qbar"><div style="width:${Math.max(2, pct)}%;background:${color}"></div></div>` : '';
       return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${reset}</span>${nums}</div>${bar}</div>`;
     }).join('');
+    // 标题行汇总：剩余/总额（取第一个可合计的条目；CodeBuddy 是积分合计，
+    // zcode 取最紧的窗口。各明细条目仍完整列在下方）
+    const head = (q.items || []).find(it => it.remaining != null && it.total != null);
+    const headSum = head ? `<span class="mono" style="margin-left:auto">
+      <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(head.remaining)}</span>
+      <span class="muted">/ ${fmtNum(head.total)}</span></span>` : '';
     return `<div class="chart-card" style="margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="font-weight:600">${esc(p.name)}</span>
         ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}
+        ${headSum}
       </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
 }
