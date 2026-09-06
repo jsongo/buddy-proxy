@@ -63,7 +63,10 @@ class SSEUsageExtractor:
         self._buf = b""
         self.usage: dict[str, Any] = {}
 
-    def feed(self, chunk: bytes) -> None:
+    def feed(self, chunk: bytes | str) -> None:
+        # 各 provider 产出类型不一：codebuddy/zcode 流是 bytes，trae 流是 str
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8")
         if b"usage" not in chunk and not self._buf:
             return
         self._buf += chunk
