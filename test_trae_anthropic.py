@@ -305,7 +305,12 @@ def test_stream_converter_usage_carries_credit_and_cache():
 
 
 def test_nonstream_anthropic_message_carries_credit_and_cache():
-    """非流式 /v1/messages 同样要透传 credit 与缓存命中。"""
+    """非流式 /v1/messages 同样要透传 credit 与缓存命中。
+
+    口径：Chat 上游 prompt_tokens 已含缓存（50 = 2 未命中 + 48 命中），
+    Anthropic 语义 input_tokens 不含缓存，须扣除后再输出，
+    否则客户端把 input + cache_read 加总会双倍计数。
+    """
     from buddy_proxy.anthropic_adapter import chat_completion_to_anthropic_message
 
     msg = chat_completion_to_anthropic_message({
@@ -315,7 +320,7 @@ def test_nonstream_anthropic_message_carries_credit_and_cache():
         "usage": {"prompt_tokens": 50, "completion_tokens": 3,
                   "prompt_tokens_details": {"cached_tokens": 48}, "credit": 0.6},
     })
-    assert msg["usage"]["input_tokens"] == 50
+    assert msg["usage"]["input_tokens"] == 2
     assert msg["usage"]["cache_read_input_tokens"] == 48
     assert msg["usage"]["credit"] == 0.6
 

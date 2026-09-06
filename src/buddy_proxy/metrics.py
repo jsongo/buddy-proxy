@@ -35,18 +35,27 @@ def normalize_usage(u: dict[str, Any]) -> dict[str, Any]:
     """把 OpenAI / CodeBuddy / Anthropic 三种 usage 形态归一化。
 
     - prompt/completion：Anthropic 叫 input/output_tokens
-    - 缓存：OpenAI 在 prompt_tokens_details.cached_tokens，Anthropic 是
-      cache_read_input_tokens，CodeBuddy 三处都有
+    - 缓存：OpenAI 在 prompt_tokens_details.cached_tokens（prompt 含缓存），
+      Anthropic 是 cache_read_input_tokens（input 不含缓存，单列）——
+      统一输出 OpenAI 口径：prompt_tokens = input + cache_read + cache_creation
     - credit：CodeBuddy usage 里的单次积分消耗（其他上游没有 → None）
     """
     details = (u.get("prompt_tokens_details")
                or u.get("input_tokens_details") or {})
     credit = u.get("credit")
+    prompt = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
+    cached = int(u.get("cached_tokens") or details.get("cached_tokens")
+                 or u.get("cache_read_input_tokens") or 0)
+    cache_write = int(u.get("cache_creation_input_tokens") or 0)
+    if u.get("cache_read_input_tokens") is not None or cache_write:
+        # Anthropic 官方口径：input_tokens 不含缓存命中/创建，缓存单列——
+        # 统一成 OpenAI 口径（prompt 含 cached），UI 各通道才能横向对比。
+        # OpenAI/Responses 形态没有这两个顶层字段，prompt 本就含缓存，勿重复累加
+        prompt += cached + cache_write
     return {
-        "prompt_tokens": int(u.get("prompt_tokens") or u.get("input_tokens") or 0),
+        "prompt_tokens": prompt,
         "completion_tokens": int(u.get("completion_tokens") or u.get("output_tokens") or 0),
-        "cached_tokens": int(u.get("cached_tokens") or details.get("cached_tokens")
-                             or u.get("cache_read_input_tokens") or 0),
+        "cached_tokens": cached,
         "credit": float(credit) if credit is not None else None,
     }
 

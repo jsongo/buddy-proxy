@@ -283,14 +283,19 @@ def test_sse_usage_extractor_openai():
 
 
 def test_sse_usage_extractor_anthropic_and_split_lines():
-    """Anthropic 形态（input/output 分事件）+ usage 行跨 chunk 断开。"""
+    """Anthropic 形态（input/output 分事件）+ usage 行跨 chunk 断开。
+
+    口径统一：Anthropic 的 input_tokens 不含缓存，提取层要加总成
+    OpenAI 口径（prompt = input + cache_read + cache_creation），
+    zcode 直通流才能与 codebuddy/trae 横向对比。
+    """
     ex = SSEUsageExtractor()
     ex.feed(b'event: message_start\ndata: {"message":{"usage":{"input_tokens":120,'
             b'"cache_read_input_tokens":30}}}\n\n')
     # 故意把 usage 行从中间劈开
     ex.feed(b'event: message_delta\ndata: {"usage":{"output_tok')
     ex.feed(b'ens": 55}}\n\n')
-    assert ex.usage["prompt_tokens"] == 120
+    assert ex.usage["prompt_tokens"] == 150
     assert ex.usage["completion_tokens"] == 55
     assert ex.usage["cached_tokens"] == 30
 
@@ -324,8 +329,15 @@ def test_normalize_usage_shapes():
                  "cached_tokens": 4, "credit": 0.2}
     a = normalize_usage({"input_tokens": 8, "output_tokens": 3,
                          "cache_read_input_tokens": 2})
-    assert a == {"prompt_tokens": 8, "completion_tokens": 3,
+    # Anthropic 形态统一为 OpenAI 口径：prompt = input + cache_read
+    assert a == {"prompt_tokens": 10, "completion_tokens": 3,
                  "cached_tokens": 2, "credit": None}
+    # Anthropic 形态含缓存创建（5m/1h 写入）也要计入全量输入
+    aw = normalize_usage({"input_tokens": 8, "output_tokens": 3,
+                          "cache_creation_input_tokens": 5,
+                          "cache_read_input_tokens": 2})
+    assert aw == {"prompt_tokens": 15, "completion_tokens": 3,
+                  "cached_tokens": 2, "credit": None}
     # Responses API 形态：input_tokens_details.cached_tokens
     r = normalize_usage({"input_tokens": 9, "output_tokens": 1,
                          "input_tokens_details": {"cached_tokens": 7}, "credit": 0.3})

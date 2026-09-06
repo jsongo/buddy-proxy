@@ -1056,6 +1056,7 @@ document.getElementById('chart-models').addEventListener('mousemove', e => {
     `<div class="t-p">请求 <b style="margin-left:auto">${m.count}</b> 次 · 错误 ${m.errors}</div>` +
     `<div class="t-p">平均 ${fmtMs(m.avg_ms)} · 最长 ${fmtMs(m.duration_ms_max)}</div>` +
     `<div class="t-p">Tokens <b style="margin-left:auto">↑${fmtNum(m.prompt_tokens)} ↓${fmtNum(m.completion_tokens)}</b></div>` +
+    `<div class="t-p muted">↑ 为全部输入（含缓存命中部分）</div>` +
     (m.last_ts ? `<div class="t-p muted">最近 ${fmtTime(m.last_ts)}</div>` : ''),
     row.getBoundingClientRect());
 });
@@ -1118,9 +1119,9 @@ function renderRecent() {
     const hasTok = (r.prompt_tokens || r.completion_tokens || r.cached_tokens);
     let tok = '—', tokTitle = '';
     if (hasTok) {
-      const cacheTxt = r.cached_tokens ? ` · 缓存 ${fmtNum(r.cached_tokens)}` : '';
+      const cacheTxt = r.cached_tokens ? ` · 其中缓存命中 ${fmtNum(r.cached_tokens)}` : '';
       tok = `↑${fmtNum(r.prompt_tokens)} ↓${fmtNum(r.completion_tokens)}`;
-      tokTitle = `prompt ${r.prompt_tokens} · completion ${r.completion_tokens}${cacheTxt}`;
+      tokTitle = `输入 ${r.prompt_tokens}（↑ 含缓存命中）· 输出 ${r.completion_tokens}${cacheTxt}`;
     }
     const creditTxt = r.credit != null ? r.credit
                     : cmap[r.provider + '/' + r.model] || null;

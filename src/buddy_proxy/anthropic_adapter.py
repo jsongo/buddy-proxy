@@ -448,13 +448,16 @@ class AnthropicStreamConverter:
         if self.usage:
             # Chat使用completion_tokens/prompt_tokens，Anthropic使用output_tokens/input_tokens
             usage_delta["output_tokens"] = self.usage.get("completion_tokens", 0)
-            usage_delta["input_tokens"] = self.usage.get("prompt_tokens", 0)
             # 缓存命中与积分透传：cache_read_input_tokens 是 Anthropic 标准字段
             # （Claude Code 靠它显示缓存），credit 是 CodeBuddy 扩展——两者都要
             # 出现在流里，metrics 层（SSEUsageExtractor）才记录得到
             details = self.usage.get("prompt_tokens_details") or {}
             cached = (details.get("cached_tokens")
                       or self.usage.get("cached_tokens") or 0)
+            # 口径对齐：Chat 的 prompt_tokens 已含缓存命中（OpenAI 口径），
+            # Anthropic 的 input_tokens 不含缓存（与 cache_read 是加法关系）。
+            # 不扣的话客户端（Claude Code 等）会把两者加总成双倍输入
+            usage_delta["input_tokens"] = max(0, self.usage.get("prompt_tokens", 0) - cached)
             if cached:
                 usage_delta["cache_read_input_tokens"] = cached
             if self.usage.get("credit") is not None:
@@ -532,12 +535,14 @@ def chat_completion_to_anthropic_message(
             "input": arguments,
         })
     usage = data.get("usage") or {}
-    usage_out = {
-        "input_tokens": usage.get("prompt_tokens", 0),
-        "output_tokens": usage.get("completion_tokens", 0),
-    }
     details = usage.get("prompt_tokens_details") or {}
     cached = details.get("cached_tokens") or usage.get("cached_tokens") or 0
+    usage_out = {
+        # 口径对齐：prompt_tokens（OpenAI 口径）已含缓存命中，Anthropic 的
+        # input_tokens 不含——须扣除后再输出，否则与 cache_read 加总重复计数
+        "input_tokens": max(0, usage.get("prompt_tokens", 0) - cached),
+        "output_tokens": usage.get("completion_tokens", 0),
+    }
     if cached:
         usage_out["cache_read_input_tokens"] = cached
     if usage.get("credit") is not None:
