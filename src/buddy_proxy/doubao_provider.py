@@ -512,7 +512,7 @@ class DoubaoProvider(BaseProvider):
 
     def resolve_agent_model(self, model: str | None) -> tuple[str, dict[str, Any]]:
         """校验任务接口的模型（只走 agent 管线），返回 (model, model_spec)。"""
-        name = (model or "doubao-auto").strip()
+        name = str(model or "doubao-auto").strip()
         spec = _DOUBAO_CHAT_MODELS.get(name)
         if spec is None or "agent" not in spec:
             raise HTTPException(
