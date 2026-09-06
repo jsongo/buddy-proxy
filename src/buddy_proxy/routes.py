@@ -10,8 +10,8 @@ import os
 import time
 from typing import Any
 
-from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.state import (
     app,
@@ -167,6 +167,46 @@ async def parse_request_body(request: Request) -> Any:
                 "type": "invalid_request_body",
             }
         },
+    )
+
+
+@app.post("/api/agent/doubao")
+async def agent_doubao(request: Request):
+    """一次性 agent 任务 → 豆包工作（CDP 直连），SSE 事件流中转。
+
+    请求体：``{"task": "...", "session_id": "...", "model": "doubao-auto"}``
+    - task 必填；session_id 缺省续聊进程内默认会话，"new"/空串强制新建；
+      model 可选（默认 doubao-auto，仅限 agent 管线模型）
+
+    事件协议见 :meth:`DoubaoProvider.stream_agent_task`。启动/登录检查在
+    流外完成：失败时以正常 HTTP 状态码返回可操作提示（如主 App 未开
+    CDP 调试端口 → 提示先完全退出豆包重试；未安装 → 提示安装），
+    而不是藏在 SSE 流里。
+    """
+    body = await parse_request_body(request)
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "请求体应为 JSON 对象", "type": "invalid_request_body"}},
+        )
+    task = str(body.get("task") or "").strip()
+    if not task:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "task 不能为空", "type": "invalid_request"}},
+        )
+    provider = get_state().providers.get("doubao")
+    if provider is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"message": "doubao provider 未启用（需以 --doubao 启动）", "type": "not_found"}},
+        )
+    model, model_spec = provider.resolve_agent_model(body.get("model"))
+    await provider.ensure_ready()
+    return StreamingResponse(
+        provider.stream_agent_task(task, body.get("session_id"), model, model_spec),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "close"},
     )
 
 
