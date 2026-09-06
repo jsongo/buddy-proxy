@@ -79,9 +79,10 @@ MODEL_MAP: dict[str, str] = {
 # config_name 全部为 2026-09 实测通过值（Work 凭证 + llm_utils_chat 端点）：
 # 注意命名大小写不统一——DeepSeek-/Doubao- 为大写前缀，glm/kimi/minimax 小写，
 # qwen 两种写法并存（qwen3.8-max 用点号、qwen-3.7-plus 用连字符）。
-# kimi-k3 虽在官方文档内，但需会员 Pro+/Ultra/Express（免费账号 1005），故不列出。
+# kimi-k3 需会员 Pro+/Ultra/Express（免费账号 1005）；付费账号实测可用
+# （2026-09-06 chat_v3 出流正常），故收录。
 MODEL_TIERS: dict[str, list[str]] = {
-    "T1": ["glm-5.3", "glm-5.3-flash", "Doubao-Seed-Evolving"],
+    "T1": ["glm-5.3", "glm-5.3-flash", "Doubao-Seed-Evolving", "kimi-k3"],
     "T2": ["glm-5.2", "Doubao-Seed-2.1-Pro", "DeepSeek-V4-Pro",
            "kimi-k2.7-code", "qwen3.8-max"],
     "T3": ["Doubao-Seed-2.1-Turbo", "DeepSeek-V4-Flash", "minimax-m3",
@@ -101,6 +102,7 @@ MODEL_CREDITS: dict[str, str] = {
     "glm-5.3-flash": "x0.06",
     "glm-5.3": "x0.40",
     "glm-5.2": "x0.40",
+    "kimi-k3": "x1.83",
     "DeepSeek-V4-Flash": "x0.08",
     "DeepSeek-V4-Pro": "x0.72",
     "kimi-k2.7-code": "x0.83",

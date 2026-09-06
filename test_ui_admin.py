@@ -294,6 +294,16 @@ def test_sse_usage_extractor_anthropic_and_split_lines():
     assert ex.usage["cached_tokens"] == 30
 
 
+def test_sse_usage_extractor_str_chunks():
+    """Trae 流产出 str chunk（codebuddy 是 bytes）——两者都必须能喂。"""
+    ex = SSEUsageExtractor()
+    ex.feed('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n')
+    ex.feed('data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,'
+            '"total_tokens":10}}\n\n')
+    ex.feed("data: [DONE]\n\n")
+    assert ex.usage["prompt_tokens"] == 7 and ex.usage["completion_tokens"] == 3
+
+
 def test_metrics_record_ttft_and_credit_in_recent(env):
     env.state.metrics.record(provider="fakeprov", model="fake-model",
                              stream=True, status=200, duration_ms=900,
@@ -324,6 +334,7 @@ def test_trae_models_carry_credits():
     assert models["glm-5.3"]["credits"] == "x0.40"
     assert models["glm-5.3-flash"]["credits"] == "x0.06"
     assert models["DeepSeek-V4-Flash"]["credits"] == "x0.08"
+    assert models["kimi-k3"]["credits"] == "x1.83"
     # 别名跟随内部模型的倍率
     assert models["deepseek-v4-flash"]["credits"] == "x0.08"
     # 官方价目已下架的模型不硬造倍率
