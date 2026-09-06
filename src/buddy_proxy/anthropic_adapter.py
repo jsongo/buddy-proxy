@@ -449,6 +449,16 @@ class AnthropicStreamConverter:
             # Chat使用completion_tokens/prompt_tokens，Anthropic使用output_tokens/input_tokens
             usage_delta["output_tokens"] = self.usage.get("completion_tokens", 0)
             usage_delta["input_tokens"] = self.usage.get("prompt_tokens", 0)
+            # 缓存命中与积分透传：cache_read_input_tokens 是 Anthropic 标准字段
+            # （Claude Code 靠它显示缓存），credit 是 CodeBuddy 扩展——两者都要
+            # 出现在流里，metrics 层（SSEUsageExtractor）才记录得到
+            details = self.usage.get("prompt_tokens_details") or {}
+            cached = (details.get("cached_tokens")
+                      or self.usage.get("cached_tokens") or 0)
+            if cached:
+                usage_delta["cache_read_input_tokens"] = cached
+            if self.usage.get("credit") is not None:
+                usage_delta["credit"] = self.usage["credit"]
         
         # 发出message_delta
         events.append(("message_delta", {
@@ -521,6 +531,17 @@ def chat_completion_to_anthropic_message(
             "name": fn.get("name", ""),
             "input": arguments,
         })
+    usage = data.get("usage") or {}
+    usage_out = {
+        "input_tokens": usage.get("prompt_tokens", 0),
+        "output_tokens": usage.get("completion_tokens", 0),
+    }
+    details = usage.get("prompt_tokens_details") or {}
+    cached = details.get("cached_tokens") or usage.get("cached_tokens") or 0
+    if cached:
+        usage_out["cache_read_input_tokens"] = cached
+    if usage.get("credit") is not None:
+        usage_out["credit"] = usage["credit"]
     return {
         "id": _rand_id("msg_"),
         "type": "message",
@@ -529,10 +550,7 @@ def chat_completion_to_anthropic_message(
         "content": content_blocks,
         "stop_reason": "tool_use" if message.get("tool_calls") else "end_turn",
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": (data.get("usage") or {}).get("prompt_tokens", 0),
-            "output_tokens": (data.get("usage") or {}).get("completion_tokens", 0),
-        },
+        "usage": usage_out,
     }
 
 

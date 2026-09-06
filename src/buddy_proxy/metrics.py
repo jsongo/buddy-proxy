@@ -39,7 +39,8 @@ def normalize_usage(u: dict[str, Any]) -> dict[str, Any]:
       cache_read_input_tokens，CodeBuddy 三处都有
     - credit：CodeBuddy usage 里的单次积分消耗（其他上游没有 → None）
     """
-    details = u.get("prompt_tokens_details") or {}
+    details = (u.get("prompt_tokens_details")
+               or u.get("input_tokens_details") or {})
     credit = u.get("credit")
     return {
         "prompt_tokens": int(u.get("prompt_tokens") or u.get("input_tokens") or 0),
@@ -85,6 +86,10 @@ class SSEUsageExtractor:
             u = payload.get("usage")
             if not isinstance(u, dict):
                 u = (payload.get("message") or {}).get("usage")
+            if not isinstance(u, dict):
+                # Responses 协议：response.completed 事件的 usage 在
+                # payload["response"]["usage"]
+                u = (payload.get("response") or {}).get("usage")
             if not isinstance(u, dict):
                 continue
             for k, v in normalize_usage(u).items():

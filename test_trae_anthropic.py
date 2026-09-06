@@ -274,6 +274,52 @@ def test_stream_converter_usage_includes_input_tokens():
     assert delta["usage"]["output_tokens"] == 8
 
 
+def test_stream_converter_usage_carries_credit_and_cache():
+    """CodeBuddy 上游 usage 里的 credit/cached_tokens 必须透传到 anthropic
+    流——否则 /v1/messages 的请求在 /ui 指标里记不到积分与缓存。"""
+    from buddy_proxy.metrics import SSEUsageExtractor
+
+    conv = AnthropicStreamConverter("glm-5.3-flash")
+    events = []
+    for chunk in (
+        {"choices": [{"delta": {"content": "答案"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 100, "completion_tokens": 8,
+                   "prompt_tokens_details": {"cached_tokens": 96},
+                   "credit": 1.24}},
+    ):
+        events.extend(conv.feed_chunk(chunk))
+    events.extend(conv.finish())
+
+    usage = [d for n, d in events if n == "message_delta"][0]["usage"]
+    assert usage["cache_read_input_tokens"] == 96
+    assert usage["credit"] == 1.24
+
+    # 指标层能从转出的 anthropic 事件流里提取到同一组数据
+    ex = SSEUsageExtractor()
+    for name, data in events:
+        ex.feed(f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode())
+    assert ex.usage["credit"] == 1.24
+    assert ex.usage["cached_tokens"] == 96
+    assert ex.usage["prompt_tokens"] == 100
+
+
+def test_nonstream_anthropic_message_carries_credit_and_cache():
+    """非流式 /v1/messages 同样要透传 credit 与缓存命中。"""
+    from buddy_proxy.anthropic_adapter import chat_completion_to_anthropic_message
+
+    msg = chat_completion_to_anthropic_message({
+        "model": "glm-5.3-flash",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 3,
+                  "prompt_tokens_details": {"cached_tokens": 48}, "credit": 0.6},
+    })
+    assert msg["usage"]["input_tokens"] == 50
+    assert msg["usage"]["cache_read_input_tokens"] == 48
+    assert msg["usage"]["credit"] == 0.6
+
+
 # ---------------------------------------------------------------------------
 # 集成测试：/v1/messages → trae provider
 # ---------------------------------------------------------------------------

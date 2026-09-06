@@ -468,6 +468,14 @@ class ResponsesStreamConverter:
             usage_out["input_tokens"] = self.usage.get("prompt_tokens", 0)
             usage_out["output_tokens"] = self.usage.get("completion_tokens", 0)
             usage_out["total_tokens"] = self.usage.get("total_tokens", 0)
+            # 缓存命中与积分透传（缓存填进标准 input_tokens_details；
+            # credit 为 CodeBuddy 扩展），metrics 层才记录得到
+            details = self.usage.get("prompt_tokens_details") or {}
+            usage_out["input_tokens_details"]["cached_tokens"] = (
+                details.get("cached_tokens")
+                or self.usage.get("cached_tokens") or 0)
+            if self.usage.get("credit") is not None:
+                usage_out["credit"] = self.usage["credit"]
 
         # 发出completed
         events.append(("response.completed", {

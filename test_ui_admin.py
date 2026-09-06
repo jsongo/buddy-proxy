@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -325,6 +326,37 @@ def test_normalize_usage_shapes():
                          "cache_read_input_tokens": 2})
     assert a == {"prompt_tokens": 8, "completion_tokens": 3,
                  "cached_tokens": 2, "credit": None}
+    # Responses API 形态：input_tokens_details.cached_tokens
+    r = normalize_usage({"input_tokens": 9, "output_tokens": 1,
+                         "input_tokens_details": {"cached_tokens": 7}, "credit": 0.3})
+    assert r["cached_tokens"] == 7 and r["credit"] == 0.3
+
+
+def test_responses_converter_carries_credit_and_cache():
+    """Responses 流式转换完成事件要带真实 cached_tokens 与 credit。"""
+    from buddy_proxy.responses_adapter import ResponsesStreamConverter
+
+    conv = ResponsesStreamConverter(model="glm-5.3-flash")
+    for chunk in (
+        {"choices": [{"delta": {"content": "hi"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 30, "completion_tokens": 4, "total_tokens": 34,
+                   "prompt_tokens_details": {"cached_tokens": 28}, "credit": 0.9}},
+    ):
+        conv.feed_chunk(chunk)
+    events = conv.finish()
+    completed = [d for n, d in events if n == "response.completed"][0]
+    usage = completed["response"]["usage"]
+    assert usage["input_tokens"] == 30
+    assert usage["input_tokens_details"]["cached_tokens"] == 28
+    assert usage["credit"] == 0.9
+
+    # 指标层能从转出的 responses 事件流里提取到同一组数据
+    ex = SSEUsageExtractor()
+    for name, data in events:
+        ex.feed(f"event: {name}\ndata: {json.dumps(data)}\n\n".encode())
+    assert ex.usage["credit"] == 0.9
+    assert ex.usage["cached_tokens"] == 28
 
 
 def test_trae_models_carry_credits():
