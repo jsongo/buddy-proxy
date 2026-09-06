@@ -315,9 +315,24 @@ class ZcodeProvider(BaseProvider):
             }
 
         client = await self._get_client()
-        req = client.build_request("POST", url, json=upstream_body, headers=headers)
+
+        async def _send():
+            req = client.build_request("POST", url, json=upstream_body, headers=headers)
+            return await client.send(req, stream=stream)
+
         try:
-            resp = await client.send(req, stream=stream)
+            try:
+                resp = await _send()
+            except httpx.RemoteProtocolError as exc:
+                # 上游偶发在返回任何响应字节前断连（Server disconnected）——
+                # 请求尚未被处理，原地重发一次是安全的；仍失败才对外报 502
+                log.warning("zcode upstream disconnected before response, retrying once: %s", exc)
+                try:
+                    resp = await _send()
+                except httpx.HTTPError as exc2:
+                    raise HTTPException(status_code=502, detail={
+                        "error": {"message": "zcode upstream error", "type": "bad_gateway"}}
+                    ) from exc2
         except httpx.TimeoutException as exc:
             log.warning("zcode upstream timeout: %s", exc)
             raise HTTPException(status_code=504, detail={

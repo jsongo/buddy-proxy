@@ -583,3 +583,36 @@ def test_lifespan_starts_and_stops_benefits_loop(tmp_path, monkeypatch):
     with TestClient(m.app):
         manager.start.assert_called_once()
     manager.stop.assert_called_once()
+
+
+def test_zcode_retries_transient_disconnect():
+    """上游在返回任何字节前断连 → 原地重发一次，成功即正常返回。"""
+    import asyncio
+    import httpx
+    from buddy_proxy.zcode_provider import ZcodeProvider
+
+    p = ZcodeProvider(api_key="k", base_url="https://open.bigmodel.cn/api/anthropic")
+    calls = {"n": 0}
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": "pong"}}]}
+
+    class FlakyClient:
+        def build_request(self, *a, **k):
+            return object()
+        async def send(self, req, stream=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+            return FakeResp()
+
+    async def fake_get_client():
+        return FlakyClient()
+    p._get_client = fake_get_client
+
+    resp = asyncio.run(p.forward({"model": "glm-5.3-flash",
+                                  "messages": [{"role": "user", "content": "hi"}]}, "openai"))
+    assert calls["n"] == 2
+    assert b"pong" in resp.body
