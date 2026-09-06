@@ -71,15 +71,40 @@ uv run python -m buddy_proxy --desensitize --doubao
 
 - **原理**：复用豆包工作 App 的登录态与内置 Chromium（CDP 直连），在页面 JS 环境 fetch
   自动注入 a_bogus 风控签名，无需扫码、无需额外凭证
-- **模型**：
-  - 经典通道：`doubao`（默认模型快速）、`doubao-pro`（旧别名）、`doubao-think`（深度思考）、
-    `doubao-expert`（专家）——服务端固定路由到当前默认豆包模型
-  - agent 通道（App 模型菜单同款，2026-09 实测）：`doubao-auto`（App「自动」）、
-    `doubao-2.1-turbo`、`doubao-2.1-pro`、`orange-5.0`、`gemini-3.7-flash`、`gpt-5.6-sol`；
-    请求体可带 `reasoning_effort`（3低/4中/5高/6极高/7最高，默认 5）
 - **依赖**：纯 Python 标准库，不需要 Playwright / chromium
-- **CDP 模式**：默认优先复用主 App（`open -a DoubaoWork --args --remote-debugging-port=9223`，
-  不杀用户进程）；主 App 不可用时回退独立 Helper
+
+#### 正确使用姿势（重要）
+
+豆包通道的本质是**代理替你操作本机豆包桌面 App**（DoubaoWork.app）——通过 Chrome 调试协议
+（CDP，端口 9223）连进 App 内置浏览器，以你的登录态发请求。因此有一条关键原则：
+
+> **让代理来拉起豆包，不要自己先打开豆包 App。**
+
+- 首次 doubao 请求（或在管理页对豆包模型点「测试」）时，代理会自动：以调试模式拉起豆包 →
+  连接内置浏览器 → 导航到聊天页 → 确认登录态，之后一直复用这条连接
+- 如果豆包**已经先被你打开了**（没带调试参数），代理无法给运行中的 App 追加启动参数，
+  首次请求会报 502：「豆包主 App 正在运行但未开启 CDP 调试端口」。这是刻意设计
+  （代理绝不强杀你正在使用的 App）
+
+#### 常见失败与恢复
+
+| 现象 | 原因 | 恢复 |
+| --- | --- | --- |
+| 502「豆包主 App 正在运行但未开启 CDP 调试端口」 | 豆包先于代理启动（或你手动开过豆包） | **完全退出豆包（Cmd+Q）→ 再点一次测试/重发请求**，代理会自动以正确参数拉起它 |
+| 豆包 App 升级/重启后请求开始报错 | CDP 连接已失效（代理内存里还标记为已连接） | 同上：退出豆包再重试；或 `buddy restart` 重启代理 |
+| 401「doubao not logged in」 | 豆包内登录态失效 | 打开豆包 App 重新扫码登录 → 重试 |
+| 报「请先完成豆包扫码登录」 | 首次使用尚未登录 | 代理拉起豆包后在 App 里登录，等几十秒自动就绪 |
+
+> 实测口诀：**豆包报错，先 Cmd+Q 退出豆包，再点一次测试**。90% 的豆包通道问题这一步就解决。
+
+#### 模型列表
+
+- 经典通道：`doubao`（默认模型快速）、`doubao-pro`（旧别名）、`doubao-think`（深度思考）、
+  `doubao-expert`（专家）——服务端固定路由到当前默认豆包模型，请求里的 model 字段会被忽略
+- agent 通道（App 模型菜单同款协议，真正按模型路由，2026-09 实测）：`doubao-auto`（App「自动」）、
+  `doubao-2.1-turbo`、`doubao-2.1-pro`（额度消耗更快）、`orange-5.0`（支持极高/最高推理强度）、
+  `gemini-3.7-flash`、`gpt-5.6-sol`（App 内提供的第三方模型）；
+  请求体可带 `reasoning_effort`（3低/4中/5高/6极高/7最高，默认 5）
 
 ### Trae Provider（可选）
 

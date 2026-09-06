@@ -127,6 +127,25 @@ The admin UI also lets you switch the **fallback provider** (used when a request
 
 Security: the `/ui/api/*` admin endpoints are **restricted to localhost (127.0.0.1)**. To manage the proxy from the LAN, set `BUDDY_PROXY_ADMIN_OPEN=1` (at your own risk). `/v1/*` proxy endpoints are unaffected.
 
+## Doubao provider (optional)
+
+A built-in provider that drives the local Doubao desktop app (DoubaoWork.app) via the Chrome DevTools Protocol — it reuses the app's own login state and injects risk-control signatures inside the page's JS context. Pure stdlib, no Playwright. Enable with `--doubao`.
+
+> **Key rule: let the proxy launch Doubao — don't open the app yourself first.**
+> On the first `doubao` request (or a "Test" click in the admin UI) the proxy automatically
+> starts the app with a CDP debug port (9223), connects to its embedded browser and reuses
+> your login. If Doubao is already running without that port, the proxy refuses to kill
+> your app and the first request fails with 502 "主 App 正在运行但未开启 CDP 调试端口" —
+> fully quit Doubao (Cmd+Q) and retry; the proxy then launches it correctly.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| 502 "…未开启 CDP 调试端口" | Doubao was started before the proxy | Quit Doubao (Cmd+Q) and retry — the proxy relaunches it |
+| requests fail after a Doubao update/restart | stale CDP connection | Quit Doubao and retry, or `buddy restart` |
+| 401 "doubao not logged in" | login expired | sign in inside the Doubao app, retry |
+
+Models: classic pipeline `doubao` / `doubao-think` / `doubao-expert` (the server routes to its default model — the `model` field is ignored) and agent pipeline `doubao-auto`, `doubao-2.1-turbo`, `doubao-2.1-pro`, `orange-5.0`, `gemini-3.7-flash`, `gpt-5.6-sol` (real per-model routing via the app's own model menu; optional `reasoning_effort` 3–7).
+
 ## Connect clients
 
 ### Codex CLI
