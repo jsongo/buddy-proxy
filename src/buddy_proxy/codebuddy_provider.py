@@ -13,12 +13,13 @@ import hashlib
 import json
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from buddy_proxy.credit_estimate import estimate_credit
 from buddy_proxy.dsml_parser import DSMLStreamBuffer
 from buddy_proxy.metrics import SSEUsageExtractor, normalize_usage
 from buddy_proxy.providers import BaseProvider
@@ -213,6 +214,59 @@ class CodeBuddyProvider(BaseProvider):
         items.extend(packs)
         return {"items": items, "level": "pro" if data.get("IsPaidUser") else "free"}
 
+    # ---- 计费流水（WorkBuddy web「使用记录」同源接口，2026-09-06 实测） ----
+
+    def usage_records(
+        self,
+        start: str = "",
+        end: str = "",
+        page_num: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """按请求粒度的积分消耗流水（/billing/meter/get-user-request-usage）。
+
+        端点来自 WorkBuddy web（/profile/plans-usage 页 XHR 反查）。与签到/
+        资源汇总同族：走 IDE 插件 Bearer 认证即可，**无需网页 cookie**；
+        copilot.tencent.com 与 www.workbuddy.cn 同路径均实测 200。
+
+        记录字段对应网页「使用记录」列：credit=实扣积分、model、client、
+        requestTime、input（prompt 原文/截断）、requestId（crb-…）。
+        start/end 格式 "YYYY-MM-DD HH:MM:SS"，缺省为最近 7 天。
+
+        用途预留：管理页消费流水视图；或按 requestTime/model 把流水 credit
+        回填 metrics，对上游 usage 缺失实扣的请求做对账。
+        """
+        state = get_state()
+        state.ensure_auth()
+        if not end:
+            end = time.strftime("%Y-%m-%d %H:%M:%S")
+        if not start:
+            start = time.strftime("%Y-%m-%d %H:%M:%S",
+                                  time.localtime(time.time() - 7 * 86400))
+        body = {
+            "startTime": start,
+            "endTime": end,
+            "pageNum": max(1, int(page_num)),
+            "pageSize": min(100, max(1, int(page_size))),
+        }
+        payload = state.client.api_post("/billing/meter/get-user-request-usage", body)
+        if payload.get("code") not in (0, None):
+            raise RuntimeError(payload.get("msg") or f"code={payload.get('code')}")
+        data = payload.get("data") or {}
+        records = []
+        for r in data.get("data") or []:
+            if not isinstance(r, dict):
+                continue
+            records.append({
+                "request_id": r.get("requestId"),
+                "credit": r.get("credit"),
+                "model": r.get("model"),
+                "client": r.get("client"),
+                "request_time": r.get("requestTime"),
+                "input": (r.get("inputTrunc") or r.get("input") or "")[:200],
+            })
+        return {"total": data.get("total") or len(records), "records": records}
+
     async def forward(
         self,
         body: dict[str, Any],
@@ -277,6 +331,19 @@ def _exc_text(detail: Any) -> str:
     return str(detail)[:300]
 
 
+def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any]) -> tuple[Optional[float], bool]:
+    """上游 usage 带实扣积分就用实扣；否则按 token 粗估（当前仅 trae 有倍率表）。
+
+    返回 (credit, credit_estimated)；估算失败/无 token 数据时为 (None, False)。
+    """
+    if norm.get("credit") is not None:
+        return norm["credit"], False
+    est = estimate_credit(provider_id, model_id,
+                          norm.get("prompt_tokens"), norm.get("completion_tokens"),
+                          norm.get("cached_tokens"))
+    return (est, True) if est is not None else (None, False)
+
+
 async def _instrument(
     state: Any,
     coro,
@@ -327,13 +394,15 @@ async def _instrument(
         pass
     norm = normalize_usage(usage) if usage else {
         "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "credit": None}
+    credit, credit_estimated = _credit_or_estimate(provider_id, model_id, norm)
     metrics.record(
         provider=provider_id, model=model_id, protocol=protocol,
         status=resp.status_code, duration_ms=_elapsed_ms(started),
         prompt_tokens=norm["prompt_tokens"],
         completion_tokens=norm["completion_tokens"],
         cached_tokens=norm["cached_tokens"],
-        credit=norm["credit"],
+        credit=credit,
+        credit_estimated=credit_estimated,
         error=error,
     )
     return resp
@@ -358,6 +427,7 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
         raise
     finally:
         u = extractor.usage
+        credit, credit_estimated = _credit_or_estimate(provider_id, model_id, u)
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=500 if error else 200, duration_ms=_elapsed_ms(started),
                        stream=True, chunk_count=chunk_count, error=error,
@@ -365,7 +435,8 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
                        prompt_tokens=u.get("prompt_tokens", 0),
                        completion_tokens=u.get("completion_tokens", 0),
                        cached_tokens=u.get("cached_tokens", 0),
-                       credit=u.get("credit"))
+                       credit=credit,
+                       credit_estimated=credit_estimated)
 
 
 async def forward_chat(

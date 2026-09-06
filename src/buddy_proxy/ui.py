@@ -243,6 +243,37 @@ async def ui_checkin(request: Request):
     return await manager.claim_now(provider_id)
 
 
+@app.get("/ui/api/codebuddy/usage-records")
+async def ui_codebuddy_usage_records(
+    request: Request, days: int = 7, page: int = 1, page_size: int = 20
+):
+    """CodeBuddy 按请求积分消耗流水（WorkBuddy「使用记录」同源，实扣口径）。
+
+    暂无 UI 消费方，先以管理接口形式备用（curl 即可查），参数：
+    days（默认 7）、page、page_size（≤100）。
+    """
+    _ensure_local(request)
+    state = get_state()
+    provider = (getattr(state, "providers", {}) or {}).get("codebuddy")
+    if provider is None:
+        # 未显式启用 codebuddy 通道时回退默认实例（与 BenefitsManager 同口径）
+        from buddy_proxy.codebuddy_provider import _default_codebuddy
+        provider = _default_codebuddy
+
+    def _fetch():
+        end = time.strftime("%Y-%m-%d %H:%M:%S")
+        start = time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime(time.time() - days * 86400))
+        return provider.usage_records(start, end, page_num=page, page_size=page_size)
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"error": {"message": str(exc)[:300]}})
+
+
 # 自动打卡后台循环随应用启停（uvicorn 生命周期）。
 # 启动失败只记日志，不阻断代理本身。
 async def _start_benefits_loop() -> None:
@@ -609,7 +640,7 @@ _PAGE_HTML = r"""<!DOCTYPE html>
     <h2>最近请求 <span class="sub">最多 50 条，进程内滚动；TTFT 为首 token 延迟（流式）</span></h2>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>
-        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（目前仅 CodeBuddy 在 usage 里返回）；灰标签 = 该模型积分倍率（非实际消耗）；其余上游（trae/zcode/豆包）不提供单次消耗">积分</th><th>状态</th></tr></thead>
+        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 粗估（trae：(输入+输出)/1M × 100 × 模型倍率，非实扣）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
         <tbody id="recent"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
@@ -1100,7 +1131,10 @@ function renderRecent() {
       <td class="num mono">${r.ttft_ms != null ? ttft : '—'}</td>
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
-      <td class="num mono">${r.credit != null ? `<b style="color:var(--ok)" title="上游实扣积分">${r.credit}</b>` : (creditTxt ? `<span class="tag" title="仅倍率参考（×基准单价），非本次实际消耗；${esc(r.provider)} 不提供单次消耗">${esc(creditTxt)}</span>` : '<span class="muted" title="该上游未提供单次积分消耗">—</span>')}</td>
+      <td class="num mono">${r.credit != null ? (r.credit_estimated
+          ? `<b style="color:var(--ok)" title="按 token 粗估：(输入+输出)/1M × 100 × 模型倍率；与真实扣费可能有偏差（会话首请求实测偏高约 2~3 倍）">≈${r.credit}</b>`
+          : `<b style="color:var(--ok)" title="上游实扣积分">${r.credit}</b>`)
+        : (creditTxt ? `<span class="tag" title="仅倍率参考（×基准单价），非本次实际消耗；${esc(r.provider)} 不提供单次消耗">${esc(creditTxt)}</span>` : '<span class="muted" title="该上游未提供单次积分消耗">—</span>')}</td>
       <td>${bad ? `<span class="tag bad" title="${esc(r.error || '')}">${r.status || 'ERR'}</span>` : '<span class="tag ok">OK</span>'}</td>
     </tr>`;
   }).join('');

@@ -128,6 +128,7 @@ class MetricsCollector:
         ttft_ms: Optional[int] = None,
         cached_tokens: int = 0,
         credit: Optional[float] = None,
+        credit_estimated: bool = False,
     ) -> None:
         ts = time.time()
         rec = {
@@ -143,6 +144,7 @@ class MetricsCollector:
             "completion_tokens": int(completion_tokens or 0),
             "cached_tokens": int(cached_tokens or 0),
             "credit": credit,
+            "credit_estimated": bool(credit_estimated),
             "chunk_count": int(chunk_count or 0),
             "error": (error or "")[:300],
         }
