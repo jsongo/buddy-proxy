@@ -600,7 +600,7 @@ _PAGE_HTML = r"""<!DOCTYPE html>
     <h2>最近请求 <span class="sub">最多 50 条，进程内滚动；TTFT 为首 token 延迟（流式）</span></h2>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>
-        <thead><tr><th>时间</th><th>通道 · 模型</th><th>协议</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num">积分</th><th>状态</th></tr></thead>
+        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num">积分</th><th>状态</th></tr></thead>
         <tbody id="recent"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
@@ -1032,8 +1032,8 @@ function renderRecent() {
                     : cmap[r.model] ? cmap[r.model] : null;
     return `<tr>
       <td class="mono muted">${fmtTime(r.ts)}</td>
-      <td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i><span class="mono">${esc(r.model)}</span></td>
-      <td class="muted" style="font-size:12px">${esc(r.protocol || '')}${r.stream ? ' ⚡' : ''}</td>
+      <td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i><span class="mono muted">${esc(r.provider)}</span></td>
+      <td class="mono">${esc(r.model)}</td>
       <td class="num mono">${r.ttft_ms != null ? ttft : '—'}</td>
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
