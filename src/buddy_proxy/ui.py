@@ -555,6 +555,11 @@ _PAGE_HTML = r"""<!DOCTYPE html>
          color: var(--muted); border: 1px solid var(--line); }
   .tag.ok { color: var(--ok); border-color: rgba(62,207,142,.35); }
   .tag.bad { color: var(--err); border-color: rgba(255,107,107,.35); }
+  .pager { display: flex; align-items: center; gap: 6px; margin: 10px 4px 4px;
+           font-size: 12px; flex-wrap: wrap; }
+  .pager button { padding: 2px 9px; min-width: 28px; }
+  .pager select { background: var(--card2); border: 1px solid var(--line); color: var(--text);
+                  border-radius: 8px; padding: 3px 6px; font-size: 12px; cursor: pointer; }
   .badge-default { font-size: 11px; color: var(--ok); border: 1px solid rgba(62,207,142,.4);
                    padding: 1px 8px; border-radius: 6px; white-space: nowrap; }
   .bar-wrap { background: var(--bg); border-radius: 4px; height: 8px; overflow: hidden; min-width: 70px; }
@@ -643,12 +648,16 @@ _PAGE_HTML = r"""<!DOCTYPE html>
       <div class="chart-card"><div id="chart-models"></div></div>
     </div>
 
-    <h2>最近请求 <span class="sub">最多 50 条，进程内滚动；TTFT 为首 token 延迟（流式）</span></h2>
+    <h2>模型平均耗时 <span class="sub" id="latency-sub">同一模型各通道并列对比（点图例可只看某通道）</span></h2>
+    <div class="chart-card"><div id="chart-latency"></div><div class="legend" id="legend-latency"></div></div>
+
+    <h2>最近请求 <span class="sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>
         <thead><tr><th>时间</th><th>通道</th><th>模型</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 粗估（trae：(输入+输出)/1M × 100 × 模型倍率，非实扣）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
         <tbody id="recent"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
       </table>
+      <div class="pager" id="recent-pager"></div>
     </div>
   </section>
 
@@ -778,7 +787,7 @@ function render() {
     else { cb.textContent = `未签 ${pending.length}`; cb.className = 'cnt warn'; }
   } else { cb.textContent = ''; }
 
-  renderDaily(); renderModelBars(); renderBenefits(); renderGroups(); renderRecent();
+  renderDaily(); renderModelBars(); renderLatency(); renderBenefits(); renderGroups(); renderRecent();
 }
 
 // 吸顶偏移：应用顶栏 + 通道条高度（动态测量，写进 CSS 变量供 sticky 使用）
@@ -1021,6 +1030,95 @@ function renderModelBars() {
     </div>`).join('');
 }
 
+// ---- 模型平均耗时对比：同一模型在各通道的分组柱状图（纯 SVG）----
+// LATENCY_PROV = null → 各通道柱子并列；否则只看该通道
+let LATENCY_PROV = null;
+function renderLatency() {
+  const models = STATS.models || [];
+  const el = document.getElementById('chart-latency');
+  if (!models.length) {
+    el.innerHTML = '<div class="empty">暂无请求数据</div>';
+    document.getElementById('legend-latency').innerHTML = '';
+    return;
+  }
+  const providers = [...new Set(models.map(m => m.provider))];
+  // 数据刷新后所选通道可能已无请求，自动退回“全部”
+  if (LATENCY_PROV && !providers.includes(LATENCY_PROV)) LATENCY_PROV = null;
+  const filt = LATENCY_PROV;
+  // 按模型聚合跨通道数据，取请求量前 8（与模型 Top10 口径一致）
+  const byModel = new Map();
+  for (const m of models) {
+    const e = byModel.get(m.model) || { total: 0, provs: {} };
+    e.total += m.count;
+    e.provs[m.provider] = m;
+    byModel.set(m.model, e);
+  }
+  const top = [...byModel.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 8);
+  const W = 520, H = 190, padL = 40, padB = 24, padT = 15;
+  const base = H - padB;
+  const valOf = e => filt
+    ? (e.provs[filt] ? e.provs[filt].avg_ms : 0)
+    : Math.max(...providers.map(p => (e.provs[p] || {}).avg_ms || 0));
+  const max = Math.max(1, ...top.map(([, e]) => valOf(e)));
+  const slot = top.length ? (W - padL - 8) / top.length : 1;
+  const scale = (base - padT) / max;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
+  for (let i = 0; i <= 4; i++) {
+    const y = base - (base - padT) * i / 4;
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="#262f3c" stroke-width="1"/>` +
+           `<text x="${padL-6}" y="${y+4}" fill="#8b96a5" font-size="10" text-anchor="end">${fmtMs(Math.round(max * i / 4))}</text>`;
+  }
+  top.forEach(([name, e], i) => {
+    const x0 = padL + i * slot;
+    const show = filt ? [filt] : providers.filter(p => e.provs[p]);
+    const n = show.length;
+    const inner = slot - 12;
+    const bw = Math.min(30, Math.max(4, (inner - (n - 1) * 3) / n));
+    const xStart = x0 + (slot - (n * bw + (n - 1) * 3)) / 2;
+    // 组内最慢的通道标数值（跨通道对比的关注点）；单通道时每根都标
+    let slowest = null;
+    for (const p of show) {
+      const m = e.provs[p];
+      if (m && (!slowest || m.avg_ms > slowest.avg_ms)) slowest = m;
+    }
+    show.forEach((p, k) => {
+      const m = e.provs[p];
+      if (!m) return;
+      const h = Math.max(0, m.avg_ms * scale);
+      const x = xStart + k * (bw + 3);
+      const y = base - h;
+      svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${pcolor(p)}" rx="2">` +
+             `<title>${esc(p + '/' + name)} · ${m.count} 次 · 平均 ${fmtMs(m.avg_ms)}</title></rect>`;
+      if (n === 1 || m === slowest)
+        svg += `<text x="${x + bw/2}" y="${Math.max(padT + 7, y - 3)}" fill="#dbe4ee" font-size="9" text-anchor="middle">${fmtMs(m.avg_ms)}</text>`;
+    });
+    const lbl = name.length > 10 ? name.slice(0, 9) + '…' : name;
+    svg += `<text x="${x0 + slot/2}" y="${H - 6}" fill="#8b96a5" font-size="9.5" text-anchor="middle">${esc(lbl)}<title>${esc(name)}</title></text>`;
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+
+  // 图例（可点选）：全部 + 各通道
+  const items = [`<span class="legend-item${filt ? '' : ' active'}" data-prov="" title="点击显示所有通道分组">全部</span>`]
+    .concat(providers.map(p =>
+      `<span class="legend-item${filt === p ? ' active' : ''}" data-prov="${esc(p)}" title="只显示 ${esc(p)}">
+         <i style="background:${pcolor(p)}"></i>${esc(p)}</span>`));
+  document.getElementById('legend-latency').innerHTML = items.join('');
+  document.getElementById('latency-sub').textContent = filt
+    ? `仅 ${filt} · 全窗口平均耗时`
+    : '同一模型各通道并列对比（点图例可只看某通道）';
+}
+// 图例点选：点某通道只看它；再点一次或点「全部」回到并列视图
+ document.getElementById('legend-latency').addEventListener('click', e => {
+  const item = e.target.closest('.legend-item');
+  if (!item) return;
+  const p = item.dataset.prov; // '' = 全部
+  const next = (p === '') ? null : p;
+  LATENCY_PROV = (LATENCY_PROV === next && next !== null) ? null : next;
+  renderLatency();
+});
+
 // ---- 模型分组表 ----
 // 分组折叠状态（localStorage 持久化；30s 自动刷新重渲染后仍保持）
 let COLLAPSED = new Set();
@@ -1158,12 +1256,41 @@ function renderGroups() {
   refreshStickyVars();
 }
 
+let RECENT_PAGE = 1, RECENT_SIZE = 20;
+
+function recentGo(p) { RECENT_PAGE = p; renderRecent(); }
+function recentSize(v) { RECENT_SIZE = +v; RECENT_PAGE = 1; renderRecent(); }
+
+// 页码序列：首尾常驻，当前页 ±1，间隔以 '…' 占位
+function recentPages(cur, total) {
+  const wanted = new Set([1, total, cur - 1, cur, cur + 1]);
+  const pages = [...wanted].filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
+  const out = [];
+  let prev = 0;
+  for (const p of pages) {
+    if (p - prev > 1) out.push('…');
+    out.push(p);
+    prev = p;
+  }
+  return out;
+}
+
 function renderRecent() {
   const rows = STATS.recent || [];
   const el = document.getElementById('recent');
-  if (!rows.length) { el.innerHTML = '<tr><td colspan="8" class="empty">还没有请求记录</td></tr>'; return; }
+  const pager = document.getElementById('recent-pager');
+  if (!rows.length) {
+    el.innerHTML = '<tr><td colspan="8" class="empty">还没有请求记录</td></tr>';
+    pager.innerHTML = '';
+    return;
+  }
+  const pages = Math.max(1, Math.ceil(rows.length / RECENT_SIZE));
+  // 数据刷新后总页数可能收缩（如清空后重启），收敛当前页到合法区间
+  if (RECENT_PAGE > pages) RECENT_PAGE = pages;
+  if (RECENT_PAGE < 1) RECENT_PAGE = 1;
+  const start = (RECENT_PAGE - 1) * RECENT_SIZE;
   const cmap = STATS.credits_map || {};
-  el.innerHTML = rows.slice(0, 50).map(r => {
+  el.innerHTML = rows.slice(start, start + RECENT_SIZE).map(r => {
     const bad = (r.status >= 400 || r.error);
     const ttft = r.ttft_ms != null ? fmtMs(r.ttft_ms) : '—';
     const hasTok = (r.prompt_tokens || r.completion_tokens || r.cached_tokens);
@@ -1189,6 +1316,21 @@ function renderRecent() {
       <td>${bad ? `<span class="tag bad" title="${esc(r.error || '')}">${r.status || 'ERR'}</span>` : '<span class="tag ok">OK</span>'}</td>
     </tr>`;
   }).join('');
+  const nav = (label, page, disabled) =>
+    `<button class="ghost" ${disabled ? 'disabled' : ''} onclick="recentGo(${page})">${label}</button>`;
+  pager.innerHTML =
+    `<span class="muted">共 ${rows.length} 条</span>` +
+    `<select title="每页条数" onchange="recentSize(this.value)">` +
+      [20, 50, 100].map(n => `<option value="${n}" ${n === RECENT_SIZE ? 'selected' : ''}>${n} 条/页</option>`).join('') +
+    `</select>` +
+    `<span class="spacer"></span>` +
+    nav('«', 1, RECENT_PAGE === 1) +
+    nav('‹', RECENT_PAGE - 1, RECENT_PAGE === 1) +
+    recentPages(RECENT_PAGE, pages).map(p => p === '…'
+      ? '<span class="muted">…</span>'
+      : `<button class="${p === RECENT_PAGE ? 'primary' : 'ghost'}" onclick="recentGo(${p})">${p}</button>`).join('') +
+    nav('›', RECENT_PAGE + 1, RECENT_PAGE === pages) +
+    nav('»', pages, RECENT_PAGE === pages);
 }
 
 // ---- 操作 ----

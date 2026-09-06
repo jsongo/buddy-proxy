@@ -5,7 +5,8 @@
 
 - 内存里按 ``(日期, provider, model)`` 聚合（请求数 / 错误数 / 耗时 / token），
   另保留最近 N 条明细供「最近请求」表格展示；
-- 同时追加一行 JSON 到 ``logs/metrics.jsonl``，重启后回读文件尾部恢复聚合，
+- 同时追加一行 JSON 到 ``logs/metrics.jsonl``，按天滚动归档（保留 KEEP_DAYS 天，
+  与其他日志同口径）；重启后回读昨日归档 + 当前文件尾部恢复聚合，
   保证图表跨重启不丢历史。
 """
 
@@ -116,6 +117,8 @@ class MetricsCollector:
         # (date, provider, model) -> 聚合桶
         self._daily: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._recent: collections.deque = collections.deque(maxlen=MAX_RECENT)
+        # 当前写入文件所属日期（跨天首次写入时触发滚动归档）
+        self._rot_date = _date_str(time.time())
         self._load_tail()
 
     # ------------------------------------------------------------------
@@ -189,11 +192,51 @@ class MetricsCollector:
         b["completion_tokens"] += rec["completion_tokens"]
         b["last_ts"] = max(b["last_ts"], rec.get("ts", 0))
 
+    def _dated_name(self, date: str) -> pathlib.Path:
+        """归档文件路径：metrics.jsonl -> metrics.jsonl.YYYY-MM-DD。"""
+        return self.log_path.parent / (self.log_path.name + "." + date)
+
+    def _rotate(self, today: str) -> None:
+        """跨天滚动（与其他日志同口径：按天分片，保留 KEEP_DAYS 天）。
+
+        昨日数据改名归档；顺带清理超期归档。写入前调用，每天至多触发一次。
+        """
+        prev_date = self._rot_date
+        self._rot_date = today
+        try:
+            if self.log_path.exists() and self.log_path.stat().st_size > 0:
+                target = self._dated_name(prev_date)
+                if target.exists():
+                    # 同名归档已存在（时钟回拨等同日二次滚动）：并入而非覆盖，避免丢数据
+                    with open(self.log_path, encoding="utf-8") as src, \
+                            open(target, "a", encoding="utf-8") as dst:
+                        dst.write(src.read())
+                    self.log_path.unlink()
+                else:
+                    os.replace(self.log_path, target)
+        except OSError:
+            pass
+        cutoff = time.time() - KEEP_DAYS * 86400
+        for p in self.log_path.parent.glob(self.log_path.name + ".*"):
+            suffix = p.name[len(self.log_path.name) + 1:]
+            try:
+                ts = time.mktime(time.strptime(suffix, "%Y-%m-%d"))
+            except ValueError:
+                continue  # 非日期后缀的文件不动
+            if ts < cutoff:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
     def _append_log(self, rec: dict[str, Any]) -> None:
         if self.log_path is None:
             return
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            today = _date_str(time.time())
+            if self._rot_date != today:
+                self._rotate(today)
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception:
@@ -203,40 +246,53 @@ class MetricsCollector:
     # 启动恢复：回读文件尾部
     # ------------------------------------------------------------------
 
-    def _load_tail(self) -> None:
-        if self.log_path is None or not self.log_path.exists():
-            return
+    def _read_tail(self, path: pathlib.Path) -> list[dict[str, Any]]:
+        """回读单个文件尾部（最多 _TAIL_BYTES 字节）的 JSONL 记录。"""
+        if not path.exists():
+            return []
         try:
-            with open(self.log_path, "rb") as f:
+            with open(path, "rb") as f:
                 f.seek(0, os.SEEK_END)
                 size = f.tell()
                 f.seek(max(0, size - _TAIL_BYTES))
                 blob = f.read().decode("utf-8", errors="replace")
         except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for line in blob.splitlines()[1 if size > _TAIL_BYTES else 0:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
+
+    def _load_tail(self) -> None:
+        if self.log_path is None:
             return
+        # 昨日归档 + 当前文件都读：跨天滚动后，最近记录可能分布在两个文件
+        yesterday = self._dated_name(_date_str(time.time() - 86400))
         cutoff = time.time() - KEEP_DAYS * 86400
         with self._lock:
-            for line in blob.splitlines()[1 if size > _TAIL_BYTES else 0:]:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(rec, dict) or rec.get("ts", 0) < cutoff:
-                    continue
-                self._recent.append(rec)
-                self._bucket_add(
-                    self._bucket(_date_str(rec["ts"]), rec.get("provider", ""), rec.get("model", "")),
-                    {
-                        "status": rec.get("status", 200),
-                        "duration_ms": rec.get("duration_ms", 0),
-                        "prompt_tokens": rec.get("prompt_tokens", 0),
-                        "completion_tokens": rec.get("completion_tokens", 0),
-                        "error": rec.get("error", ""),
-                    },
-                )
+            for path in (yesterday, self.log_path):
+                for rec in self._read_tail(path):
+                    if rec.get("ts", 0) < cutoff:
+                        continue
+                    self._recent.append(rec)
+                    self._bucket_add(
+                        self._bucket(_date_str(rec["ts"]), rec.get("provider", ""), rec.get("model", "")),
+                        {
+                            "status": rec.get("status", 200),
+                            "duration_ms": rec.get("duration_ms", 0),
+                            "prompt_tokens": rec.get("prompt_tokens", 0),
+                            "completion_tokens": rec.get("completion_tokens", 0),
+                            "error": rec.get("error", ""),
+                        },
+                    )
 
     # ------------------------------------------------------------------
     # 查询（/ui/api/stats）
@@ -297,7 +353,7 @@ class MetricsCollector:
 
         # ---- 24h 汇总 + 最近请求 ----
         # 口径限制：24h 汇总基于 recent deque（上限 MAX_RECENT 条）。24h 内请求
-        # 超过上限时会少算——「最近请求」表格同理只展示最近 50 条。对单机自用
+        # 超过上限时会少算——「最近请求」表格同样只基于这 MAX_RECENT 条。对单机自用
         # 够用；如需精确按小时分桶，需要额外状态，暂不做。
         total_24h = errors_24h = 0
         dur_sum_24h = 0
@@ -311,7 +367,7 @@ class MetricsCollector:
         return {
             "models": models,
             "daily": day_list,
-            "recent": list(reversed(recent[-50:])),
+            "recent": list(reversed(recent)),
             "summary": {
                 "total_24h": total_24h,
                 "errors_24h": errors_24h,

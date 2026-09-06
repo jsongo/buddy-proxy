@@ -129,6 +129,8 @@ class DoubaoProvider(BaseProvider):
         self._started = False
         # 防止并发首请求双重启动（双开 Helper / 重复连接 CDP）
         self._start_lock = asyncio.Lock()
+        # /api/agent/doubao 任务接口的默认会话（缺省续聊最近一次会话）
+        self._agent_session: str | None = None
 
     # ------------------------------------------------------------------
     # BaseProvider 接口
@@ -494,6 +496,137 @@ class DoubaoProvider(BaseProvider):
         """等待用户扫码登录（供管理端/CLI 调用）。"""
         await self._ensure_started()
         return await self._client.wait_for_login(timeout=timeout)
+
+    # ------------------------------------------------------------------
+    # 一次性 agent 任务接口（POST /api/agent/doubao）
+    # ------------------------------------------------------------------
+
+    async def ensure_ready(self) -> None:
+        """惰性启动 + 就绪检查；失败抛 HTTPException（消息含可操作提示）。"""
+        await self._ensure_started()
+        if not self._client.is_ready:
+            raise HTTPException(
+                status_code=401,
+                detail="doubao not logged in - 请先完成豆包扫码登录",
+            )
+
+    def resolve_agent_model(self, model: str | None) -> tuple[str, dict[str, Any]]:
+        """校验任务接口的模型（只走 agent 管线），返回 (model, model_spec)。"""
+        name = (model or "doubao-auto").strip()
+        spec = _DOUBAO_CHAT_MODELS.get(name)
+        if spec is None or "agent" not in spec:
+            raise HTTPException(
+                status_code=400,
+                detail="model '%s' 不是豆包 agent 管线模型，可选: %s" % (
+                    name,
+                    ", ".join(m for m, s in _DOUBAO_CHAT_MODELS.items() if "agent" in s),
+                ),
+            )
+        model_spec = dict(spec["agent"])
+        model_spec.setdefault("reasoning_effort", _DEFAULT_REASONING_EFFORT)
+        return name, model_spec
+
+    async def stream_agent_task(
+        self,
+        task: str,
+        session_id: str | None,
+        model: str,
+        model_spec: dict[str, Any],
+    ) -> AsyncIterator[str]:
+        """一次性 agent 任务：任务文本发给豆包工作（agent 管线，不自定义
+        system prompt，直接用豆包自己的工具），流式回传简易 SSE 事件。
+
+        会话语义：session_id 显式指定时续聊该会话（"new"/空串 = 强制新建）；
+        缺省续聊进程内默认会话（即最近一次任务用的会话，首次自动新建）。
+
+        事件协议（每行 ``data: <JSON>``）：
+        - ``{"type":"start","model":...,"session_id":...}``  首事件（session_id 为本次续聊的会话，新建时 null）
+        - ``{"type":"session","session_id":"..."}``          从上游拿到 conversation_id 后发一次
+        - ``{"type":"delta","text":"..."}``                  正文增量
+        - ``{"type":"reasoning","text":"..."}``              思考链增量（可能不出现）
+        - ``{"type":"error","message":"..."}``               出错（流终止）
+        - ``{"type":"done","session_id":"..."}``             结束；session_id 供客户端下次续聊
+        """
+        def _evt(payload: dict[str, Any]) -> str:
+            return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        conv = self._agent_session
+        if session_id is not None:
+            s = str(session_id).strip()
+            conv = None if s.lower() in ("", "new") else s
+        result_conv = conv
+        yield _evt({"type": "start", "model": model, "session_id": conv})
+
+        thinking_count = 0
+        in_thinking = False
+
+        def _iter_blocks(data: dict[str, Any]):
+            for patch in data.get("patch_op", []):
+                pv = patch.get("patch_value", {})
+                yield from pv.get("content_block", [])
+            dc = data.get("content", {})
+            if isinstance(dc, dict):
+                yield from dc.get("content_block", [])
+
+        try:
+            async for event in self._client.chat_completion(
+                task,
+                conversation_id=conv,
+                model_spec=model_spec,
+            ):
+                if event.get("error"):
+                    status = event.get("status", 0)
+                    body_text = event.get("body", "")
+                    log.error("doubao agent task upstream error %s: %s", status, body_text[:200])
+                    self._client.record_failure(status or 0)
+                    yield _evt({"type": "error",
+                                "message": f"上游 HTTP {status}: {body_text[:300]}"})
+                    return
+
+                if not result_conv:
+                    cid = self._client.extract_conversation_id(event)
+                    if cid and cid != "0":
+                        result_conv = cid
+                        yield _evt({"type": "session", "session_id": cid})
+
+                event_type = event.get("_event", "")
+                if event_type == "STREAM_ERROR" or event.get("error_code"):
+                    code = event.get("error_code", 0)
+                    msg = event.get("error_msg", "unknown error")
+                    self._client.record_failure(code)
+                    yield _evt({"type": "error", "message": f"code={code}: {msg}"})
+                    return
+
+                if (
+                    event_type == "CHUNK_DELTA"
+                    and isinstance(event.get("text"), str)
+                    and event["text"]
+                ):
+                    yield _evt({"type": "reasoning" if in_thinking else "delta",
+                                "text": event["text"]})
+                    continue
+
+                for cb in _iter_blocks(event):
+                    bt = cb.get("block_type", 0)
+                    if bt == 10040:
+                        thinking_count += 1
+                        in_thinking = thinking_count == 1
+                    elif bt == 10000:
+                        tb = cb.get("content", {}).get("text_block", {})
+                        if isinstance(tb, dict) and tb.get("text"):
+                            yield _evt({"type": "reasoning" if in_thinking else "delta",
+                                        "text": tb["text"]})
+        except Exception as exc:
+            log.error("doubao agent task error: %s", exc)
+            self._client.record_failure(0)
+            yield _evt({"type": "error", "message": str(exc)})
+            return
+
+        self._client.record_success()
+        if result_conv:
+            # 默认会话跟随最近一次任务用的会话，下次缺省 session_id 时续聊
+            self._agent_session = result_conv
+        yield _evt({"type": "done", "session_id": result_conv})
 
     @property
     def page_url(self) -> str:

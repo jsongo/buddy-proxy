@@ -32,6 +32,7 @@ import base64
 import json
 import logging
 import os
+import pathlib
 import socket
 import struct
 import subprocess
@@ -51,6 +52,17 @@ HELPER_BIN = (
 
 DEFAULT_BOT_ID = "7338286299411103781"
 DEFAULT_PORT = 9223
+
+
+def _main_app_installed() -> bool:
+    """豆包工作主 App 是否已安装（常见位置）。"""
+    for p in (
+        pathlib.Path("/Applications/DoubaoWork.app"),
+        pathlib.Path.home() / "Applications" / "DoubaoWork.app",
+    ):
+        if p.exists():
+            return True
+    return False
 
 # 一方模型 -> use_deep_think（与 doubao_provider._DOUBAO_CHAT_MODELS 对齐）
 # 这里只保留常量，模型表仍由 DoubaoProvider 维护。
@@ -250,6 +262,13 @@ class CDPDoubaoClient:
             return
 
         # 2) 尝试拉起主 App（不杀进程；主 App 自带 saman-from-chat 开 CDP）
+        # App 未安装时 Helper（在 App bundle 内）必然也缺失，提前给出可操作
+        # 提示，而不是白等 30s 后抛难以理解的 FileNotFoundError。
+        if not _main_app_installed():
+            raise RuntimeError(
+                "未检测到豆包工作 App（DoubaoWork.app 不存在）。"
+                "请先安装豆包工作并完成登录后重试。"
+            )
         try:
             await asyncio.to_thread(
                 subprocess.run,
