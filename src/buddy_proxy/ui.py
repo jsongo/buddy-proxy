@@ -648,7 +648,7 @@ _PAGE_HTML = r"""<!DOCTYPE html>
       <div class="chart-card"><div id="chart-models"></div></div>
     </div>
 
-    <h2>模型平均耗时 <span class="sub" id="latency-sub">同一模型各通道并列对比（点图例可只看某通道）</span></h2>
+    <h2>模型平均耗时 <span class="sub" id="latency-sub">各通道下模型并列对比（点下方图例可只看某模型）</span></h2>
     <div class="chart-card"><div id="chart-latency"></div><div class="legend" id="legend-latency"></div></div>
 
     <h2>最近请求 <span class="sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
@@ -1031,20 +1031,20 @@ function renderModelBars() {
 }
 
 // ---- 模型平均耗时对比：同一模型在各通道的分组柱状图（纯 SVG）----
-// LATENCY_PROV = null → 各通道柱子并列；否则只看该通道
-let LATENCY_PROV = null;
+// 模型平均耗时图：x 轴为通道，柱为各模型；LATENCY_MODEL = null → 各模型并列，否则只看该模型
+let LATENCY_MODEL = null;
+// renderLatency 产出的视图数据（供 mousemove tooltip 读取）
+let LATENCY_DATA = null;
 function renderLatency() {
   const models = STATS.models || [];
   const el = document.getElementById('chart-latency');
   if (!models.length) {
     el.innerHTML = '<div class="empty">暂无请求数据</div>';
     document.getElementById('legend-latency').innerHTML = '';
+    LATENCY_DATA = null;
     return;
   }
   const providers = [...new Set(models.map(m => m.provider))];
-  // 数据刷新后所选通道可能已无请求，自动退回“全部”
-  if (LATENCY_PROV && !providers.includes(LATENCY_PROV)) LATENCY_PROV = null;
-  const filt = LATENCY_PROV;
   // 按模型聚合跨通道数据，取请求量前 8（与模型 Top10 口径一致）
   const byModel = new Map();
   for (const m of models) {
@@ -1054,68 +1054,74 @@ function renderLatency() {
     byModel.set(m.model, e);
   }
   const top = [...byModel.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 8);
-  const W = 520, H = 190, padL = 40, padB = 24, padT = 15;
+  const topNames = top.map(([n]) => n);
+  // 数据刷新后所选模型可能已无请求，自动退回“全部”
+  if (LATENCY_MODEL && !topNames.includes(LATENCY_MODEL)) LATENCY_MODEL = null;
+  const filt = LATENCY_MODEL;
+  const shown = filt ? [filt] : topNames;
+  // 模型固定 8 色板（柱色区分模型；通道色仍用于请求趋势图）
+  const MCOLORS = ['#5b8def', '#e5a54b', '#4fc48f', '#e06c9f', '#9a7be0', '#4fb8d8', '#c9d05a', '#e07b5b'];
+  const mcolor = new Map(topNames.map((n, i) => [n, MCOLORS[i % MCOLORS.length]]));
+  LATENCY_DATA = { providers, topNames, byModel, mcolor };
+  const W = 1100, H = 250, padL = 46, padB = 24, padT = 18; // 全宽卡片：viewBox≈实际显示宽度，避免整体被拉伸放大
   const base = H - padB;
-  const valOf = e => filt
-    ? (e.provs[filt] ? e.provs[filt].avg_ms : 0)
-    : Math.max(...providers.map(p => (e.provs[p] || {}).avg_ms || 0));
-  const max = Math.max(1, ...top.map(([, e]) => valOf(e)));
-  const slot = top.length ? (W - padL - 8) / top.length : 1;
+  const max = Math.max(1, ...providers.flatMap(p =>
+    shown.map(n => (byModel.get(n).provs[p] || {}).avg_ms || 0)));
+  const slot = providers.length ? (W - padL - 8) / providers.length : 1;
   const scale = (base - padT) / max;
 
   let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
   for (let i = 0; i <= 4; i++) {
     const y = base - (base - padT) * i / 4;
     svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="#262f3c" stroke-width="1"/>` +
-           `<text x="${padL-6}" y="${y+4}" fill="#8b96a5" font-size="10" text-anchor="end">${fmtMs(Math.round(max * i / 4))}</text>`;
+           `<text x="${padL-6}" y="${y+4}" fill="#8b96a5" font-size="11" text-anchor="end">${fmtMs(Math.round(max * i / 4))}</text>`;
   }
-  top.forEach(([name, e], i) => {
+  providers.forEach((p, i) => {
     const x0 = padL + i * slot;
-    const show = filt ? [filt] : providers.filter(p => e.provs[p]);
-    const n = show.length;
-    const inner = slot - 12;
-    const bw = Math.min(30, Math.max(4, (inner - (n - 1) * 3) / n));
+    const n = shown.length;
+    const inner = slot - 14;
+    const bw = Math.min(38, Math.max(5, (inner - (n - 1) * 3) / n));
     const xStart = x0 + (slot - (n * bw + (n - 1) * 3)) / 2;
-    // 组内最慢的通道标数值（跨通道对比的关注点）；单通道时每根都标
+    // 组内最慢的模型标数值；单模型视图每根都标
     let slowest = null;
-    for (const p of show) {
-      const m = e.provs[p];
+    for (const name of shown) {
+      const m = byModel.get(name).provs[p];
       if (m && (!slowest || m.avg_ms > slowest.avg_ms)) slowest = m;
     }
-    show.forEach((p, k) => {
-      const m = e.provs[p];
+    shown.forEach((name, k) => {
+      const m = byModel.get(name).provs[p];
       if (!m) return;
       const h = Math.max(0, m.avg_ms * scale);
       const x = xStart + k * (bw + 3);
       const y = base - h;
-      svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${pcolor(p)}" rx="2">` +
-             `<title>${esc(p + '/' + name)} · ${m.count} 次 · 平均 ${fmtMs(m.avg_ms)}</title></rect>`;
+      svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${mcolor.get(name)}" rx="2"/>`;
       if (n === 1 || m === slowest)
-        svg += `<text x="${x + bw/2}" y="${Math.max(padT + 7, y - 3)}" fill="#dbe4ee" font-size="9" text-anchor="middle">${fmtMs(m.avg_ms)}</text>`;
+        svg += `<text x="${x + bw/2}" y="${Math.max(padT + 8, y - 3)}" fill="#dbe4ee" font-size="10.5" text-anchor="middle">${fmtMs(m.avg_ms)}</text>`;
     });
-    const lbl = name.length > 10 ? name.slice(0, 9) + '…' : name;
-    svg += `<text x="${x0 + slot/2}" y="${H - 6}" fill="#8b96a5" font-size="9.5" text-anchor="middle">${esc(lbl)}<title>${esc(name)}</title></text>`;
+    svg += `<text x="${x0 + slot/2}" y="${H - 6}" fill="#8b96a5" font-size="11.5" text-anchor="middle">${esc(p)}</text>`;
+    // 整列悬停热区：移入即显示该通道下各模型耗时明细
+    svg += `<rect class="hitzone" data-p="${esc(p)}" x="${x0}" y="${padT}" width="${slot}" height="${base - padT}" fill="transparent"/>`;
   });
   svg += '</svg>';
   el.innerHTML = svg;
 
-  // 图例（可点选）：全部 + 各通道
-  const items = [`<span class="legend-item${filt ? '' : ' active'}" data-prov="" title="点击显示所有通道分组">全部</span>`]
-    .concat(providers.map(p =>
-      `<span class="legend-item${filt === p ? ' active' : ''}" data-prov="${esc(p)}" title="只显示 ${esc(p)}">
-         <i style="background:${pcolor(p)}"></i>${esc(p)}</span>`));
+  // 图例（可点选）：全部 + 请求量前 8 的模型（点模型只看它）
+  const items = [`<span class="legend-item${filt ? '' : ' active'}" data-model="" title="点击显示所有模型">全部</span>`]
+    .concat(topNames.map(n =>
+      `<span class="legend-item${filt === n ? ' active' : ''}" data-model="${esc(n)}" title="只显示 ${esc(n)}">
+         <i style="background:${mcolor.get(n)}"></i>${esc(n)}</span>`));
   document.getElementById('legend-latency').innerHTML = items.join('');
   document.getElementById('latency-sub').textContent = filt
     ? `仅 ${filt} · 全窗口平均耗时`
-    : '同一模型各通道并列对比（点图例可只看某通道）';
+    : '各通道下模型并列对比（点下方图例可只看某模型）';
 }
-// 图例点选：点某通道只看它；再点一次或点「全部」回到并列视图
+// 图例点选：点某模型只看它；再点一次或点「全部」回到并列视图
  document.getElementById('legend-latency').addEventListener('click', e => {
   const item = e.target.closest('.legend-item');
   if (!item) return;
-  const p = item.dataset.prov; // '' = 全部
-  const next = (p === '') ? null : p;
-  LATENCY_PROV = (LATENCY_PROV === next && next !== null) ? null : next;
+  const n = item.dataset.model; // '' = 全部
+  const next = (n === '') ? null : n;
+  LATENCY_MODEL = (LATENCY_MODEL === next && next !== null) ? null : next;
   renderLatency();
 });
 
@@ -1209,6 +1215,26 @@ document.getElementById('chart-models').addEventListener('mousemove', e => {
     row.getBoundingClientRect());
 });
 document.getElementById('chart-models').addEventListener('mouseleave', hideChartTip);
+
+// 模型平均耗时图：悬停某通道列 → 该通道下各模型耗时明细
+document.getElementById('chart-latency').addEventListener('mousemove', e => {
+  const hz = e.target.closest('rect.hitzone');
+  const p = hz && hz.dataset.p;
+  if (!p || !LATENCY_DATA) { hideChartTip(); return; }
+  const { topNames, byModel, mcolor } = LATENCY_DATA;
+  const shown = LATENCY_MODEL ? [LATENCY_MODEL] : topNames;
+  const rows = shown.map(n => ({ n, m: byModel.get(n).provs[p] }))
+    .filter(r => r.m).sort((a, b) => b.m.avg_ms - a.m.avg_ms);
+  if (!rows.length) { hideChartTip(); return; }
+  const total = rows.reduce((s, r) => s + r.m.count, 0);
+  const lines = rows.map(r =>
+    `<div class="t-p"><i style="background:${mcolor.get(r.n)}"></i>${esc(r.n)}` +
+    `<b style="margin-left:auto;padding-left:12px">${r.m.count} 次 · ${fmtMs(r.m.avg_ms)}</b></div>`).join('');
+  showChartTip(
+    `<div class="t-date">${esc(p)} · 合计 ${total} 次 · 平均耗时降序</div>` + lines,
+    hz.getBoundingClientRect());
+});
+document.getElementById('chart-latency').addEventListener('mouseleave', hideChartTip);
 
 function renderGroups() {
   const el = document.getElementById('groups');
