@@ -138,6 +138,19 @@ async def list_models():
     return {"object": "list", "data": openai_models, "models": codex_models}
 
 
+def client_meta(request: Request) -> dict[str, str]:
+    """提取客户端来源标识（User-Agent / 来源 IP / key 指纹），随请求日志落盘。"""
+    auth = request.headers.get("x-api-key") or request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        auth = auth[7:]
+    key_hint = f"{auth[:4]}…{auth[-4:]}" if len(auth) > 8 else (auth or "-")
+    return {
+        "user_agent": request.headers.get("user-agent", "-"),
+        "client_ip": request.client.host if request.client else "-",
+        "api_key_hint": key_hint,
+    }
+
+
 async def parse_request_body(request: Request) -> Any:
     """解析 JSON 请求体，兼容 GBK/cp936/latin-1 等非 UTF-8 编码。
 
@@ -215,7 +228,7 @@ async def chat_completions(request: Request):
     state = get_state()
     body = await parse_request_body(request)
 
-    log_client_request("POST", "/v1/chat/completions", body)
+    log_client_request("POST", "/v1/chat/completions", body, **client_meta(request))
     diagnostic("request", protocol="openai", **body_summary(body))
 
     # 调试抓包：WB_DEBUG_DUMP=1 时落完整请求体（含 messages 全文、tools），
@@ -231,7 +244,7 @@ async def create_response(request: Request):
     state = get_state()
     body = await parse_request_body(request)
 
-    log_client_request("POST", "/v1/responses", body)
+    log_client_request("POST", "/v1/responses", body, **client_meta(request))
 
     # 转换 Responses → Chat
     chat_body = responses_request_to_chat(body)
@@ -285,7 +298,7 @@ async def create_message(request: Request):
     state = get_state()
     body = await parse_request_body(request)
 
-    log_client_request("POST", "/v1/messages", body)
+    log_client_request("POST", "/v1/messages", body, **client_meta(request))
 
     # 转换 Anthropic → Chat
     chat_body = anthropic_to_chat(body)

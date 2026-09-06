@@ -1234,18 +1234,24 @@ def body_summary(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def log_client_request(method: str, path: str, body: dict[str, Any] | None) -> None:
-    """Log client request with verbosity control."""
+def log_client_request(method: str, path: str, body: dict[str, Any] | None, **client_info) -> None:
+    """Log client request with verbosity control.
+
+    ``client_info`` 携带来源标识（user_agent / client_ip / api_key_hint），
+    由 routes 层从请求头提取，用于区分是哪个客户端在调用。
+    """
     state = get_state()
 
     if state.verbose_llm:
-        state.write_log("client_request", method=method, path=path, body=body)
+        state.write_log("client_request", method=method, path=path,
+                       **client_info, body=body)
     else:
         if body:
             summary = body_summary(body)
-            state.write_log("client_request_summary", method=method, path=path, **summary)
+            state.write_log("client_request_summary", method=method, path=path,
+                            **client_info, **summary)
         else:
-            state.write_log("client_request_summary", method=method, path=path)
+            state.write_log("client_request_summary", method=method, path=path, **client_info)
 
 
 def log_upstream_request(protocol: str, body: dict[str, Any]) -> None:
