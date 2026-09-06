@@ -202,11 +202,17 @@ async def ui_stats(request: Request):
     if metrics is None:
         return {"models": [], "daily": [], "recent": [], "summary": {}, "credits_map": {}}
     snap = metrics.snapshot(days=14)
-    # 模型 → 积分倍率（CodeBuddy 计费口径；其他通道无倍率概念）
-    snap["credits_map"] = {
-        m["id"]: m.get("credits")
-        for m in load_models_from_local_config() if m.get("credits")
-    }
+    # 模型积分倍率，按「通道/模型」为键——同一模型跨通道倍率不同
+    # （如 glm-5.3 在 codebuddy 是 x0.79、trae 是 x0.40）。CodeBuddy 走
+    # models_config，其余通道取各自 models() 声明的 credits。
+    snap["credits_map"] = {}
+    for m in load_models_from_local_config():
+        if m.get("credits"):
+            snap["credits_map"][f"codebuddy/{m['id']}"] = m.get("credits")
+    for p in getattr(state, "providers", {}).values():
+        for m in p.models():
+            if m.get("credits"):
+                snap["credits_map"].setdefault(f"{p.id}/{m['id']}", m.get("credits"))
     return snap
 
 
@@ -1029,7 +1035,7 @@ function renderRecent() {
       tokTitle = `prompt ${r.prompt_tokens} · completion ${r.completion_tokens}${cacheTxt}`;
     }
     const creditTxt = r.credit != null ? r.credit
-                    : cmap[r.model] ? cmap[r.model] : null;
+                    : cmap[r.provider + '/' + r.model] || null;
     return `<tr>
       <td class="mono muted">${fmtTime(r.ts)}</td>
       <td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i><span class="mono muted">${esc(r.provider)}</span></td>

@@ -317,6 +317,19 @@ def test_normalize_usage_shapes():
                  "cached_tokens": 2, "credit": None}
 
 
+def test_trae_models_carry_credits():
+    """Trae 模型应带积分倍率（知识库《模型及成本整理》2026-09-05 版）。"""
+    from buddy_proxy.trae_provider import TraeProvider
+    models = {m["id"]: m for m in TraeProvider().models()}
+    assert models["glm-5.3"]["credits"] == "x0.40"
+    assert models["glm-5.3-flash"]["credits"] == "x0.06"
+    assert models["DeepSeek-V4-Flash"]["credits"] == "x0.08"
+    # 别名跟随内部模型的倍率
+    assert models["deepseek-v4-flash"]["credits"] == "x0.08"
+    # 官方价目已下架的模型不硬造倍率
+    assert models["glm-5"]["credits"] is None
+
+
 def test_metrics_daily_series_zero_filled(tmp_path):
     m = MetricsCollector(tmp_path / "metrics.jsonl")
     m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=10)

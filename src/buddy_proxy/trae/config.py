@@ -89,6 +89,26 @@ MODEL_TIERS: dict[str, list[str]] = {
     "T4": ["Doubao-Seed-Code", "glm-5", "glm-5-turbo", "qwen-3.7-plus"],
 }
 
+# 模型积分倍率：整理自知识库《模型及成本整理-workbuddy-trae-含选用建议》
+# （2026-09-05 版，WorkBuddy 定价截图）。别名（如 deepseek-v4-flash）由
+# models() 按 MODEL_MAP 解析到内部名后取同一倍率。
+# glm-5 / glm-5-turbo / glm-5.1 / kimi-k2.6 官方最新价目已下架，未收录。
+MODEL_CREDITS: dict[str, str] = {
+    "Doubao-Seed-Evolving": "x0.77",
+    "Doubao-Seed-2.1-Pro": "x0.77",
+    "Doubao-Seed-2.1-Turbo": "x0.10",
+    "Doubao-Seed-Code": "x0.03",
+    "glm-5.3-flash": "x0.06",
+    "glm-5.3": "x0.40",
+    "glm-5.2": "x0.40",
+    "DeepSeek-V4-Flash": "x0.08",
+    "DeepSeek-V4-Pro": "x0.72",
+    "kimi-k2.7-code": "x0.83",
+    "minimax-m3": "x0.26",
+    "qwen3.8-max": "x1.50",
+    "qwen-3.7-plus": "x0.25",
+}
+
 # 部分模型在 solo_work_lite function 下不可用（服务端 4001），需改用 chat_v3。
 # 实测（2026-09-03）：glm-5.1 / Doubao-Seed-Code 仅在 chat_v3 下可路由；
 # glm-5.3-flash 同理——solo_work_lite 报 4001 "param is invalid"，

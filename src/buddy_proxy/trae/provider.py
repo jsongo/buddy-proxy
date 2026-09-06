@@ -19,6 +19,7 @@ from ..providers import BaseProvider
 from .benefits_api import claim_checkin_credits, fetch_checkin_status, fetch_ent_usage
 from .config import (
     BASE_URL_CN,
+    MODEL_CREDITS,
     MODEL_MAP,
     MODEL_TIERS,
     TRAE_HEARTBEAT_INTERVAL,
@@ -65,9 +66,10 @@ class TraeProvider(BaseProvider):
                     "created": 0,
                     "owned_by": self.id,
                     "tier": tier,
+                    "credits": MODEL_CREDITS.get(m),
                     "description": f"Trae {tier} 模型",
                 })
-        # 加别名（外部名映射）
+        # 加别名（外部名映射）——倍率跟随映射到的内部模型
         for external, internal in MODEL_MAP.items():
             if external not in seen:
                 seen.add(external)
@@ -77,6 +79,7 @@ class TraeProvider(BaseProvider):
                     "created": 0,
                     "owned_by": self.id,
                     "maps_to": internal,
+                    "credits": MODEL_CREDITS.get(internal),
                     "description": f"Trae 别名 -> {internal}",
                 })
         return result
