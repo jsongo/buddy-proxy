@@ -143,13 +143,16 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     deadline = time.time() + STATE_TTL
     try:
         while time.time() < deadline:
-            if proc is not None and proc.poll() is not None:
-                print("[!] 本地回调服务意外退出", file=sys.stderr)
-                return 1
+            # state 消失是唯一的权威成功信号（只有 server 成功落盘后才会删它），
+            # 必须先于进程存活检查——server 删完 state 可能立即退出
             if not STATE_PATH.exists():
-                # 回调服务成功落盘凭证后删除 state 文件（一次性消费）
-                time.sleep(3)  # 给服务端留时间打印 Work 通道测试输出
-                _stop(proc)
+                # server 会跑完 Work 通道测试后自动退出，等它自然退出即可收割
+                # 测试输出；极端情况（旧版 server 挂住）超时再强制清理
+                if proc is not None:
+                    try:
+                        proc.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        _stop(proc)
                 try:
                     cred = json.loads(OUT_PATH.read_text())
                     expires = cred.get("expires_at", "")
@@ -161,6 +164,9 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
                 except Exception:
                     print("[OK] Trae Work 登录完成")
                 return 0
+            if proc is not None and proc.poll() is not None:
+                print("[!] 本地回调服务意外退出", file=sys.stderr)
+                return 1
             time.sleep(1)
     except KeyboardInterrupt:
         print()

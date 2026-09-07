@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -224,6 +224,12 @@ class Handler(BaseHTTPRequestHandler):
                 print(raw[:500])
             except Exception as e:
                 print(f"[!] Work chat 测试失败: {e}")
+
+            # 登录闭环完成：自动退出（ThreadingHTTPServer 的 handler 在子线程，
+            # 可安全调 shutdown），buddy login trae 以进程退出作为收割信号
+            self.wfile.flush()
+            print("\n[*] 登录完成，回调服务自动退出")
+            self.server.shutdown()
         except Exception as e:
             msg = f"<h3>换 token 失败</h3><p>{html.escape(str(e))}</p>"
             self.wfile.write(msg.encode())
@@ -234,7 +240,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"[*] 回调监听启动: http://127.0.0.1:{PORT}/authorize")
     print("[*] 现在打开登录链接，登录成功后会自动回调到这里")
     print("[*] 等待回调...（Ctrl+C 退出）")
