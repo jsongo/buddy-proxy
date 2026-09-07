@@ -195,6 +195,56 @@ def get_pat_credentials(force_refresh: bool = False) -> tuple[str, str]:
             "PAT token 已过期且自动刷新失败（需在能访问交换端点的网络下重试，见 .token.md）"))
 
 
+# ───────────────────────── 额度查询 ─────────────────────────
+
+def fetch_pat_ent_usage() -> list[dict[str, Any]]:
+    """查 PAT 账号各权益包余量，返回 [{label, used, total, remaining, reset_ts}]。
+
+    注意：用量取 **pack 顶层 usage**（``quota.usage`` 是滞后旧视图，勿用）。
+    端点在扩展网关上；与聊天同款标准 Trae 头即可。
+    """
+    plus = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
+    if not plus:
+        raise HTTPException(status_code=503, detail="PAT 通道未配置 TRAE_PAT_PLUS_GATEWAY")
+    token, uid = get_pat_credentials()
+    headers = {**_build_headers(token, uid), "Accept": "application/json"}
+    url = f"{plus}/trae/api/v1/pay/ide_user_ent_usage"
+    req = urllib.request.Request(url, data=b"{}", headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        raise HTTPException(status_code=502,
+                            detail=f"PAT 额度查询失败: {e.code} {e.read().decode()[:150]}") from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"PAT 额度查询失败: {e}") from e
+
+    items: list[dict[str, Any]] = []
+    for pack in data.get("user_entitlement_pack_list") or []:
+        base = pack.get("entitlement_base_info") or {}
+        quota = base.get("quota") or {}
+        usage = pack.get("usage") or {}
+        limit = quota.get("basic_usage_limit")
+        used = usage.get("basic_usage_amount") or 0
+        if not isinstance(limit, (int, float)) or limit <= 0:
+            continue
+        eid = str(base.get("entitlement_id") or "pack")
+        kind = "周包" if "weekly" in eid else ("日包" if "daily" in eid else "包")
+        # 日包 entitlement_id 末段带模型片段（如 *_gpt_56_sol）作标签；周包是共享桶
+        model_part = eid.rsplit("_", 1)[-1] if kind == "日包" else ""
+        label = "PAT 周包（共享）" if kind == "周包" else f"PAT 日包 {model_part}"
+        end_ts = base.get("end_time") or 0
+        items.append({
+            "label": label,
+            "used": round(used, 2),
+            "total": limit,
+            "remaining": round(limit - used, 2),
+            "percent": round(used / limit * 100) if limit else None,
+            "reset_ts": int(end_ts) if end_ts else None,
+        })
+    return items
+
+
 # ───────────────────────── 聊天转发 ─────────────────────────
 
 def _build_pat_body(native_msgs: list[dict[str, Any]], model: str, config: str,
