@@ -49,13 +49,19 @@ from buddy_proxy import routes as _routes  # noqa: F401
 from buddy_proxy import ui as _ui  # noqa: F401
 
 
-def _load_dotenv(path: str = ".env") -> None:
+_DEFAULT_ENV = pathlib.Path(__file__).resolve().parents[2] / ".env"
+
+
+def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
     """读取仓库根 .env（若存在）注入环境变量，已有值不覆盖。
 
-    用于 PAT 通道等本地私有配置（密钥/端点不入库，见 .token.md）。
-    格式：KEY=VALUE，支持 # 注释与引号包裹值。
+    默认路径锚定在仓库根（由模块位置推导，与启动时 CWD 无关）；
+    也可用参数显式指定。用于 PAT 通道等本地私有配置（密钥/端点不入库，
+    见 .token.md）。格式：KEY=VALUE，支持 # 注释与引号包裹值。
+    注意：仅在 main() 里、所有模块 import 完成后调用——仅 import 期读取的
+    环境变量不受本函数影响。
     """
-    f = pathlib.Path(path)
+    f = pathlib.Path(path) if path else _DEFAULT_ENV
     if not f.exists():
         return
     for line in f.read_text("utf-8").splitlines():
