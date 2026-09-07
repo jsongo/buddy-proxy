@@ -104,10 +104,13 @@ async def list_models():
         for m in provider.models():
             data.append({
                 "id": m.get("id"),
-                "name": m.get("description") or m.get("id"),
+                "name": m.get("name") or m.get("description") or m.get("id"),
                 "vendor": provider.id,
                 "owned_by": provider.id,
                 "provider": provider.id,
+                **({"credits": m["credits"]} if m.get("credits") is not None else {}),
+                **({"max_input": m["max_input"]} if m.get("max_input") is not None else {}),
+                **({"reasoning": m["reasoning"]} if "reasoning" in m else {}),
             })
 
     # 记录模型列表请求

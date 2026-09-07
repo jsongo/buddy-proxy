@@ -27,14 +27,24 @@ class TraePatProvider(TraeProvider):
     def models(self) -> Sequence[dict[str, Any]]:
         if not pat_enabled():
             return []
-        return [{
-            "id": m,
-            "object": "model",
-            "created": 0,
-            "owned_by": self.id,
-            "tier": "PAT",
-            "description": "Trae PAT 扩展模型",
-        } for m in pat_model_names()]
+        from .pat import pat_model_meta
+        meta = pat_model_meta()
+        out: list[dict[str, Any]] = []
+        for m in pat_model_names():
+            info = meta.get(m, {})
+            out.append({
+                "id": m,
+                "object": "model",
+                "created": 0,
+                "owned_by": self.id,
+                "tier": "PAT",
+                "name": info.get("name") or m,
+                "credits": info.get("credits"),
+                "max_input": info.get("max_input"),
+                "reasoning": bool(info.get("reasoning")),
+                "description": info.get("name") or "Trae PAT 扩展模型",
+            })
+        return out
 
     def ensure_auth(self) -> None:
         get_pat_credentials()

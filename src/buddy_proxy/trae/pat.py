@@ -117,6 +117,17 @@ def pat_model_names() -> list[str]:
     return list(PAT_MODELS)
 
 
+def pat_model_meta() -> dict[str, dict[str, Any]]:
+    """模型 id -> 原始配置条目（name/credits/max_input/reasoning 等展示元数据）。"""
+    _reload_pat_models()
+    try:
+        data = json.loads(_MODEL_CONFIG_FILE.read_text("utf-8"))
+        return {str(m.get("id")): m for m in data.get("models", [])
+                if m.get("provider") == "traepat" and m.get("id")}
+    except Exception:
+        return {}
+
+
 def pat_gateway_is_plus(model: str) -> bool:
     """该模型是否走扩展网关（False = 默认公网网关）。"""
     _reload_pat_models()

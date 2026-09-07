@@ -123,22 +123,23 @@ def test_models_has_required_ids(client):
 def test_models_credits_and_name(client):
     """data 和 models 都必须透出 name 与 credits，且与 config 一致。"""
     body = client.get("/v1/models").json()
-    by_id = {x["id"]: x for x in body["data"]}
+    by_id = {(x["id"], x.get("owned_by")): x for x in body["data"]}
 
+    # 同一 id 可能被多个 provider 声明（trae/traepat/zcode...），按 (id, owned_by) 取
     checks = {
-        "glm-5.3": ("x0.79 credits", "GLM-5.3"),
-        "glm-5.3-flash": ("x0.06 credits", "GLM-5.3-Flash"),
-        "hy4-preview": ("x0.29 credits", "Hy4 preview"),
-        "minimax-m3": ("x0.25 credits", "MiniMax-M3"),
-        "deepseek-v4-flash": ("x0.17 credits", "Deepseek-V4-Flash"),
-        "deepseek-v4-pro": ("x0.51 credits", "Deepseek-V4-Pro"),
-        "kimi-k2.7": ("x0.57 credits", "Kimi-K2.7-Code"),
+        ("glm-5.3", "zhipu"): ("x0.79 credits", "GLM-5.3"),
+        ("glm-5.3-flash", "zhipu"): ("x0.06 credits", "GLM-5.3-Flash"),
+        ("hy4-preview", "tencent"): ("x0.29 credits", "Hy4 preview"),
+        ("minimax-m3", "f"): ("x0.25 credits", "MiniMax-M3"),
+        ("deepseek-v4-flash", "f"): ("x0.17 credits", "Deepseek-V4-Flash"),
+        ("deepseek-v4-pro", "f"): ("x0.51 credits", "Deepseek-V4-Pro"),
+        ("kimi-k2.7", "f"): ("x0.57 credits", "Kimi-K2.7-Code"),
     }
-    for mid, (credit, name) in checks.items():
-        entry = by_id.get(mid)
-        assert entry is not None, f"{mid} 缺失"
-        assert entry["name"] == name, f"{mid} name={entry.get('name')!r}"
-        assert entry["credits"] == credit, f"{mid} credits={entry.get('credits')!r}"
+    for key, (credit, name) in checks.items():
+        entry = by_id.get(key)
+        assert entry is not None, f"{key} 缺失"
+        assert entry["name"] == name, f"{key} name={entry.get('name')!r}"
+        assert entry["credits"] == credit, f"{key} credits={entry.get('credits')!r}"
 
 
 def test_models_codex_metadata(client):
