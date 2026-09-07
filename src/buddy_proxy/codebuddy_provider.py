@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any, Optional
 
 import httpx
@@ -344,6 +346,28 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any]) -
     return (est, True) if est is not None else (None, False)
 
 
+# 客户端来源标签（由 routes 层在每个请求开始时设置，_instrument 落 metrics 时读取）。
+# 用 ContextVar 而非函数参数穿透：避免改动所有 provider.forward 签名。
+CLIENT_TAG: ContextVar[str] = ContextVar("client_tag", default="")
+
+
+def resolve_client_tag(user_agent: str, client_name: str) -> str:
+    """合成用于展示/落库的客户端短标签。
+
+    优先取客户端自声明的 ``X-Client-Name``（可辨识度最高），否则从 UA 推断：
+    claude-cli → claude-code；python-httpx / OpenAI SDK 等保留其可辨识片段。
+    """
+    if client_name:
+        return re.sub(r"[^\w./@-]", "", client_name)[:40]
+    ua = (user_agent or "").strip()
+    if ua.startswith("claude-cli"):
+        return "claude-code"
+    for prefix in ("python-httpx", "OpenAI/Python", "OpenAI/JS", "node-fetch", "undici", "curl"):
+        if ua.startswith(prefix):
+            return prefix.lower().replace("/", "-")
+    return ua[:40]
+
+
 async def _instrument(
     state: Any,
     coro,
@@ -362,24 +386,26 @@ async def _instrument(
     metrics = getattr(state, "metrics", None)
     if metrics is None:
         return await coro
+    client = CLIENT_TAG.get()
     started = time.time()
     try:
         resp = await coro
     except HTTPException as exc:
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=exc.status_code, duration_ms=_elapsed_ms(started),
-                       error=_exc_text(exc.detail))
+                       error=_exc_text(exc.detail), client=client)
         raise
     except Exception as exc:
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
-                       status=500, duration_ms=_elapsed_ms(started), error=str(exc))
+                       status=500, duration_ms=_elapsed_ms(started), error=str(exc),
+                       client=client)
         raise
 
     if isinstance(resp, StreamingResponse):
         resp.body_iterator = _metrics_stream(
             resp.body_iterator, metrics,
             provider_id=provider_id, model_id=model_id, protocol=protocol,
-            started=started,
+            started=started, client=client,
         )
         return resp
 
@@ -404,12 +430,13 @@ async def _instrument(
         credit=credit,
         credit_estimated=credit_estimated,
         error=error,
+        client=client,
     )
     return resp
 
 
 async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
-                          protocol: str, started: float):
+                          protocol: str, started: float, client: str = ""):
     """流式响应的计数包装：透传所有 chunk，结束时补记（含 TTFT 与流式 usage）。"""
     chunk_count = 0
     error = ""
@@ -436,7 +463,8 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
                        completion_tokens=u.get("completion_tokens", 0),
                        cached_tokens=u.get("cached_tokens", 0),
                        credit=credit,
-                       credit_estimated=credit_estimated)
+                       credit_estimated=credit_estimated,
+                       client=client)
 
 
 async def forward_chat(

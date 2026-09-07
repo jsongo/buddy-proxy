@@ -141,6 +141,7 @@ class MetricsCollector:
         cached_tokens: int = 0,
         credit: Optional[float] = None,
         credit_estimated: bool = False,
+        client: str = "",
     ) -> None:
         ts = time.time()
         rec = {
@@ -159,6 +160,7 @@ class MetricsCollector:
             "credit_estimated": bool(credit_estimated),
             "chunk_count": int(chunk_count or 0),
             "error": (error or "")[:300],
+            "client": (client or "")[:40],
         }
         with self._lock:
             self._recent.append(rec)

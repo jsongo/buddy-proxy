@@ -654,8 +654,8 @@ _PAGE_HTML = r"""<!DOCTYPE html>
     <h2>最近请求 <span class="sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>
-        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 粗估（trae：(输入+输出)/1M × 100 × 模型倍率，非实扣）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
-        <tbody id="recent"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>客户端</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 粗估（trae：(输入+输出)/1M × 100 × 模型倍率，非实扣）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
+        <tbody id="recent"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
       </table>
       <div class="pager" id="recent-pager"></div>
     </div>
@@ -1306,7 +1306,7 @@ function renderRecent() {
   const el = document.getElementById('recent');
   const pager = document.getElementById('recent-pager');
   if (!rows.length) {
-    el.innerHTML = '<tr><td colspan="8" class="empty">还没有请求记录</td></tr>';
+    el.innerHTML = '<tr><td colspan="9" class="empty">还没有请求记录</td></tr>';
     pager.innerHTML = '';
     return;
   }
@@ -1332,6 +1332,7 @@ function renderRecent() {
       <td class="mono muted">${fmtTime(r.ts)}</td>
       <td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i><span class="mono muted">${esc(r.provider)}</span></td>
       <td class="mono">${esc(r.model)}</td>
+      <td class="mono muted" title="客户端来源：X-Client-Name 自声明 > UA 推断（旧记录无此字段）">${r.client ? esc(r.client) : '<span class="muted">—</span>'}</td>
       <td class="num mono">${r.ttft_ms != null ? ttft : '—'}</td>
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
