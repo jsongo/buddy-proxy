@@ -197,12 +197,38 @@ def get_pat_credentials(force_refresh: bool = False) -> tuple[str, str]:
 
 # ───────────────────────── 额度查询 ─────────────────────────
 
+_QUOTA_CACHE_FILE = pathlib.Path.home() / ".ethan" / "trae_pat_quota_cache.json"
+_last_ent_usage: list[dict[str, Any]] | None = None
+
+
+def _quota_cache_load() -> list[dict[str, Any]] | None:
+    """磁盘缓存：上次在可达网络下查到的余量（家里查不到时兜底展示）。"""
+    try:
+        f = pathlib.Path(_QUOTA_CACHE_FILE)
+        if f.exists():
+            return json.loads(f.read_text("utf-8"))
+    except Exception:
+        pass
+    return None
+
+
+def _quota_cache_save(items: list[dict[str, Any]]) -> None:
+    try:
+        f = pathlib.Path(_QUOTA_CACHE_FILE)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+
 def fetch_pat_ent_usage() -> list[dict[str, Any]]:
     """查 PAT 账号各权益包余量，返回 [{label, used, total, remaining, reset_ts}]。
 
     注意：用量取 **pack 顶层 usage**（``quota.usage`` 是滞后旧视图，勿用）。
-    端点在扩展网关上；与聊天同款标准 Trae 头即可。
+    端点在扩展网关上（真实余量只在它有；公网权益接口是另一个无数字的视图）。
+    网络不可达时回退「内存 -> 磁盘」缓存，条目 label 追加「·缓存」标记。
     """
+    global _last_ent_usage
     plus = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
     if not plus:
         raise HTTPException(status_code=503, detail="PAT 通道未配置 TRAE_PAT_PLUS_GATEWAY")
@@ -213,10 +239,14 @@ def fetch_pat_ent_usage() -> list[dict[str, Any]]:
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as e:
-        raise HTTPException(status_code=502,
-                            detail=f"PAT 额度查询失败: {e.code} {e.read().decode()[:150]}") from e
     except Exception as e:
+        # 不可达/失败：内存缓存 -> 磁盘缓存，逐级兜底（label 加「·缓存」）
+        for cached, mark in ((_last_ent_usage, "内存"), (_quota_cache_load(), "磁盘")):
+            if cached:
+                return [dict(it, label=f"{it['label']}·缓存") for it in cached]
+        if isinstance(e, urllib.error.HTTPError):
+            raise HTTPException(status_code=502,
+                                detail=f"PAT 额度查询失败: {e.code} {e.read().decode()[:150]}") from e
         raise HTTPException(status_code=502, detail=f"PAT 额度查询失败: {e}") from e
 
     items: list[dict[str, Any]] = []
@@ -242,6 +272,8 @@ def fetch_pat_ent_usage() -> list[dict[str, Any]]:
             "percent": round(used / limit * 100) if limit else None,
             "reset_ts": int(end_ts) if end_ts else None,
         })
+    _last_ent_usage = items
+    _quota_cache_save(items)
     return items
 
 
