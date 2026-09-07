@@ -55,7 +55,10 @@ def build_login_url() -> tuple[str, str, str]:
         "plugin_version": "2.3.62834",
         "auth_type": "local",
         "client_id": CLIENT_ID,
-        "redirect": "0",
+        # redirect=1：授权完成后整页跳转到 auth_callback_url。老值 "0" 是页面
+        # 用 JS fetch 回调，会被 CORS 拦截（本地服务无 CORS 头），页面报
+        # 「登录失败 - 网络错误，请刷新页面重试」（2026-09 实测）。
+        "redirect": "1",
         "login_trace_id": secrets.token_hex(8),
         "auth_callback_url": f"http://127.0.0.1:18080/authorize?nonce={nonce}",
         "machine_id": machine_id,

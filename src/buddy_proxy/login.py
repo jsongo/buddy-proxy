@@ -77,11 +77,101 @@ def _login_codebuddy(open_browser: bool = True) -> int:
     return 0
 
 
-def _login_trae(**_kwargs) -> int:
-    """Trae Work (SOLO)：交互式粘贴回调链接登录（复用既有实现）。"""
-    from buddy_proxy.trae_work_login import main as trae_main
+def _login_trae(open_browser: bool = True, **_kwargs) -> int:
+    """Trae Work (SOLO) 一键登录：自动起本地回调服务 → 打开登录页 → 自动落盘退出。
 
-    return trae_main()
+    trae.cn 授权页（auth_type=local）要求本机 18080 回调服务在线，否则页面报
+    「登录失败 - 网络错误」。这里自动拉起 trae_work_login_server，授权成功后
+    回调服务会删除 state 文件，以此作为完成信号。手动粘贴模式保留：
+    python3 -m buddy_proxy.trae_work_login
+    """
+    import json
+    import socket
+    import subprocess
+    import sys
+    import time
+    import webbrowser
+
+    from buddy_proxy.trae_work_login import (
+        OUT_PATH,
+        STATE_PATH,
+        STATE_TTL,
+        build_login_url,
+    )
+
+    def _port_busy() -> bool:
+        with socket.socket() as s:
+            s.settimeout(0.3)
+            return s.connect_ex(("127.0.0.1", 18080)) == 0
+
+    def _stop(proc: subprocess.Popen) -> None:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    url, _machine_id, _device_id = build_login_url()
+    proc = None
+    if _port_busy():
+        print("[*] 18080 端口已有回调服务在监听，直接复用")
+    else:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "buddy_proxy.trae_work_login_server"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        for _ in range(30):
+            if _port_busy():
+                break
+            if proc.poll() is not None:
+                print("[!] 本地回调服务启动失败，请检查 18080 端口占用", file=sys.stderr)
+                return 1
+            time.sleep(0.1)
+
+    print("=" * 60)
+    print("Trae Work (SOLO) 一键登录")
+    print("=" * 60)
+    print("浏览器将打开 trae.cn 授权页；完成登录后会自动回跳本机落盘凭证。")
+    if open_browser:
+        webbrowser.open(url)
+    else:
+        print(f"请手动在浏览器打开：\n  {url}")
+    print("\n[*] 等待登录完成（最长 15 分钟，Ctrl+C 取消）...")
+
+    deadline = time.time() + STATE_TTL
+    try:
+        while time.time() < deadline:
+            if proc is not None and proc.poll() is not None:
+                print("[!] 本地回调服务意外退出", file=sys.stderr)
+                return 1
+            if not STATE_PATH.exists():
+                # 回调服务成功落盘凭证后删除 state 文件（一次性消费）
+                time.sleep(3)  # 给服务端留时间打印 Work 通道测试输出
+                _stop(proc)
+                try:
+                    cred = json.loads(OUT_PATH.read_text())
+                    expires = cred.get("expires_at", "")
+                    expires = expires[:10] if isinstance(expires, str) else expires
+                    print(
+                        f"[OK] Trae Work 登录完成：uid={cred.get('uid')} "
+                        f"昵称={cred.get('nickname')} 有效期至={expires}"
+                    )
+                except Exception:
+                    print("[OK] Trae Work 登录完成")
+                return 0
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print()
+
+    _stop(proc)
+    print(
+        "[!] 登录未完成（超时/取消）。可重试 buddy login trae，"
+        "或手动模式：python3 -m buddy_proxy.trae_work_login",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _login_zcode(**_kwargs) -> int:
@@ -126,7 +216,7 @@ def main() -> int:
     parser.add_argument("provider", nargs="?", default="codebuddy",
                         help="codebuddy(=workbuddy) / trae / zcode / doubao，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
-                        help="codebuddy 登录不自动打开浏览器，只打印授权链接")
+                        help="codebuddy/trae 登录不自动打开浏览器，只打印链接")
     args = parser.parse_args()
 
     provider = PROVIDER_ALIASES.get(args.provider.strip().lower(), args.provider.strip().lower())
