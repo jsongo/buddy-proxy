@@ -19,6 +19,8 @@ from .provider import TraeProvider
 class TraePatProvider(TraeProvider):
     id = "traepat"
     name = "Trae PAT (服务账号直连)"
+    # 打卡/积分是个人账号专属，服务账号不支持（避免出现在 /ui 打卡列表里）
+    supports_checkin = False
 
     def models(self) -> Sequence[dict[str, Any]]:
         if not pat_enabled():
@@ -44,7 +46,8 @@ class TraePatProvider(TraeProvider):
                                "remaining": str(e)[:120], "percent": None, "reset_ts": None}],
                     "level": "PAT"}
 
-    # —— 以下均为个人账号专属功能，PAT 账号不支持 ——
+    # —— 打卡/积分/用量记录均为个人账号专属：显式覆盖为 None，防止继承的
+    # TraeProvider 实现拿个人凭证调用（supports_checkin=False 已挡住 UI 调度）——
 
     def checkin_status(self) -> dict[str, Any] | None:
         return None

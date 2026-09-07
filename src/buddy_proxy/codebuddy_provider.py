@@ -550,6 +550,15 @@ async def forward_chat(
     if isinstance(requested_model, str) and "/" in requested_model:
         prefix, real_model = requested_model.split("/", 1)
         if prefix in providers:
+            # 严格分离：trae/ 只走个人通道，PAT 扩展模型必须用 traepat/ 前缀，
+            # 写错直接报错提示，不做静默克底（避免路由/计量混淆）
+            if prefix == "trae" and "traepat" in providers:
+                from buddy_proxy.trae.pat import PAT_MODELS
+                if real_model in PAT_MODELS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"模型 {real_model} 属于 traepat 通道（服务账号），"
+                               f"请使用 model: traepat/{real_model}")
             provider = providers[prefix]
             # 剥掉前缀后再转发（上游不认识 "trae/" 前缀）
             body = {**body, "model": real_model}
