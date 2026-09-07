@@ -230,9 +230,9 @@ def fetch_pat_ent_usage() -> list[dict[str, Any]]:
             continue
         eid = str(base.get("entitlement_id") or "pack")
         kind = "周包" if "weekly" in eid else ("日包" if "daily" in eid else "包")
-        # 日包 entitlement_id 末段带模型片段（如 *_gpt_56_sol）作标签；周包是共享桶
-        model_part = eid.rsplit("_", 1)[-1] if kind == "日包" else ""
-        label = "PAT 周包（共享）" if kind == "周包" else f"PAT 日包 {model_part}"
+        # 实测（2026-09-08）：日包实际是账号级「高级模型日额度」，gemini/openrouter
+        # 的调用也扣它，ID 里的模型片段不代表归属，标签统一写「高级模型共享」
+        label = "PAT 周包（未占用）" if kind == "周包" else "PAT 日包（高级模型共享）"
         end_ts = base.get("end_time") or 0
         items.append({
             "label": label,
