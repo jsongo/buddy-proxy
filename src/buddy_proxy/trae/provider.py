@@ -89,20 +89,6 @@ class TraeProvider(BaseProvider):
                     "credits": MODEL_CREDITS.get(internal),
                     "description": f"Trae 别名 -> {internal}",
                 })
-        # PAT 扩展目录（配置了 TRAE_PAT_BEARER 时才暴露）
-        from .pat import pat_enabled, pat_model_names
-        if pat_enabled():
-            for m in pat_model_names():
-                if m not in seen:
-                    seen.add(m)
-                    result.append({
-                        "id": m,
-                        "object": "model",
-                        "created": 0,
-                        "owned_by": self.id,
-                        "tier": "PAT",
-                        "description": "Trae PAT 扩展模型",
-                    })
         return result
 
     def ensure_auth(self) -> None:
@@ -162,14 +148,6 @@ class TraeProvider(BaseProvider):
             if len(packs) >= 3:
                 break
         items.extend(packs)
-        # PAT 扩展目录额度（启用时附带展示；失败不阻塞个人额度展示）。
-        # quota() 已被 BenefitsManager 放线程池执行，这里直接同步调用即可。
-        from .pat import pat_enabled, fetch_pat_ent_usage
-        if pat_enabled():
-            try:
-                items.extend(fetch_pat_ent_usage())
-            except Exception as e:
-                log.warning("PAT 额度查询失败（不影响其它额度展示）: %s", e)
         return {"items": items, "level": None}
 
     async def forward(

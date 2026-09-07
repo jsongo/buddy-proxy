@@ -180,6 +180,17 @@ def main():
         providers[trae.id] = trae
         logger.info("Trae provider enabled")
         print("[Trae] Enabled")
+
+        # PAT 独立通道（配置了 TRAE_PAT_BEARER 时启用）：服务账号的扩展模型目录，
+        # 与个人 trae 通道分开路由/计额（/ui 额度 Tab 各自展示）
+        from buddy_proxy.trae.pat import pat_enabled
+        if pat_enabled():
+            from buddy_proxy.trae.pat_provider import TraePatProvider
+
+            trae_pat = TraePatProvider()
+            providers[trae_pat.id] = trae_pat
+            logger.info("Trae PAT provider enabled")
+            print("[Trae PAT] Enabled (traepat/*)")
     else:
         print("[Trae] Disabled (pass --trae or TRAE_ENABLED=1 to enable)")
 
