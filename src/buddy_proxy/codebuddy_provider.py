@@ -11,8 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import pathlib
+import re
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any, Optional
 
 import httpx
@@ -29,6 +34,8 @@ from buddy_proxy.state import (
     is_policy_blocked,
 )
 from buddy_proxy.logging_setup import now_s
+
+log = logging.getLogger(__name__)
 
 # 可选高级功能模块（脱敏 / 投影 / 协议转换器）
 try:
@@ -344,6 +351,67 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any]) -
     return (est, True) if est is not None else (None, False)
 
 
+# 客户端来源标签（由 routes 层在每个请求开始时设置，_instrument 落 metrics 时读取）。
+# 用 ContextVar 而非函数参数穿透：避免改动所有 provider.forward 签名。
+CLIENT_TAG: ContextVar[str] = ContextVar("client_tag", default="")
+
+
+_CLIENT_NAMES_FILE = os.environ.get(
+    "BUDDY_CLIENT_NAMES_FILE", str(pathlib.Path.home() / ".ethan" / "buddy_client_names.json"))
+_client_names_cache: tuple[float, dict[str, dict[str, str]]] | None = None
+
+
+def _client_names() -> dict[str, dict[str, str]]:
+    """客户端名称映射表（本地文件，热加载，无文件/解析失败时空表）。
+
+    格式见 .token.md：``{"by_key": {"<key>": "名称"}, "by_ua": {"<ua片段>": "名称"}}``。
+    """
+    global _client_names_cache
+    try:
+        p = pathlib.Path(_CLIENT_NAMES_FILE)
+        if not p.exists():
+            return {"by_key": {}, "by_ua": {}}
+        mtime = p.stat().st_mtime
+        if _client_names_cache and _client_names_cache[0] == mtime:
+            return _client_names_cache[1]
+        raw = json.loads(p.read_text("utf-8"))
+        mapping = {
+            "by_key": {str(k): str(v) for k, v in (raw.get("by_key") or {}).items()},
+            "by_ua": {str(k).lower(): str(v) for k, v in (raw.get("by_ua") or {}).items()},
+        }
+        _client_names_cache = (mtime, mapping)
+        return mapping
+    except Exception as e:
+        log.warning("客户端名称映射表加载失败: %s", e)
+        return {"by_key": {}, "by_ua": {}}
+
+
+def resolve_client_tag(user_agent: str, client_name: str, api_key: str = "") -> str:
+    """合成用于展示/落库的客户端短标签，优先级：
+
+    1. 客户端自声明 ``X-Client-Name``（最可靠）
+    2. 本地映射表按 API key 精确匹配（``~/.ethan/buddy_client_names.json``）
+    3. 本地映射表按 UA 片段匹配
+    4. UA 推断兜底：claude-cli → claude-code，其余取可辨识片段
+    """
+    if client_name:
+        return re.sub(r"[^\w./@-]", "", client_name)[:40]
+    names = _client_names()
+    if api_key and api_key in names["by_key"]:
+        return names["by_key"][api_key][:40]
+    ua = (user_agent or "").strip()
+    ua_lower = ua.lower()
+    for frag, name in names["by_ua"].items():
+        if frag and frag in ua_lower:
+            return name[:40]
+    if ua.startswith("claude-cli"):
+        return "claude-code"
+    for prefix in ("python-httpx", "OpenAI/Python", "OpenAI/JS", "node-fetch", "undici", "curl"):
+        if ua.startswith(prefix):
+            return prefix.lower().replace("/", "-")
+    return ua.split(" ")[0][:40]
+
+
 async def _instrument(
     state: Any,
     coro,
@@ -362,24 +430,26 @@ async def _instrument(
     metrics = getattr(state, "metrics", None)
     if metrics is None:
         return await coro
+    client = CLIENT_TAG.get()
     started = time.time()
     try:
         resp = await coro
     except HTTPException as exc:
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=exc.status_code, duration_ms=_elapsed_ms(started),
-                       error=_exc_text(exc.detail))
+                       error=_exc_text(exc.detail), client=client)
         raise
     except Exception as exc:
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
-                       status=500, duration_ms=_elapsed_ms(started), error=str(exc))
+                       status=500, duration_ms=_elapsed_ms(started), error=str(exc),
+                       client=client)
         raise
 
     if isinstance(resp, StreamingResponse):
         resp.body_iterator = _metrics_stream(
             resp.body_iterator, metrics,
             provider_id=provider_id, model_id=model_id, protocol=protocol,
-            started=started,
+            started=started, client=client,
         )
         return resp
 
@@ -404,12 +474,13 @@ async def _instrument(
         credit=credit,
         credit_estimated=credit_estimated,
         error=error,
+        client=client,
     )
     return resp
 
 
 async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
-                          protocol: str, started: float):
+                          protocol: str, started: float, client: str = ""):
     """流式响应的计数包装：透传所有 chunk，结束时补记（含 TTFT 与流式 usage）。"""
     chunk_count = 0
     error = ""
@@ -436,7 +507,8 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
                        completion_tokens=u.get("completion_tokens", 0),
                        cached_tokens=u.get("cached_tokens", 0),
                        credit=credit,
-                       credit_estimated=credit_estimated)
+                       credit_estimated=credit_estimated,
+                       client=client)
 
 
 async def forward_chat(

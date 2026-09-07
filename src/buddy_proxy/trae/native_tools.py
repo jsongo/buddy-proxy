@@ -166,6 +166,14 @@ def _send_native_chat(
     _native_rejected 判定回落，不在这里抛——文本协议兜底是对 4001 的
     正确响应，抛异常会跳过兜底。
     """
+    # PAT 扩展目录模型（配置了 TRAE_PAT_BEARER 时启用）：目录与默认网关不重叠，
+    # 直接走独立网关，不走下方 Work/IDE 凭证路径，也不参与 4001 回落。
+    from .pat import PAT_MODELS, pat_enabled, send_pat_native
+    if model in PAT_MODELS:
+        if not pat_enabled():
+            raise HTTPException(status_code=503, detail=(
+                f"模型 {model} 需要启用 PAT 通道：在 .env 配置 TRAE_PAT_BEARER（见 .token.md）"))
+        return send_pat_native(native_msgs, model, stream, tools)
     trae_model = _map_model(model)
     body = _build_native_body(native_msgs, trae_model, stream, tools)
     work = _load_work_cred()

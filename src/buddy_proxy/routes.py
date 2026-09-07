@@ -21,12 +21,14 @@ from buddy_proxy.state import (
 )
 from buddy_proxy.model_list import load_models_from_local_config, model_to_codex_format
 from buddy_proxy.codebuddy_provider import (
+    CLIENT_TAG,
     HAS_PROJECTION,
     anthropic_to_chat,
     body_summary,
     forward_chat,
     log_client_request,
     project_responses_chat_body,
+    resolve_client_tag,
     responses_request_to_chat,
 )
 
@@ -139,15 +141,24 @@ async def list_models():
 
 
 def client_meta(request: Request) -> dict[str, str]:
-    """提取客户端来源标识（User-Agent / 来源 IP / key 指纹），随请求日志落盘。"""
+    """提取客户端来源标识（自声明 X-Client-Name / UA / 来源 IP / key 指纹）。
+
+    顺带把合成后的短标签写入 CLIENT_TAG ContextVar，供 _instrument 落 metrics
+    （/ui 最近请求表展示）。X-Client-Name 优先于 UA 推断——UA 可被客户端
+    伪装（如 pi 仍发 claude-cli），自声明头不会。
+    """
     auth = request.headers.get("x-api-key") or request.headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
         auth = auth[7:]
     key_hint = f"{auth[:4]}…{auth[-4:]}" if len(auth) > 8 else (auth or "-")
+    user_agent = request.headers.get("user-agent", "-")
+    client_name = request.headers.get("x-client-name", "")
+    CLIENT_TAG.set(resolve_client_tag(user_agent, client_name, api_key=auth))
     return {
-        "user_agent": request.headers.get("user-agent", "-"),
+        "user_agent": user_agent,
         "client_ip": request.client.host if request.client else "-",
         "api_key_hint": key_hint,
+        "client_name": client_name,
     }
 
 

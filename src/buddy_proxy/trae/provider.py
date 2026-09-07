@@ -42,6 +42,13 @@ from .transport import send_trae_chat
 
 log = logging.getLogger(__name__)
 
+def _is_pat_model(model: str) -> bool:
+    """PAT 扩展目录模型：4001 时不回落文本协议——这些模型不在默认网关目录里，
+    回落必然再次失败，且会盖掉 PAT 侧的真实错误（如缺权益/网关未配置）。"""
+    from .pat import PAT_MODELS
+    return model in PAT_MODELS
+
+
 class TraeProvider(BaseProvider):
     id = "trae"
     name = "Trae (本地解密直连)"
@@ -82,6 +89,20 @@ class TraeProvider(BaseProvider):
                     "credits": MODEL_CREDITS.get(internal),
                     "description": f"Trae 别名 -> {internal}",
                 })
+        # PAT 扩展目录（配置了 TRAE_PAT_BEARER 时才暴露）
+        from .pat import pat_enabled, pat_model_names
+        if pat_enabled():
+            for m in pat_model_names():
+                if m not in seen:
+                    seen.add(m)
+                    result.append({
+                        "id": m,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": self.id,
+                        "tier": "PAT",
+                        "description": "Trae PAT 扩展模型",
+                    })
         return result
 
     def ensure_auth(self) -> None:
@@ -281,7 +302,7 @@ class TraeProvider(BaseProvider):
                             native["messages"], model, stream=True,
                             tools=native["tools"])
                         used = True
-                        if _native_rejected(raw_text):
+                        if _native_rejected(raw_text) and not _is_pat_model(model):
                             log.warning(
                                 "trae native tools rejected (4001), "
                                 "fallback to text protocol: model=%s", model)
@@ -430,7 +451,7 @@ class TraeProvider(BaseProvider):
             raw = _send_native_chat(
                 native["messages"], model, stream=False, tools=native["tools"])
             used_native = True
-            if _native_rejected(raw):
+            if _native_rejected(raw) and not _is_pat_model(model):
                 log.warning(
                     "trae native tools rejected (4001), "
                     "fallback to text protocol: model=%s", model)
