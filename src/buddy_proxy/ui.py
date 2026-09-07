@@ -63,6 +63,8 @@ def _err_text(detail: Any) -> str:
 def _codebuddy_models() -> list[dict[str, Any]]:
     models = []
     for m in load_models_from_local_config():
+        if m.get("provider") not in (None, "codebuddy"):
+            continue  # 其它 provider 专属条目（如 traepat）由各自分组展示
         models.append({
             "id": m.get("id"),
             "name": m.get("name") or m.get("id"),

@@ -65,29 +65,68 @@ def _token_file() -> pathlib.Path:
 
 # ───────────────────────── 扩展模型目录 ─────────────────────────
 
-# 外部模型名 -> (上游 model, 上游 config_name)。这些模型只在扩展网关提供，
-# 请求经 send_pat_chat 自动路由。目录来自上游模型列表接口（2026-09-07 实测）。
-PAT_MODELS: dict[str, tuple[str, str]] = {
-    "gpt-5.6-sol-max": ("gpt-5.6-sol__max", "gpt-5.6-sol"),
-    "gpt-5.6-sol": ("gpt-5.6-sol", "gpt-5.6-sol"),
-    "gpt-5.6-luna-max": ("gpt-5.6-luna__max", "gpt-5.6-luna"),
-    "gpt-5.6-terra-max": ("gpt-5.6-terra__max", "gpt-5.6-terra"),
-    "gpt-5.5-max": ("gpt-5.5__max", "gpt-5.5"),
-    "gpt-5.4": ("gpt-5.4", "gpt-5.4"),
-    "gpt-5.2": ("gpt-5.2", "gpt-5.2"),
-    "gpt-6-astra-max": ("gpt-6-astra__max", "gpt-6-astra"),
-    "gemini-3.1-pro": ("gemini-3.1-pro", "gemini-3.1-pro"),
-    "gemini-3-flash": ("gemini-3-flash", "gemini-3-flash"),
-    "openrouter-3o-max": ("openrouter-3o__max", "openrouter-3o"),
-    "openrouter-2o-max": ("openrouter-2o__max", "openrouter-2o"),
-    "openrouter-1o": ("openrouter-1o", "openrouter-1o"),
-    "openrouter-1": ("openrouter-1", "openrouter-1"),
-}
+# 模型目录唯一来源：仓库根 src/buddy_proxy/models_config.json 中
+# 带 "provider": "traepat" 的条目。加模型只改 JSON（热加载，无需重启）：
+#   gateway:        "plus"（扩展网关）| "public"（默认公网网关，PAT 身份）
+#   upstream_model: 上游请求体里的 model 字段
+#   config_name:    上游请求体里的 config_name（大小写敏感，实测 DeepSeek-/Doubao- 大写开头）
+_MODEL_CONFIG_FILE = pathlib.Path(__file__).resolve().parents[1] / "models_config.json"
+
+# 以下三个 dict 由 _reload_pat_models() 按 JSON 原地重建（引用保持稳定），
+# 其它模块的 `from .pat import PAT_MODELS` 拿到的始终是最新内容。
+PAT_MODELS: dict[str, tuple[str, str]] = {}
+PAT_PLUS_MODELS: dict[str, tuple[str, str]] = {}
+PAT_PUBLIC_MODELS: dict[str, tuple[str, str]] = {}
+_config_mtime: float | None = None
+
+
+def _reload_pat_models() -> None:
+    """从 models_config.json 热加载 PAT 模型表（mtime 变化才重读）。"""
+    global _config_mtime
+    try:
+        mtime = _MODEL_CONFIG_FILE.stat().st_mtime
+    except OSError:
+        return
+    if _config_mtime == mtime:
+        return
+    plus: dict[str, tuple[str, str]] = {}
+    public: dict[str, tuple[str, str]] = {}
+    try:
+        data = json.loads(_MODEL_CONFIG_FILE.read_text("utf-8"))
+        for m in data.get("models", []):
+            if m.get("provider") != "traepat":
+                continue
+            mid = str(m.get("id") or "").strip()
+            um, cn = str(m.get("upstream_model") or mid), str(m.get("config_name") or mid)
+            if not mid or not um:
+                continue
+            (plus if m.get("gateway") == "plus" else public)[mid] = (um, cn)
+    except Exception as e:
+        log.warning("PAT 模型配置解析失败（沿用上次内容）: %s", e)
+        return
+    PAT_PLUS_MODELS.clear(); PAT_PLUS_MODELS.update(plus)
+    PAT_PUBLIC_MODELS.clear(); PAT_PUBLIC_MODELS.update(public)
+    PAT_MODELS.clear(); PAT_MODELS.update({**plus, **public})
+    _config_mtime = mtime
+    log.info("PAT 模型目录已加载：扩展 %d + 公网 %d", len(plus), len(public))
 
 
 def pat_model_names() -> list[str]:
     """PAT 通道对外提供的模型名（供 provider.models() 条目注册）。"""
+    _reload_pat_models()
     return list(PAT_MODELS)
+
+
+def pat_gateway_is_plus(model: str) -> bool:
+    """该模型是否走扩展网关（False = 默认公网网关）。"""
+    _reload_pat_models()
+    return model in PAT_PLUS_MODELS
+
+
+def is_pat_model(model: str) -> bool:
+    """模型是否属于 PAT 通道目录（热加载后判断）。"""
+    _reload_pat_models()
+    return model in PAT_MODELS
 
 
 # ───────────────────────── token 缓存与两步交换 ─────────────────────────
@@ -309,18 +348,22 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
     扩展目录模型走 TRAE_PAT_PLUS_GATEWAY（未配置则报 503）；端点路径、
     headers、body 形状与 native 通道一致，返回原始 SSE 文本。
     """
+    _reload_pat_models()
     if model not in PAT_MODELS:
         raise HTTPException(status_code=400, detail=f"模型 {model} 不在 PAT 通道目录内")
     upstream_model, config = PAT_MODELS[model]
-    plus = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
-    if not plus:
-        raise HTTPException(status_code=503, detail=(
-            f"模型 {model} 需要在 .env 配置 TRAE_PAT_PLUS_GATEWAY 后可用（见 .token.md）"))
+    if pat_gateway_is_plus(model):
+        base = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
+        if not base:
+            raise HTTPException(status_code=503, detail=(
+                f"模型 {model} 需要在 .env 配置 TRAE_PAT_PLUS_GATEWAY 后可用（见 .token.md）"))
+    else:
+        base = str(BASE_URL_CN).rstrip("/")
     token, uid = get_pat_credentials()
     body = _build_pat_body(native_msgs, upstream_model, config, stream, tools)
     headers = {**_build_headers(token, uid),
                "Accept": "text/event-stream" if stream else "application/json"}
-    url = f"{plus}/api/agent/v3/llm_utils_chat"
+    url = f"{base}/api/agent/v3/llm_utils_chat"
     payload = json.dumps(body).encode("utf-8")
     try:
         with urllib.request.urlopen(urllib.request.Request(
@@ -354,3 +397,7 @@ def send_pat_chat(messages: list[dict[str, Any]], model: str, stream: bool,
     native_msgs = [{"role": m.get("role", "user"), "content": _content_blocks(m.get("content"))}
                    for m in messages]
     return send_pat_native(native_msgs, model, stream, tools)
+
+
+# 模块导入时先加载一次，保证任何首调用前目录可用
+_reload_pat_models()

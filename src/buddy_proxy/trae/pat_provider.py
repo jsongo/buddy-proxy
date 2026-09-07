@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+from fastapi import HTTPException
+
 from .pat import pat_enabled, pat_model_names, fetch_pat_ent_usage, get_pat_credentials
 from .provider import TraeProvider
 
@@ -36,6 +38,18 @@ class TraePatProvider(TraeProvider):
 
     def ensure_auth(self) -> None:
         get_pat_credentials()
+
+    async def forward(self, body, protocol, original=None):
+        # 防穿透守卫：非 PAT 目录模型绝不经由本 provider 转发——否则会穿透到
+        # 继承的个人通道逻辑，拿用户个人凭证调用、消耗个人额度（已发生过的 bug）
+        model = str(body.get("model", "") or "")
+        from .pat import PAT_MODELS
+        if model and model not in PAT_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"模型 {model} 不在 traepat 目录（PAT 通道仅含扩展模型与"
+                       f"注册过的个人目录模型）；如需个人账号额度请改用 trae/{model}")
+        return await super().forward(body, protocol, original)
 
     def quota(self) -> dict[str, Any] | None:
         try:

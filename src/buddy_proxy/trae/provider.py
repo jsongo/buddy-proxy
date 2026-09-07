@@ -45,8 +45,8 @@ log = logging.getLogger(__name__)
 def _is_pat_model(model: str) -> bool:
     """PAT 扩展目录模型：4001 时不回落文本协议——这些模型不在默认网关目录里，
     回落必然再次失败，且会盖掉 PAT 侧的真实错误（如缺权益/网关未配置）。"""
-    from .pat import PAT_MODELS
-    return model in PAT_MODELS
+    from .pat import is_pat_model
+    return is_pat_model(model)
 
 
 class TraeProvider(BaseProvider):

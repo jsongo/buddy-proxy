@@ -168,8 +168,8 @@ def _send_native_chat(
     """
     # PAT 扩展目录模型（配置了 TRAE_PAT_BEARER 时启用）：目录与默认网关不重叠，
     # 直接走独立网关，不走下方 Work/IDE 凭证路径，也不参与 4001 回落。
-    from .pat import PAT_MODELS, pat_enabled, send_pat_native
-    if model in PAT_MODELS:
+    from .pat import is_pat_model, pat_enabled, send_pat_native
+    if is_pat_model(model):
         if not pat_enabled():
             raise HTTPException(status_code=503, detail=(
                 f"模型 {model} 需要启用 PAT 通道：在 .env 配置 TRAE_PAT_BEARER（见 .token.md）"))

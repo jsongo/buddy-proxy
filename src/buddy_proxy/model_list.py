@@ -110,6 +110,7 @@ def normalize_model_format(remote_model: dict[str, Any]) -> dict[str, Any]:
         "tags": remote_model.get("tags", []),
         "modelType": remote_model.get("modelType"),
         "credits": remote_model.get("credits"),
+        "provider": remote_model.get("provider"),
     }
 
 
