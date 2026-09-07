@@ -49,9 +49,31 @@ from buddy_proxy import routes as _routes  # noqa: F401
 from buddy_proxy import ui as _ui  # noqa: F401
 
 
+def _load_dotenv(path: str = ".env") -> None:
+    """读取仓库根 .env（若存在）注入环境变量，已有值不覆盖。
+
+    用于 PAT 通道等本地私有配置（密钥/端点不入库，见 .token.md）。
+    格式：KEY=VALUE，支持 # 注释与引号包裹值。
+    """
+    f = pathlib.Path(path)
+    if not f.exists():
+        return
+    for line in f.read_text("utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def main():
     import buddy_proxy.state as _state
 
+    _load_dotenv()
     parser = argparse.ArgumentParser(description="CodeBuddy local API proxy")
     parser.add_argument("--host", default=os.getenv("BUDDY_PROXY_HOST", "127.0.0.1"),
                         help="监听地址")

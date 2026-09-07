@@ -82,6 +82,20 @@ class TraeProvider(BaseProvider):
                     "credits": MODEL_CREDITS.get(internal),
                     "description": f"Trae 别名 -> {internal}",
                 })
+        # PAT 扩展目录（配置了 TRAE_PAT_BEARER 时才暴露）
+        from .pat import pat_enabled, pat_model_names
+        if pat_enabled():
+            for m in pat_model_names():
+                if m not in seen:
+                    seen.add(m)
+                    result.append({
+                        "id": m,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": self.id,
+                        "tier": "PAT",
+                        "description": "Trae PAT 扩展模型",
+                    })
         return result
 
     def ensure_auth(self) -> None:
