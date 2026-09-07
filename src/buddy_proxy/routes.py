@@ -153,7 +153,7 @@ def client_meta(request: Request) -> dict[str, str]:
     key_hint = f"{auth[:4]}…{auth[-4:]}" if len(auth) > 8 else (auth or "-")
     user_agent = request.headers.get("user-agent", "-")
     client_name = request.headers.get("x-client-name", "")
-    CLIENT_TAG.set(resolve_client_tag(user_agent, client_name))
+    CLIENT_TAG.set(resolve_client_tag(user_agent, client_name, api_key=auth))
     return {
         "user_agent": user_agent,
         "client_ip": request.client.host if request.client else "-",

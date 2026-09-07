@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import pathlib
 import re
 import time
 import uuid
@@ -31,6 +34,8 @@ from buddy_proxy.state import (
     is_policy_blocked,
 )
 from buddy_proxy.logging_setup import now_s
+
+log = logging.getLogger(__name__)
 
 # 可选高级功能模块（脱敏 / 投影 / 协议转换器）
 try:
@@ -351,21 +356,60 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any]) -
 CLIENT_TAG: ContextVar[str] = ContextVar("client_tag", default="")
 
 
-def resolve_client_tag(user_agent: str, client_name: str) -> str:
-    """合成用于展示/落库的客户端短标签。
+_CLIENT_NAMES_FILE = os.environ.get(
+    "BUDDY_CLIENT_NAMES_FILE", str(pathlib.Path.home() / ".ethan" / "buddy_client_names.json"))
+_client_names_cache: tuple[float, dict[str, dict[str, str]]] | None = None
 
-    优先取客户端自声明的 ``X-Client-Name``（可辨识度最高），否则从 UA 推断：
-    claude-cli → claude-code；python-httpx / OpenAI SDK 等保留其可辨识片段。
+
+def _client_names() -> dict[str, dict[str, str]]:
+    """客户端名称映射表（本地文件，热加载，无文件/解析失败时空表）。
+
+    格式见 .token.md：``{"by_key": {"<key>": "名称"}, "by_ua": {"<ua片段>": "名称"}}``。
+    """
+    global _client_names_cache
+    try:
+        p = pathlib.Path(_CLIENT_NAMES_FILE)
+        if not p.exists():
+            return {"by_key": {}, "by_ua": {}}
+        mtime = p.stat().st_mtime
+        if _client_names_cache and _client_names_cache[0] == mtime:
+            return _client_names_cache[1]
+        raw = json.loads(p.read_text("utf-8"))
+        mapping = {
+            "by_key": {str(k): str(v) for k, v in (raw.get("by_key") or {}).items()},
+            "by_ua": {str(k).lower(): str(v) for k, v in (raw.get("by_ua") or {}).items()},
+        }
+        _client_names_cache = (mtime, mapping)
+        return mapping
+    except Exception as e:
+        log.warning("客户端名称映射表加载失败: %s", e)
+        return {"by_key": {}, "by_ua": {}}
+
+
+def resolve_client_tag(user_agent: str, client_name: str, api_key: str = "") -> str:
+    """合成用于展示/落库的客户端短标签，优先级：
+
+    1. 客户端自声明 ``X-Client-Name``（最可靠）
+    2. 本地映射表按 API key 精确匹配（``~/.ethan/buddy_client_names.json``）
+    3. 本地映射表按 UA 片段匹配
+    4. UA 推断兜底：claude-cli → claude-code，其余取可辨识片段
     """
     if client_name:
         return re.sub(r"[^\w./@-]", "", client_name)[:40]
+    names = _client_names()
+    if api_key and api_key in names["by_key"]:
+        return names["by_key"][api_key][:40]
     ua = (user_agent or "").strip()
+    ua_lower = ua.lower()
+    for frag, name in names["by_ua"].items():
+        if frag and frag in ua_lower:
+            return name[:40]
     if ua.startswith("claude-cli"):
         return "claude-code"
     for prefix in ("python-httpx", "OpenAI/Python", "OpenAI/JS", "node-fetch", "undici", "curl"):
         if ua.startswith(prefix):
             return prefix.lower().replace("/", "-")
-    return ua[:40]
+    return ua.split(" ")[0][:40]
 
 
 async def _instrument(
