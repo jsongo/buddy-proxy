@@ -57,21 +57,52 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
 
     默认路径锚定在仓库根（由模块位置推导，与启动时 CWD 无关）；
     也可用参数显式指定。用于 PAT 通道等本地私有配置（密钥/端点不入库，
-    见 .token.md）。格式：KEY=VALUE，支持 # 注释与引号包裹值。
+    见 .token.md）。格式：KEY=VALUE，支持 # 注释与引号包裹值；
+    VALUE 以 ``[``/``{`` 开头时连续收集后续行直到括号闭合，可写多行 JSON
+    （如 TRAE_PAT_BEARER_PROFILES）。
     注意：仅在 main() 里、所有模块 import 完成后调用——仅 import 期读取的
     环境变量不受本函数影响。
     """
     f = pathlib.Path(path) if path else _DEFAULT_ENV
     if not f.exists():
         return
+    pairs: list[tuple[str, str]] = []
+    pending_key: str | None = None
+    pending_value: list[str] = []
+    openers, closers = "[{", "]}"
+    depth = 0
+
+    def flush() -> None:
+        nonlocal pending_key, pending_value, depth
+        if pending_key is not None:
+            pairs.append((pending_key, "\n".join(pending_value)))
+        pending_key, pending_value, depth = None, [], 0
+
     for line in f.read_text("utf-8").splitlines():
         line = line.strip()
+        if pending_key is not None:
+            pending_value.append(line)
+            depth += sum(line.count(ch) for ch in openers)
+            depth -= sum(line.count(ch) for ch in closers)
+            if depth <= 0:
+                flush()
+            continue
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key, value = key.strip(), value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        if value and value[0] in openers:
+            pending_key, pending_value = key, [value]
+            depth = sum(value.count(ch) for ch in openers) - sum(value.count(ch) for ch in closers)
+            if depth <= 0:
+                flush()
+            continue
+        if key:
+            pairs.append((key, value))
+    flush()
+    for key, value in pairs:
         if key and key not in os.environ:
             os.environ[key] = value
 
@@ -188,6 +219,10 @@ def main():
             from buddy_proxy.trae.pat_provider import TraePatProvider
 
             trae_pat = TraePatProvider()
+            try:
+                trae_pat.ensure_auth()  # 本地配置校验 + 拉起后台凭证自愈循环
+            except HTTPException as exc:
+                logger.warning("trae PAT provider 认证未就绪: %s", exc.detail)
             providers[trae_pat.id] = trae_pat
             logger.info("Trae PAT provider enabled")
             print("[Trae PAT] Enabled (traepat/*)")
