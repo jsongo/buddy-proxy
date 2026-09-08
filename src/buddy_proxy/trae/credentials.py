@@ -28,14 +28,20 @@ log = logging.getLogger(__name__)
 
 # ───────────────────────── Trae API 调用 ─────────────────────────
 
-def _build_headers(token: str, user_id: str) -> dict[str, str]:
+def _build_headers(
+    token: str,
+    user_id: str,
+    *,
+    machine_id: str | None = None,
+    device_id: str | None = None,
+) -> dict[str, str]:
     """构建 SOLO 完整请求头（traework2api headers.go 实测值）。
 
-    关键：必须带 User-Agent: Trae/<ver> + X-Ide-Token 等 SOLO 专属头，
-    缺 UA 会被服务端当异常客户端限流（4011）。
+    PAT 多账号调用方会传入账号级稳定设备指纹；个人账号的旧调用未传时仍保持
+    原来的逐请求随机行为。设备指纹不从 bearer/token 推导，避免凭据侧信道。
     """
-    machine_id = uuid.uuid4().hex
-    device_id = hashlib.sha256(machine_id.encode()).hexdigest()[:32]
+    machine_id = machine_id or uuid.uuid4().hex
+    device_id = device_id or hashlib.sha256(machine_id.encode()).hexdigest()[:32]
     return {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
