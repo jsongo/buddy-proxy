@@ -61,6 +61,21 @@ is_running() {
     [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
+# 端口实况是唯一事实：pid 文件可能指向已死/僵死/被复用的进程
+find_port_pid() {
+    lsof -ti tcp:"$PROXY_PORT" -sTCP:LISTEN 2>/dev/null | head -1
+}
+
+# 防 PID 复用误判：确认该 pid 确实是我们的 buddy_proxy 进程
+is_proxy_cmd() {
+    ps -o command= -p "$1" 2>/dev/null | grep -q "buddy_proxy"
+}
+
+# 兜底清理：按完整启动参数精确匹配（只影响本实例，不误伤其它端口的代理）
+pattern_kill() {
+    pkill -9 -f "buddy_proxy --host $PROXY_HOST --port $PROXY_PORT" 2>/dev/null || true
+}
+
 usage() {
     grep '^# ' "$0" | sed 's/^# //'
     exit 1
@@ -80,13 +95,28 @@ parse_common() {
 
 cmd_start() {
     parse_common "$@"
-    local pid
-    pid="$(read_pid)"
-    if is_running "$pid"; then
-        log "already running (pid=$pid, $PROXY_HOST:$PROXY_PORT)"
-        return 0
+    # 以端口实况为准：真有实例在监听才算已运行
+    local port_pid
+    port_pid="$(find_port_pid || true)"
+    if [[ -n "$port_pid" ]]; then
+        if is_proxy_cmd "$port_pid"; then
+            log "already running (pid=$port_pid, listening on $PROXY_HOST:$PROXY_PORT)"
+            return 0
+        fi
+        log "ERROR: port $PROXY_PORT occupied by pid=$port_pid (not buddy-proxy):"
+        ps -o command= -p "$port_pid" | head -1
+        return 1
     fi
-    # 清理残留 pid
+
+    # 端口空闲但可能有「不监听的僵尸实例」或过期 pid 文件：先清理再启动
+    local old
+    old="$(read_pid)"
+    if [[ -n "$old" ]] && is_running "$old" && is_proxy_cmd "$old"; then
+        log "cleaning hung instance pid=$old (alive but not listening)"
+        kill -9 "$old" 2>/dev/null || true
+        sleep 1
+    fi
+    pattern_kill
     [[ -f "$PID_FILE" ]] && rm -f "$PID_FILE"
 
     log "starting buddy-proxy on $PROXY_HOST:$PROXY_PORT ..."
@@ -119,23 +149,41 @@ cmd_start() {
 cmd_stop() {
     local pid
     pid="$(read_pid)"
-    if [[ -z "$pid" ]] || ! is_running "$pid"; then
+    local port_pid
+    port_pid="$(find_port_pid || true)"
+
+    if [[ -z "$pid" ]] && [[ -z "$port_pid" ]]; then
         log "not running"
+        pattern_kill
         rm -f "$PID_FILE"
         return 0
     fi
-    log "stopping pid=$pid ..."
-    kill "$pid" 2>/dev/null || true
+
+    # 双保险：pid 文件指向的进程 + 真正占着端口的进程，都停
+    if [[ -n "$pid" ]] && is_running "$pid"; then
+        log "stopping pid=$pid ..."
+        kill "$pid" 2>/dev/null || true
+    fi
+    if [[ -n "$port_pid" ]] && [[ "$port_pid" != "$pid" ]]; then
+        log "stopping listener pid=$port_pid ..."
+        kill "$port_pid" 2>/dev/null || true
+    fi
+
+    # 等端口真正释放（最多 10s）
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         sleep 1
-        if ! is_running "$pid"; then
+        port_pid="$(find_port_pid || true)"
+        if [[ -z "$port_pid" ]] && ! is_running "$pid"; then
             rm -f "$PID_FILE"
             log "stopped"
             return 0
         fi
     done
-    log "force killing pid=$pid"
-    kill -9 "$pid" 2>/dev/null || true
+
+    log "force killing (pid=$pid, listener=$port_pid)"
+    [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null
+    [[ -n "$port_pid" ]] && kill -9 "$port_pid" 2>/dev/null
+    pattern_kill
     rm -f "$PID_FILE"
     return 0
 }

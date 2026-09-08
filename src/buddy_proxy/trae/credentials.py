@@ -97,12 +97,24 @@ def _work_headers(work: dict[str, Any]) -> dict[str, str]:
 
 # 全局认证缓存（惰性加载）
 _auth_cache: tuple[str, str] | None = None
-# 凭证路径可用 TRAE_WORK_CRED_PATH 覆盖（默认寄存在 ~/.ethan，兼容 ethan 生态）
-_WORK_CRED_PATH = Path(os.environ.get("TRAE_WORK_CRED_PATH", str(Path.home() / ".ethan" / "trae_work.json")))
+# 凭证路径可用 TRAE_WORK_CRED_PATH 覆盖；默认统一存 ~/.buddy-proxy/，
+# 首次访问自动从遗留位置 ~/.ethan/trae_work.json 迁移（copy，原文件保留）。
+from ..paths import state_file
+
+
+def _work_cred_path() -> Path:
+    configured = os.environ.get("TRAE_WORK_CRED_PATH", "")
+    if configured:
+        return Path(configured)
+    return state_file("trae_work.json", legacy="trae_work.json")
+
+
+WORK_CRED_PATH = _work_cred_path()
+_WORK_CRED_PATH = WORK_CRED_PATH  # 兼容旧名
 
 
 def _load_work_cred() -> dict[str, Any] | None:
-    """从 ~/.ethan/trae_work.json 读 Work 凭证（trae_work_login.py 生成）。"""
+    """读 Work 凭证（trae_work_login.py 生成）。"""
     if not _WORK_CRED_PATH.exists():
         return None
     try:

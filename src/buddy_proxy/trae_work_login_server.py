@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 CLIENT_ID = "en1oxy7wnw8j9n"
 APP_VERSION = "0.1.43"
 API_HOST = "https://api.trae.com.cn"
-OUT_PATH = Path.home() / ".ethan" / "trae_work.json"
+OUT_PATH = Path.home() / ".buddy-proxy" / "trae_work.json"
 # 与 trae_work_login.py 共享的本次登录状态（nonce + machine_id/device_id）
 STATE_PATH = Path("/tmp/trae_work_login_state.json")
 STATE_TTL = 900  # 状态有效期（秒）

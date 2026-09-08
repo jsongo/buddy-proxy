@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.credit_estimate import estimate_credit
 from buddy_proxy.dsml_parser import DSMLStreamBuffer
-from buddy_proxy.metrics import SSEUsageExtractor, normalize_usage
+from buddy_proxy.metrics import ACCOUNT_META, SSEUsageExtractor, normalize_usage
 from buddy_proxy.providers import BaseProvider
 from buddy_proxy.state import (
     diagnostic,
@@ -356,8 +356,15 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any]) -
 CLIENT_TAG: ContextVar[str] = ContextVar("client_tag", default="")
 
 
-_CLIENT_NAMES_FILE = os.environ.get(
-    "BUDDY_CLIENT_NAMES_FILE", str(pathlib.Path.home() / ".ethan" / "buddy_client_names.json"))
+def _client_names_path() -> pathlib.Path:
+    configured = os.environ.get("BUDDY_CLIENT_NAMES_FILE", "")
+    if configured:
+        return pathlib.Path(configured)
+    from .paths import state_file
+    return state_file("buddy_client_names.json", legacy="buddy_client_names.json")
+
+
+_CLIENT_NAMES_FILE = _client_names_path()
 _client_names_cache: tuple[float, dict[str, dict[str, str]]] | None = None
 
 
@@ -390,7 +397,7 @@ def resolve_client_tag(user_agent: str, client_name: str, api_key: str = "") -> 
     """合成用于展示/落库的客户端短标签，优先级：
 
     1. 客户端自声明 ``X-Client-Name``（最可靠）
-    2. 本地映射表按 API key 精确匹配（``~/.ethan/buddy_client_names.json``）
+    2. 本地映射表按 API key 精确匹配（``~/.buddy-proxy/buddy_client_names.json``）
     3. 本地映射表按 UA 片段匹配
     4. UA 推断兜底：claude-cli → claude-code，其余取可辨识片段
     """
@@ -431,25 +438,32 @@ async def _instrument(
     if metrics is None:
         return await coro
     client = CLIENT_TAG.get()
+    # 请求级账号 holder：traepat 在 SSE 读线程/to_thread worker 里选定账号后
+    # 写入（见 metrics.ACCOUNT_META 注释），流式落库发生在流结束，经此 dict 传回。
+    # 不做 reset：流式 body 在本函数返回后才迭代，_stream 届时才复制上下文派生
+    # 读线程；请求任务结束后上下文随之丢弃，不会泄漏到其它请求。
+    account_meta: dict[str, str] = {}
+    ACCOUNT_META.set(account_meta)
     started = time.time()
     try:
         resp = await coro
     except HTTPException as exc:
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=exc.status_code, duration_ms=_elapsed_ms(started),
-                       error=_exc_text(exc.detail), client=client)
+                       error=_exc_text(exc.detail), client=client,
+                       account=account_meta.get("account", ""))
         raise
     except Exception as exc:
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=500, duration_ms=_elapsed_ms(started), error=str(exc),
-                       client=client)
+                       client=client, account=account_meta.get("account", ""))
         raise
 
     if isinstance(resp, StreamingResponse):
         resp.body_iterator = _metrics_stream(
             resp.body_iterator, metrics,
             provider_id=provider_id, model_id=model_id, protocol=protocol,
-            started=started, client=client,
+            started=started, client=client, account_meta=account_meta,
         )
         return resp
 
@@ -475,12 +489,14 @@ async def _instrument(
         credit_estimated=credit_estimated,
         error=error,
         client=client,
+        account=account_meta.get("account", ""),
     )
     return resp
 
 
 async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
-                          protocol: str, started: float, client: str = ""):
+                          protocol: str, started: float, client: str = "",
+                          account_meta: dict[str, str] | None = None):
     """流式响应的计数包装：透传所有 chunk，结束时补记（含 TTFT 与流式 usage）。"""
     chunk_count = 0
     error = ""
@@ -508,7 +524,8 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
                        cached_tokens=u.get("cached_tokens", 0),
                        credit=credit,
                        credit_estimated=credit_estimated,
-                       client=client)
+                       client=client,
+                       account=(account_meta or {}).get("account", ""))
 
 
 async def forward_chat(
