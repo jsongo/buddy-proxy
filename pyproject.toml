@@ -28,7 +28,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-buddy_proxy = ["models_config.json"]
+buddy_proxy = ["models_config.json", "static/*.html"]
 
 [dependency-groups]
 dev = [
