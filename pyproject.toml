@@ -37,4 +37,8 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["test_endpoints_smoke.py", "test_ui_admin.py"]
+testpaths = [
+    "test_endpoints_smoke.py",
+    "test_ui_admin.py",
+    "test_trae_pat_failover.py",
+]
