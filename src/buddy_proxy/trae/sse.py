@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 from typing import Any, Iterator
@@ -47,33 +48,78 @@ def _trae_error_text(data: dict[str, Any]) -> str:
         text = f"{text} (code: {code})"
     return text
 
-def _parse_sse(text: str) -> list[tuple[str, dict[str, Any]]]:
-    """解析 Trae SSE 流 -> [(event, data_dict), ...]。"""
-    events = []
-    current_event = ""
-    current_data: list[str] = []
+class _SSEDecoder:
+    """增量解码 SSE，允许 UTF-8、行和事件跨任意传输块边界。"""
 
-    def flush():
-        if current_data:
-            data_str = "\n".join(current_data)
-            try:
-                parsed = json.loads(data_str)
-            except Exception:
-                parsed = {"raw": data_str}
-            events.append((current_event, parsed))
-            current_data.clear()
+    def __init__(self) -> None:
+        self._utf8 = codecs.getincrementaldecoder("utf-8")("replace")
+        self._text = ""
+        self._event = ""
+        self._data: list[str] = []
 
-    for line in text.splitlines():
-        line = line.strip()
+    def _flush_event(self) -> tuple[str, dict[str, Any]] | None:
+        if not self._data:
+            self._event = ""
+            return None
+        raw = "\n".join(self._data)
+        self._data.clear()
+        event = self._event
+        self._event = ""
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = {"raw": raw}
+        return event, parsed
+
+    def _line(self, line: str) -> tuple[str, dict[str, Any]] | None:
+        # SSE 只移除协议允许的单个前导空格；正文尾部空格必须保留。
+        if line.endswith("\r"):
+            line = line[:-1]
         if not line:
-            flush()
-            current_event = ""
-        elif line.startswith("event:"):
-            current_event = line[6:].strip()
-        elif line.startswith("data:"):
-            current_data.append(line[5:].strip())
-    flush()
-    return events
+            return self._flush_event()
+        if line.startswith(":"):
+            return None
+        field, sep, value = line.partition(":")
+        if sep and value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            self._event = value
+        elif field == "data":
+            self._data.append(value)
+        return None
+
+    def feed(self, chunk: bytes | str) -> list[tuple[str, dict[str, Any]]]:
+        if isinstance(chunk, bytes):
+            self._text += self._utf8.decode(chunk)
+        else:
+            self._text += chunk
+        lines = self._text.split("\n")
+        self._text = lines.pop()
+        events: list[tuple[str, dict[str, Any]]] = []
+        for line in lines:
+            event = self._line(line)
+            if event is not None:
+                events.append(event)
+        return events
+
+    def finish(self) -> list[tuple[str, dict[str, Any]]]:
+        self._text += self._utf8.decode(b"", final=True)
+        events: list[tuple[str, dict[str, Any]]] = []
+        if self._text:
+            event = self._line(self._text)
+            self._text = ""
+            if event is not None:
+                events.append(event)
+        event = self._flush_event()
+        if event is not None:
+            events.append(event)
+        return events
+
+
+def _parse_sse(text: str) -> list[tuple[str, dict[str, Any]]]:
+    """解析完整 Trae SSE 文本；规则与流式增量 decoder 完全一致。"""
+    decoder = _SSEDecoder()
+    return decoder.feed(text) + decoder.finish()
 
 
 # ───────────────────────── Provider 实现 ─────────────────────────

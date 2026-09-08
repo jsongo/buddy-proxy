@@ -1,87 +1,180 @@
-"""PAT 凭证通道：独立服务账号接入，用于扩展模型目录（GPT/Gemini 等）。
+"""TRAE PAT 多账号凭证、缓存、配额隔离与稳定主备 failover。
 
-与 Work/IDE 凭证（trae_work.json / storage.json 解密）完全独立的第二账号体系：
-- 凭据来源走环境变量（在仓库根 .env 配置，该文件不入库）；
-- CloudIDE token 有约 7 天硬过期，临期自动重换（重换需能连上交换端点，
-  连不上时沿用缓存旧 token 直至真正过期）；
-- 换 token 手册与 .env 配置说明见仓库根 ``.token.md``（本地文件，勿提交）。
-
-环境变量（全部可选；``TRAE_PAT_BEARER`` 未设置时本通道整体停用）：
-- ``TRAE_PAT_BEARER``         服务账号密钥
-- ``TRAE_PAT_AUTH_URL``       两步交换第一步端点（短期 JWT 在响应头返回）
-- ``TRAE_PAT_TOKEN_URL``      两步交换第二步端点（返回 Result.Token/UserID）
-- ``TRAE_PAT_PLUS_GATEWAY``   扩展模型目录的网关 base（缺省扩展模型不可用）
-- ``TRAE_PAT_TOKEN_FILE``     token 缓存文件路径（默认 ~/.ethan/trae_pat_token.json）
-
-请求形状与 native 通道完全一致（同 headers、同 body、同端点路径），
-仅 base_url 与可用模型目录不同，按模型名自动路由。
+``TRAE_PAT_BEARER_PROFILES`` 是严格 JSON 数组，每项必须包含 ``bearer``，
+可选 ``id``、``priority``，不接受其他字段。配置存在时不会回退旧的
+``TRAE_PAT_BEARER``；旧变量只在 profiles 完全未设置时兼容。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+import errno
+import hashlib
 import json
 import logging
 import os
 import pathlib
+import re
+import socket
+import tempfile
+import threading
 import time
+from email.utils import parsedate_to_datetime
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
-from typing import Any
+from typing import Any, Iterator
+from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import HTTPException
 
 from .config import BASE_URL_CN
 from .credentials import _build_headers
 from .native_tools import _content_blocks, _native_tools_payload
+from .sse import _parse_sse, _SSEDecoder
 
 log = logging.getLogger(__name__)
 
-# ───────────────────────── 配置（全部来自环境变量） ─────────────────────────
-
 _BEARER = "TRAE_PAT_BEARER"
+_BEARER_PROFILES = "TRAE_PAT_BEARER_PROFILES"
 _AUTH_URL = "TRAE_PAT_AUTH_URL"
 _TOKEN_URL = "TRAE_PAT_TOKEN_URL"
 _PLUS_GATEWAY = "TRAE_PAT_PLUS_GATEWAY"
 _TOKEN_FILE = "TRAE_PAT_TOKEN_FILE"
 
-# 缓存 token 剩余寿命低于该值时尝试重换（秒）。重换失败不阻塞：旧 token 仍可用。
+_MAX_PROFILES = 16
+_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _REFRESH_MARGIN_S = 2 * 3600
-# 交换请求超时（秒）
 _EXCHANGE_TIMEOUT_S = 20
-# 聊天请求超时（秒）
 _CHAT_TIMEOUT_S = 180
+# 仅连接建立前可安全重放的瞬时错误；总尝试次数 = 首次 + 3 次重试。
+_CONNECT_RETRY_DELAYS_S = (0.3, 1.0, 2.0)
+_CONNECT_RETRY_ERRNOS = frozenset({errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH})
+# 账号级认证/限流的短冷却；429 可由 Retry-After 覆盖。
+_ACCOUNT_COOLDOWN_S = 60
+_FAILOVER_SSE_CODES = frozenset({4008, 4009, 4031, 4220, 4221, 4222, 4223, 4224, 4227})
+
+
+@dataclass(frozen=True, slots=True)
+class PatProfile:
+    id: str
+    bearer: str
+    priority: int
+    index: int
+
+    @property
+    def cache_key(self) -> str:
+        # id 可调整展示或排序；凭据归属必须绑定 bearer，避免配置重排后串用 token。
+        digest = hashlib.sha256(self.bearer.encode()).hexdigest()[:20]
+        return f"profile-{digest}"
+
+
+@dataclass(frozen=True, slots=True)
+class PatCredentials:
+    token: str
+    uid: str
+    machine_id: str
+    device_id: str
+
+
+class _PatConfigError(ValueError):
+    """配置错误；消息必须保持脱敏。"""
+
+
+def _profiles_configured() -> bool:
+    return _BEARER_PROFILES in os.environ
+
+
+def _load_profiles() -> tuple[PatProfile, ...]:
+    """读取并严格校验账号配置，结果按 ``priority/index`` 稳定排序。"""
+    if _profiles_configured():
+        raw = os.environ.get(_BEARER_PROFILES, "")
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 不是合法 JSON") from exc
+        if not isinstance(parsed, list) or not parsed:
+            raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 必须是非空 JSON 数组")
+        if len(parsed) > _MAX_PROFILES:
+            raise _PatConfigError(f"TRAE_PAT_BEARER_PROFILES 最多允许 {_MAX_PROFILES} 个账号")
+        profiles: list[PatProfile] = []
+        ids: set[str] = set()
+        bearers: set[str] = set()
+        allowed = {"bearer", "id", "priority"}
+        for index, item in enumerate(parsed):
+            if not isinstance(item, dict) or "bearer" not in item or not set(item) <= allowed:
+                raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 项字段无效")
+            account_id = item.get("id", f"profile-{index}")
+            bearer = item.get("bearer")
+            priority = item.get("priority", index)
+            if not isinstance(account_id, str) or not _PROFILE_ID_RE.fullmatch(account_id):
+                raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 含非法 id")
+            if (not isinstance(bearer, str) or not bearer or bearer != bearer.strip()
+                    or len(bearer) > 8192 or any(ord(char) < 32 or ord(char) == 127 for char in bearer)):
+                raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 含非法 bearer")
+            if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 1000:
+                raise _PatConfigError("TRAE_PAT_BEARER_PROFILES priority 必须是 0..1000 的整数")
+            if account_id in ids or bearer in bearers:
+                raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 含重复账号")
+            ids.add(account_id)
+            bearers.add(bearer)
+            profiles.append(PatProfile(account_id, bearer, priority, index))
+        return tuple(sorted(profiles, key=lambda profile: (profile.priority, profile.index)))
+
+    bearer = os.environ.get(_BEARER, "").strip()
+    if not bearer:
+        return ()
+    return (PatProfile("legacy", bearer, 0, 0),)
+
+
+def _configuration_error(exc: Exception) -> HTTPException:
+    # 不拼接原始 JSON、bearer 或底层异常，防止秘密进入 HTTP 响应和日志。
+    return HTTPException(status_code=503, detail=f"PAT 多账号配置无效：{exc}")
+
+
+def ensure_pat_config() -> tuple[PatProfile, ...]:
+    """仅校验本地配置，不读网络，供 provider.ensure_auth 使用。"""
+    try:
+        profiles = _load_profiles()
+    except _PatConfigError as exc:
+        raise _configuration_error(exc) from None
+    if not profiles:
+        raise HTTPException(status_code=401, detail="PAT 通道未配置服务账号密钥")
+    return profiles
 
 
 def pat_enabled() -> bool:
-    """PAT 通道是否启用（配置了服务账号密钥即视为启用）。"""
+    """是否存在 PAT 配置意图；配置错误留给请求期校验明确报告。
+
+    profiles 变量一旦存在便不回退旧 bearer。即使其内容无效，也注册 provider，
+    避免请求静默落入其他通道；真正转发前由 ``ensure_pat_config`` fail-closed。
+    """
+    if _profiles_configured():
+        return True
     return bool(os.environ.get(_BEARER, "").strip())
 
 
 def _token_file() -> pathlib.Path:
-    return pathlib.Path(os.environ.get(_TOKEN_FILE, "")) if os.environ.get(_TOKEN_FILE) \
-        else pathlib.Path.home() / ".ethan" / "trae_pat_token.json"
+    configured = os.environ.get(_TOKEN_FILE, "")
+    return pathlib.Path(configured) if configured else pathlib.Path.home() / ".ethan" / "trae_pat_token.json"
 
 
-# ───────────────────────── 扩展模型目录 ─────────────────────────
+# ───────────────────────── 模型目录 ─────────────────────────
 
-# 模型目录唯一来源：仓库根 src/buddy_proxy/models_config.json 中
-# 带 "provider": "traepat" 的条目。加模型只改 JSON（热加载，无需重启）：
-#   gateway:        "plus"（扩展网关）| "public"（默认公网网关，PAT 身份）
-#   upstream_model: 上游请求体里的 model 字段
-#   config_name:    上游请求体里的 config_name（大小写敏感，实测 DeepSeek-/Doubao- 大写开头）
 _MODEL_CONFIG_FILE = pathlib.Path(__file__).resolve().parents[1] / "models_config.json"
-
-# 以下三个 dict 由 _reload_pat_models() 按 JSON 原地重建（引用保持稳定），
-# 其它模块的 `from .pat import PAT_MODELS` 拿到的始终是最新内容。
 PAT_MODELS: dict[str, tuple[str, str]] = {}
 PAT_PLUS_MODELS: dict[str, tuple[str, str]] = {}
 PAT_PUBLIC_MODELS: dict[str, tuple[str, str]] = {}
+# 模型 -> function 覆盖（个别模型只在特定 function 下开放，如 gpt-6-astra 仅
+# solo_agent；缺省走 WB_TRAE_NATIVE_FUNCTION / chat_v3）
+PAT_MODEL_FUNCTIONS: dict[str, str] = {}
 _config_mtime: float | None = None
 
 
 def _reload_pat_models() -> None:
-    """从 models_config.json 热加载 PAT 模型表（mtime 变化才重读）。"""
     global _config_mtime
     try:
         mtime = _MODEL_CONFIG_FILE.stat().st_mtime
@@ -91,214 +184,494 @@ def _reload_pat_models() -> None:
         return
     plus: dict[str, tuple[str, str]] = {}
     public: dict[str, tuple[str, str]] = {}
+    functions: dict[str, str] = {}
     try:
         data = json.loads(_MODEL_CONFIG_FILE.read_text("utf-8"))
-        for m in data.get("models", []):
-            if m.get("provider") != "traepat":
+        for model in data.get("models", []):
+            if model.get("provider") != "traepat":
                 continue
-            mid = str(m.get("id") or "").strip()
-            um, cn = str(m.get("upstream_model") or mid), str(m.get("config_name") or mid)
-            if not mid or not um:
-                continue
-            (plus if m.get("gateway") == "plus" else public)[mid] = (um, cn)
-    except Exception as e:
-        log.warning("PAT 模型配置解析失败（沿用上次内容）: %s", e)
+            model_id = str(model.get("id") or "").strip()
+            upstream = str(model.get("upstream_model") or model_id)
+            config = str(model.get("config_name") or model_id)
+            if model_id and upstream:
+                (plus if model.get("gateway") == "plus" else public)[model_id] = (upstream, config)
+            override = str(model.get("function") or "").strip()
+            if model_id and override:
+                functions[model_id] = override
+    except Exception as exc:
+        log.warning("PAT 模型配置解析失败（沿用上次内容）: %s", type(exc).__name__)
         return
-    PAT_PLUS_MODELS.clear(); PAT_PLUS_MODELS.update(plus)
-    PAT_PUBLIC_MODELS.clear(); PAT_PUBLIC_MODELS.update(public)
-    PAT_MODELS.clear(); PAT_MODELS.update({**plus, **public})
+    PAT_PLUS_MODELS.clear()
+    PAT_PLUS_MODELS.update(plus)
+    PAT_PUBLIC_MODELS.clear()
+    PAT_PUBLIC_MODELS.update(public)
+    PAT_MODEL_FUNCTIONS.clear()
+    PAT_MODEL_FUNCTIONS.update(functions)
+    PAT_MODELS.clear()
+    PAT_MODELS.update({**plus, **public})
     _config_mtime = mtime
     log.info("PAT 模型目录已加载：扩展 %d + 公网 %d", len(plus), len(public))
 
 
 def pat_model_names() -> list[str]:
-    """PAT 通道对外提供的模型名（供 provider.models() 条目注册）。"""
     _reload_pat_models()
     return list(PAT_MODELS)
 
 
 def pat_model_meta() -> dict[str, dict[str, Any]]:
-    """模型 id -> 原始配置条目（name/credits/max_input/reasoning 等展示元数据）。"""
     _reload_pat_models()
     try:
         data = json.loads(_MODEL_CONFIG_FILE.read_text("utf-8"))
-        return {str(m.get("id")): m for m in data.get("models", [])
-                if m.get("provider") == "traepat" and m.get("id")}
+        return {str(model.get("id")): model for model in data.get("models", [])
+                if model.get("provider") == "traepat" and model.get("id")}
     except Exception:
         return {}
 
 
 def pat_gateway_is_plus(model: str) -> bool:
-    """该模型是否走扩展网关（False = 默认公网网关）。"""
     _reload_pat_models()
     return model in PAT_PLUS_MODELS
 
 
 def is_pat_model(model: str) -> bool:
-    """模型是否属于 PAT 通道目录（热加载后判断）。"""
     _reload_pat_models()
     return model in PAT_MODELS
 
 
-# ───────────────────────── token 缓存与两步交换 ─────────────────────────
+# ───────────────────────── 原子账号缓存与刷新锁 ─────────────────────────
 
-def _load_cached() -> dict[str, Any] | None:
-    f = _token_file()
-    if not f.exists():
-        return None
+_cache_lock = threading.RLock()
+_refresh_locks_guard = threading.Lock()
+_refresh_locks: dict[str, threading.Lock] = {}
+
+
+def _refresh_lock(account_id: str) -> threading.Lock:
+    with _refresh_locks_guard:
+        return _refresh_locks.setdefault(account_id, threading.Lock())
+
+
+def _read_cache_unlocked() -> dict[str, Any]:
+    path = _token_file()
     try:
-        return json.loads(f.read_text("utf-8"))
-    except Exception as e:
-        log.warning("PAT token 缓存解析失败: %s", e)
-        return None
+        data = json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return {"version": 2, "profiles": {}}
+    except Exception as exc:
+        log.warning("PAT 缓存解析失败: %s", type(exc).__name__)
+        return {"version": 2, "profiles": {}}
+    if isinstance(data, dict) and isinstance(data.get("profiles"), dict):
+        return {"version": 2, "profiles": data["profiles"]}
+    # 旧根对象没有可验证的账号归属；即使当前只有一个账号，也可能刚替换过 bearer。
+    # 为避免继续使用旧身份，一律丢弃并重新交换。
+    if isinstance(data, dict) and data.get("cloud_ide_token"):
+        return {"version": 2, "profiles": {}}
+    return {"version": 2, "profiles": {}}
 
 
-def _save_cached(token: str, uid: str, expires_at: float) -> None:
-    f = _token_file()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({
-        "cloud_ide_token": token,
-        "uid": uid,
-        "expires_at": expires_at,
-        "refreshed_at": time.time(),
-    }, ensure_ascii=False, indent=1), "utf-8")
-    try:  # 缓存含密钥，收紧权限
-        f.chmod(0o600)
-    except OSError:
-        pass
+def _load_cache() -> dict[str, Any]:
+    with _cache_lock:
+        return _read_cache_unlocked()
 
 
-def _exchange(bearer: str) -> tuple[str, str, float]:
-    """两步交换：bearer -> 短期 JWT（响应头） -> CloudIDE token。返回 (token, uid, exp)。"""
-    auth_url = os.environ.get(_AUTH_URL, "").strip()
-    token_url = os.environ.get(_TOKEN_URL, "").strip()
-    if not auth_url or not token_url:
-        raise HTTPException(status_code=503, detail=(
-            "PAT 换 token 缺少端点配置：请在 .env 设置 TRAE_PAT_AUTH_URL / TRAE_PAT_TOKEN_URL"
-            "（见 .token.md）；当前网络也可能不可达，配置好的缓存 token 未过期前仍可用"))
-    req = urllib.request.Request(auth_url, data=b"",
-                                 headers={"Authorization": f"Bearer {bearer}",
-                                          "Accept": "application/json",
-                                          "User-Agent": "ByteDanceCLI/1.0"}, method="GET")
-    with urllib.request.urlopen(req, timeout=_EXCHANGE_TIMEOUT_S) as resp:
-        jwt = (resp.headers.get("x-jwt-token") or "").strip()
-    if not jwt:
-        raise HTTPException(status_code=502, detail="PAT 第一步交换未返回令牌（检查密钥与端点配置）")
+def _atomic_write_json(path: pathlib.Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=1)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
-    req = urllib.request.Request(token_url, data=b"{}",
-                                 headers={"x-jwt-token": jwt, "Accept": "application/json",
-                                          "Content-Type": "application/json",
-                                          "User-Agent": "ByteDanceCLI/1.0"}, method="POST")
-    with urllib.request.urlopen(req, timeout=_EXCHANGE_TIMEOUT_S) as resp:
-        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-    result = payload.get("Result") or payload.get("result") or {}
-    token = (result.get("Token") or "").strip()
-    if not token:
-        raise HTTPException(status_code=502, detail="PAT 第二步交换未返回 token（账号可能缺模型权益）")
-    uid = (result.get("UserID") or result.get("userid") or "").strip()
-    exp = result.get("ExpiredAt") or ""
-    expires_at = _parse_expired_at(exp, fallback=time.time() + 6.5 * 86400)
-    return token, uid, expires_at
+
+def _mutate_account(account_id: str, mutate: Any) -> dict[str, Any]:
+    with _cache_lock:
+        document = _read_cache_unlocked()
+        profiles = document.setdefault("profiles", {})
+        state = profiles.get(account_id)
+        if not isinstance(state, dict):
+            state = {}
+            profiles[account_id] = state
+        mutate(state)
+        _atomic_write_json(_token_file(), document)
+        return dict(state)
+
+
+def _account_state(account_id: str) -> dict[str, Any]:
+    document = _load_cache()
+    state = document.get("profiles", {}).get(account_id, {})
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def _ensure_fingerprint(account_id: str) -> tuple[str, str]:
+    state = _account_state(account_id)
+    machine_id = state.get("machine_id")
+    device_id = state.get("device_id")
+    if isinstance(machine_id, str) and machine_id and isinstance(device_id, str) and device_id:
+        return machine_id, device_id
+    machine_id = uuid.uuid4().hex
+    device_id = hashlib.sha256(machine_id.encode()).hexdigest()[:32]
+
+    def store(current: dict[str, Any]) -> None:
+        current.setdefault("machine_id", machine_id)
+        current.setdefault("device_id", device_id)
+
+    state = _mutate_account(account_id, store)
+    return str(state["machine_id"]), str(state["device_id"])
+
+
+# 旧内部函数兼容：读取当前首账号状态（落盘已统一为 v2 原子格式）。
+def _load_cached() -> dict[str, Any] | None:
+    profiles = ensure_pat_config()
+    return _account_state(profiles[0].cache_key) or None
 
 
 def _parse_expired_at(text: str, fallback: float) -> float:
-    """解析 Go RFC3339Nano 时间串（如 2026-09-14T23:44:06.57+08:00），失败给兜底值。"""
     try:
-        from datetime import datetime
         return datetime.fromisoformat(text).timestamp()
     except Exception:
         return fallback
 
 
-def get_pat_credentials(force_refresh: bool = False) -> tuple[str, str]:
-    """取 (CloudIDE token, uid)，带文件缓存与临期自动重换。
+def _exchange(bearer: str) -> tuple[str, str, float]:
+    """两步交换；异常消息永不包含 bearer/JWT/token。"""
+    auth_url = os.environ.get(_AUTH_URL, "").strip()
+    token_url = os.environ.get(_TOKEN_URL, "").strip()
+    if not auth_url or not token_url:
+        raise HTTPException(status_code=503, detail="PAT 换 token 缺少端点配置")
+    request = urllib.request.Request(
+        auth_url, data=b"", method="GET",
+        headers={"Authorization": f"Bearer {bearer}", "Accept": "application/json",
+                 "User-Agent": "ByteDanceCLI/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
+        jwt = (response.headers.get("x-jwt-token") or "").strip()
+    if not jwt:
+        raise HTTPException(status_code=502, detail="PAT 第一步交换未返回令牌")
+    request = urllib.request.Request(
+        token_url, data=b"{}", method="POST",
+        headers={"x-jwt-token": jwt, "Accept": "application/json",
+                 "Content-Type": "application/json", "User-Agent": "ByteDanceCLI/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    result = payload.get("Result") or payload.get("result") or {}
+    token = result.get("Token") or ""
+    uid = result.get("UserID") or result.get("userid") or ""
+    if not isinstance(token, str) or not token:
+        raise HTTPException(status_code=502, detail="PAT 第二步交换未返回 token")
+    if not isinstance(uid, str):
+        uid = ""
+    expires_at = _parse_expired_at(
+        str(result.get("ExpiredAt") or ""), fallback=time.time() + 6.5 * 86400)
+    return token, uid, expires_at
 
-    重换需要网络可达交换端点；不可达时若旧 token 仍有剩余寿命（>5 分钟）则沿用，
-    否则抛 401 提示换网/检查配置。
+
+def _credentials_from_state(state: dict[str, Any]) -> PatCredentials | None:
+    token = state.get("cloud_ide_token")
+    if not isinstance(token, str) or not token:
+        return None
+    return PatCredentials(token, str(state.get("uid") or ""),
+                          str(state.get("machine_id") or ""),
+                          str(state.get("device_id") or ""))
+
+
+def _get_profile_credentials(
+    profile: PatProfile,
+    *,
+    force_refresh: bool = False,
+    rejected_token: str | None = None,
+) -> PatCredentials:
+    """账号级取 token；锁内二次检查避免普通刷新和并发 401 强刷惊群。"""
+    machine_id, device_id = _ensure_fingerprint(profile.cache_key)
+    with _refresh_lock(profile.cache_key):
+        state = _account_state(profile.cache_key)
+        current = _credentials_from_state(state)
+        try:
+            expires_at = float(state.get("expires_at") or 0)
+        except (TypeError, ValueError):
+            expires_at = 0
+        now = time.time()
+        cache_is_fresh = current is not None and expires_at - now > _REFRESH_MARGIN_S
+        if not force_refresh and cache_is_fresh:
+            return current
+        # 并发请求都拿旧 token 收到 401 时，仅首个线程交换；其余复用新 token。
+        if force_refresh and rejected_token and current and current.token != rejected_token \
+                and expires_at - now > 300:
+            return current
+        try:
+            token, uid, expires_at = _exchange(profile.bearer)
+        except Exception as exc:
+            # 交换服务失败不是账号故障，绝不切号。普通临期刷新可沿用仍有效缓存；
+            # 401 后的强刷若仍是被拒 token，则必须直接失败，不能把它当新凭据重放。
+            may_reuse_current = (
+                current is not None
+                and expires_at - now > 300
+                and (not force_refresh or current.token != rejected_token)
+            )
+            if may_reuse_current:
+                log.warning("PAT token 刷新失败，账号序号=%d，沿用未过期缓存（%s）",
+                            profile.index, type(exc).__name__)
+                return current
+            if isinstance(exc, HTTPException):
+                raise
+            log.warning("PAT token 刷新失败，账号序号=%d（%s）",
+                        profile.index, type(exc).__name__)
+            raise HTTPException(status_code=502, detail="PAT credential refresh unavailable") from None
+
+        def store(account: dict[str, Any]) -> None:
+            account.update({"cloud_ide_token": token, "uid": uid,
+                            "expires_at": expires_at, "refreshed_at": time.time(),
+                            "machine_id": machine_id, "device_id": device_id})
+
+        state = _mutate_account(profile.cache_key, store)
+        log.info("PAT token 已刷新，账号序号=%d", profile.index)
+        credentials = _credentials_from_state(state)
+        assert credentials is not None
+        return credentials
+
+
+def get_pat_credentials(
+    force_refresh: bool = False,
+    *,
+    account_id: str | None = None,
+    rejected_token: str | None = None,
+) -> tuple[str, str]:
+    """兼容旧接口，默认使用稳定首账号；可显式指定账号。"""
+    profiles = ensure_pat_config()
+    profile = next((item for item in profiles if item.id == account_id), None) if account_id else profiles[0]
+    if profile is None:
+        raise HTTPException(status_code=401, detail="PAT 账号不存在")
+    credentials = _get_profile_credentials(
+        profile, force_refresh=force_refresh, rejected_token=rejected_token)
+    return credentials.token, credentials.uid
+
+
+def _pat_headers(credentials: PatCredentials, accept: str) -> dict[str, str]:
+    return {**_build_headers(credentials.token, credentials.uid,
+                             machine_id=credentials.machine_id,
+                             device_id=credentials.device_id),
+            "Accept": accept}
+
+
+# ───────────────────────── 模型负载查询 ─────────────────────────
+
+_MODEL_STATUS_TTL_S = 600
+_model_status_cache: dict[str, Any] = {"fetched_at": 0.0, "data": None}
+
+
+def fetch_pat_model_status(force: bool = False) -> dict[str, Any]:
+    """手动触发的模型负载查询（用首个账号凭证；结果短 TTL 缓存）。
+
+    返回 {models: [{id, workload(0-100%或None), credits, max_input}], fetched_at}；
+    只有 plus 网关目录接口提供负载数据。workload 为 None 表示该模型无负载信息。
     """
-    cached = _load_cached() or {}
-    token = cached.get("cloud_ide_token", "")
-    uid = cached.get("uid", "")
-    expires_at = float(cached.get("expires_at") or 0)
     now = time.time()
-
-    if not force_refresh and token and expires_at - now > _REFRESH_MARGIN_S:
-        return token, uid
-
-    bearer = os.environ.get(_BEARER, "").strip()
-    if not bearer:
-        raise HTTPException(status_code=401, detail="PAT 通道未配置服务账号密钥")
+    cached = _model_status_cache.get("data")
+    if (not force and cached and now - float(_model_status_cache.get("fetched_at") or 0)
+            < _MODEL_STATUS_TTL_S):
+        return cached
+    plus = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
+    if not plus:
+        raise HTTPException(status_code=503, detail="PAT 模型服务未配置")
+    profile = ensure_pat_config()[0]
+    credentials = _get_profile_credentials(profile)
+    request = urllib.request.Request(
+        f"{plus}/api/ide/v1/get_detail_param",
+        data=json.dumps({"function": os.environ.get("WB_TRAE_NATIVE_FUNCTION", "chat_v3"),
+                         "need_prompt": False, "poly_prompt": False}).encode("utf-8"),
+        method="POST",
+        headers=_pat_headers(credentials, "*/*"),
+    )
     try:
-        token, uid, expires_at = _exchange(bearer)
-        _save_cached(token, uid, expires_at)
-        log.info("PAT token 已刷新，有效期至 %s", time.strftime("%m-%d %H:%M", time.localtime(expires_at)))
-        return token, uid
-    except HTTPException:
-        raise
-    except Exception as e:
-        # 网络不可达（如离开了交换端点所在网络）：旧 token 还能撑就沿用
-        if token and expires_at - now > 300:
-            log.warning("PAT token 刷新失败（沿用缓存，剩余 %.1f 小时）: %s",
-                        (expires_at - now) / 3600, e)
-            return token, uid
-        raise HTTPException(status_code=401, detail=(
-            "PAT token 已过期且自动刷新失败（需在能访问交换端点的网络下重试，见 .token.md）"))
+        with urllib.request.urlopen(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
+            raw = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        try:
+            exc.read()
+        except Exception:
+            pass
+        raise HTTPException(status_code=502,
+                            detail=f"PAT 模型负载查询失败（HTTP {exc.code}）") from None
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise HTTPException(status_code=502,
+                            detail=f"PAT 模型负载查询失败（网络错误：{reason}）") from None
+    meta = pat_model_meta()
+    hot_by_config: dict[str, float | None] = {}
+    for entry in raw.get("config_info_list") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("config_name")
+        if not isinstance(name, str) or not name:
+            continue
+        hot = ((entry.get("display_config") or {}).get("hot_info") or {}).get("hot")
+        hot_by_config[name] = round(min(max(float(hot), 0.0), 100.0), 1) if isinstance(hot, (int, float)) else None
+    models: list[dict[str, Any]] = []
+    for model_id in pat_model_names():
+        if not pat_gateway_is_plus(model_id):
+            continue
+        info = meta.get(model_id) or {}
+        _, config_name = PAT_PLUS_MODELS.get(model_id, ("", model_id))
+        models.append({
+            "id": model_id,
+            "name": info.get("name") or model_id,
+            "workload": hot_by_config.get(config_name),
+            "credits": info.get("credits"),
+            "max_input": info.get("max_input"),
+            "reasoning": bool(info.get("reasoning")),
+        })
+    result = {"models": models, "fetched_at": now}
+    _model_status_cache.update({"fetched_at": now, "data": result})
+    return result
 
 
-# ───────────────────────── 额度查询 ─────────────────────────
-
-_QUOTA_CACHE_FILE = pathlib.Path.home() / ".ethan" / "trae_pat_quota_cache.json"
-_last_ent_usage: list[dict[str, Any]] | None = None
+# ───────────────────────── 账号/额度冷却 ─────────────────────────
 
 
-def _quota_cache_load() -> list[dict[str, Any]] | None:
-    """磁盘缓存：上次在可达网络下查到的余量（家里查不到时兜底展示）。"""
+def _quota_class(model: str) -> str:
+    return "advanced" if pat_gateway_is_plus(model) else "standard"
+
+
+def _cooldown_until(profile: PatProfile, quota_class: str) -> float:
+    state = _account_state(profile.cache_key)
+    cooldowns = state.get("cooldowns") if isinstance(state.get("cooldowns"), dict) else {}
     try:
-        f = pathlib.Path(_QUOTA_CACHE_FILE)
-        if f.exists():
-            return json.loads(f.read_text("utf-8"))
+        return max(float(cooldowns.get("account") or 0),
+                   float(cooldowns.get(quota_class) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _next_day_timestamp(now: float) -> float:
+    current = datetime.fromtimestamp(now, ZoneInfo("Asia/Shanghai"))
+    return (current.replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(days=1)).timestamp()
+
+
+def _retry_after_seconds(value: str | None, now: float) -> int | None:
+    if not value:
+        return None
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        try:
+            target = parsedate_to_datetime(value)
+            if target.tzinfo is None:
+                return None
+            seconds = int(target.timestamp() - now)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return min(max(seconds, 1), 7 * 86400)
+
+
+def _quota_reset_timestamp(now: float, quota_class: str) -> float:
+    # 两类模型池都按已确认的日界自动恢复；池仍独立记录，互不影响。
+    del quota_class
+    return _next_day_timestamp(now)
+
+
+def _mark_cooldown(profile: PatProfile, quota_class: str) -> None:
+    until = _quota_reset_timestamp(time.time(), quota_class)
+
+    def store(state: dict[str, Any]) -> None:
+        cooldowns = state.setdefault("cooldowns", {})
+        try:
+            old = float(cooldowns.get(quota_class) or 0)
+        except (TypeError, ValueError):
+            old = 0
+        cooldowns[quota_class] = max(old, until)
+
+    _mutate_account(profile.cache_key, store)
+
+
+def _mark_account_cooldown(profile: PatProfile, *, retry_after: str | None = None) -> None:
+    now = time.time()
+    until = now + (_retry_after_seconds(retry_after, now) or _ACCOUNT_COOLDOWN_S)
+
+    def store(state: dict[str, Any]) -> None:
+        cooldowns = state.setdefault("cooldowns", {})
+        try:
+            old = float(cooldowns.get("account") or 0)
+        except (TypeError, ValueError):
+            old = 0
+        cooldowns["account"] = max(old, until)
+
+    _mutate_account(profile.cache_key, store)
+
+
+def _ordered_available_profiles(quota_class: str) -> tuple[PatProfile, ...]:
+    now = time.time()
+    return tuple(profile for profile in ensure_pat_config()
+                 if _cooldown_until(profile, quota_class) <= now)
+
+
+def _json_error_code(text: str) -> int | None:
+    """裸 JSON 错误体的 code；仅用于识别是否属于可切号闭集。"""
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return int(data.get("code"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _sse_failover_code(raw: str) -> int | None:
+    """识别额度耗尽业务码；返回 None 表示不切换。"""
+    stripped = raw.lstrip()
+    if stripped.startswith("{"):
+        code = _json_error_code(stripped)
+        return code if code is not None and code in _FAILOVER_SSE_CODES else None
+    try:
+        for event, data in _parse_sse(raw):
+            if event != "error" or not isinstance(data, dict):
+                continue
+            code = data.get("code")
+            try:
+                numeric = int(code)
+            except (TypeError, ValueError):
+                continue
+            if numeric in _FAILOVER_SSE_CODES:
+                return numeric
     except Exception:
         pass
     return None
 
 
-def _quota_cache_save(items: list[dict[str, Any]]) -> None:
-    try:
-        f = pathlib.Path(_QUOTA_CACHE_FILE)
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(items, ensure_ascii=False), "utf-8")
-    except Exception:
-        pass
+# ───────────────────────── 额度查询 ─────────────────────────
+
+def _cached_quota(profile: PatProfile, quota_class: str) -> list[dict[str, Any]] | None:
+    state = _account_state(profile.cache_key)
+    quotas = state.get("quota") if isinstance(state.get("quota"), dict) else {}
+    value = quotas.get(quota_class) if isinstance(quotas, dict) else None
+    items = value.get("items") if isinstance(value, dict) else None
+    return items if isinstance(items, list) else None
 
 
-def fetch_pat_ent_usage() -> list[dict[str, Any]]:
-    """查 PAT 账号各权益包余量，返回 [{label, used, total, remaining, reset_ts}]。
+def _save_quota(profile: PatProfile, quota_class: str, items: list[dict[str, Any]]) -> None:
+    def store(state: dict[str, Any]) -> None:
+        quotas = state.setdefault("quota", {})
+        quotas[quota_class] = {"items": items, "fetched_at": time.time()}
+    _mutate_account(profile.cache_key, store)
 
-    注意：用量取 **pack 顶层 usage**（``quota.usage`` 是滞后旧视图，勿用）。
-    端点在扩展网关上（真实余量只在它有；公网权益接口是另一个无数字的视图）。
-    网络不可达时回退「内存 -> 磁盘」缓存，条目 label 追加「·缓存」标记。
-    """
-    global _last_ent_usage
-    plus = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
-    if not plus:
-        raise HTTPException(status_code=503, detail="PAT 通道未配置 TRAE_PAT_PLUS_GATEWAY")
-    token, uid = get_pat_credentials()
-    headers = {**_build_headers(token, uid), "Accept": "application/json"}
-    url = f"{plus}/trae/api/v1/pay/ide_user_ent_usage"
-    req = urllib.request.Request(url, data=b"{}", headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except Exception as e:
-        # 不可达/失败：内存缓存 -> 磁盘缓存，逐级兜底（label 加「·缓存」）
-        for cached, mark in ((_last_ent_usage, "内存"), (_quota_cache_load(), "磁盘")):
-            if cached:
-                return [dict(it, label=f"{it['label']}·缓存") for it in cached]
-        if isinstance(e, urllib.error.HTTPError):
-            raise HTTPException(status_code=502,
-                                detail=f"PAT 额度查询失败: {e.code} {e.read().decode()[:150]}") from e
-        raise HTTPException(status_code=502, detail=f"PAT 额度查询失败: {e}") from e
 
+def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for pack in data.get("user_entitlement_pack_list") or []:
         base = pack.get("entitlement_base_info") or {}
@@ -308,43 +681,79 @@ def fetch_pat_ent_usage() -> list[dict[str, Any]]:
         used = usage.get("basic_usage_amount") or 0
         if not isinstance(limit, (int, float)) or limit <= 0:
             continue
-        eid = str(base.get("entitlement_id") or "pack")
-        kind = "周包" if "weekly" in eid else ("日包" if "daily" in eid else "包")
-        # 实测（2026-09-08）：日包实际是账号级「高级模型日额度」，gemini/openrouter
-        # 的调用也扣它，ID 里的模型片段不代表归属，标签统一写「高级模型共享」
-        label = "PAT 周包（未占用）" if kind == "周包" else "PAT 日包（高级模型共享）"
-        end_ts = base.get("end_time") or 0
-        items.append({
-            "label": label,
-            "used": round(used, 2),
-            "total": limit,
-            "remaining": round(limit - used, 2),
-            "percent": round(used / limit * 100) if limit else None,
-            "reset_ts": int(end_ts) if end_ts else None,
-        })
-    _last_ent_usage = items
-    _quota_cache_save(items)
+        entitlement_id = str(base.get("entitlement_id") or "pack")
+        if "weekly" in entitlement_id:
+            label = "PAT 周包（通用额度）"
+        elif "daily" in entitlement_id:
+            # 同一账号会同时返回多个日包（例如 GPT-5.6 与 GPT-6），不能都叫
+            # “高级模型共享”，否则 UI 看起来像重复额度。只从 entitlement_id 的
+            # 已知后缀提取公开模型系列，不展示账号标识或其它原始字段。
+            family = ""
+            if entitlement_id.endswith("_gpt_56_sol"):
+                family = "GPT-5.6 Sol"
+            elif entitlement_id.endswith("_gpt_6"):
+                family = "GPT-6"
+            label = f"PAT 日包（{family or '高级模型'}）"
+        else:
+            label = "PAT 额度包"
+        if multi:
+            label = f"PAT #{profile.index + 1} · {label[4:]}"
+        end_time = base.get("end_time") or 0
+        items.append({"label": label, "used": round(used, 2), "total": limit,
+                      "remaining": round(limit - used, 2),
+                      "percent": round(used / limit * 100),
+                      "reset_ts": int(end_time) if end_time else None})
     return items
+
+
+def fetch_pat_ent_usage() -> list[dict[str, Any]]:
+    """按账号查询 advanced 额度；失败只使用该账号自己的缓存。"""
+    plus = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
+    if not plus:
+        raise HTTPException(status_code=503, detail="PAT 通道未配置 TRAE_PAT_PLUS_GATEWAY")
+    profiles = ensure_pat_config()
+    all_items: list[dict[str, Any]] = []
+    failures = 0
+    for profile in profiles:
+        try:
+            credentials = _get_profile_credentials(profile)
+            request = urllib.request.Request(
+                f"{plus}/trae/api/v1/pay/ide_user_ent_usage", data=b"{}", method="POST",
+                headers=_pat_headers(credentials, "application/json"))
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8", errors="replace"))
+            items = _quota_items(data, profile, len(profiles) > 1)
+            _save_quota(profile, "advanced", items)
+            all_items.extend(items)
+        except Exception as exc:
+            failures += 1
+            cached = _cached_quota(profile, "advanced")
+            if cached:
+                all_items.extend(dict(item, label=f"{item['label']}·缓存") for item in cached)
+            log.warning("PAT 额度查询失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
+    if not all_items and failures:
+        raise HTTPException(status_code=502, detail="PAT 额度查询失败")
+    return all_items
 
 
 # ───────────────────────── 聊天转发 ─────────────────────────
 
 def _build_pat_body(native_msgs: list[dict[str, Any]], model: str, config: str,
-                    stream: bool, tools: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """与 native 通道同形状（content 数组 + model/config_name 成对 + function）。
-
-    native_msgs 必须已是线上格式（content 为 block 数组），与
-    native_tools._native_messages 的输出同构，不做二次转换。
-    """
-    sid = str(uuid.uuid4())
+                    stream: bool, tools: list[dict[str, Any]] | None,
+                    model_id: str = "") -> dict[str, Any]:
+    session_id = str(uuid.uuid4())
+    # 个别模型只在特定 function 下开放（gpt-6-astra 仅 solo_agent），目录里
+    # 可按模型覆盖；其余走全局默认。
+    function = PAT_MODEL_FUNCTIONS.get(model_id) or os.environ.get(
+        "WB_TRAE_NATIVE_FUNCTION", "chat_v3")
     body: dict[str, Any] = {
         "messages": native_msgs,
         "model": model,
         "config_name": config,
-        "function": os.environ.get("WB_TRAE_NATIVE_FUNCTION", "chat_v3"),
+        "function": function,
         "stream": stream,
-        "request_id": sid,
-        "session_id": sid,
+        "request_id": session_id,
+        "session_id": session_id,
     }
     tools_payload = _native_tools_payload(tools)
     if tools_payload:
@@ -352,63 +761,444 @@ def _build_pat_body(native_msgs: list[dict[str, Any]], model: str, config: str,
     return body
 
 
+def _chat_base(model: str) -> str:
+    if pat_gateway_is_plus(model):
+        base = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
+        if not base:
+            raise HTTPException(status_code=503, detail="PAT 模型服务未配置")
+        return base
+    return str(BASE_URL_CN).rstrip("/")
+
+
+def _is_retryable_connect_error(exc: BaseException) -> bool:
+    """仅识别请求尚未建立连接时可安全重放的错误。
+
+    不包含 TimeoutError/socket.timeout/ConnectionResetError：这些可能发生在请求已经
+    发出或上游已开始生成之后，重放会带来重复计费或重复副作用。
+    """
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, socket.gaierror):
+        return True
+    return isinstance(reason, OSError) and reason.errno in _CONNECT_RETRY_ERRNOS
+
+
+def _post_chat(url: str, payload: bytes, credentials: PatCredentials, stream: bool) -> str:
+    """非流式/兼容发送；流式入口使用 ``stream_pat_native`` 增量读取。"""
+    headers = _pat_headers(credentials, "text/event-stream" if stream else "application/json")
+    delays = (0.0, *_CONNECT_RETRY_DELAYS_S)
+    for attempt, delay in enumerate(delays, start=1):
+        if delay:
+            time.sleep(delay)
+        request = urllib.request.Request(url, data=payload, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=_CHAT_TIMEOUT_S) as response:
+                return response.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            if attempt >= len(delays) or not _is_retryable_connect_error(exc):
+                raise
+            log.warning(
+                "PAT chat 建连失败（%s），%.1fs 后重试 %d/%d",
+                type(exc.reason if isinstance(exc, urllib.error.URLError) else exc).__name__,
+                delays[attempt], attempt, len(_CONNECT_RETRY_DELAYS_S),
+            )
+    raise AssertionError("unreachable")
+
+
+def _stream_profile_events(
+    url: str,
+    payload: bytes,
+    credentials: PatCredentials,
+    stop: threading.Event,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """打开单账号响应并逐个产生完整 SSE 事件，不缓冲整轮响应。"""
+    timeout = httpx.Timeout(
+        connect=min(20.0, float(_CHAT_TIMEOUT_S)),
+        read=min(30.0, float(_CHAT_TIMEOUT_S)),
+        write=min(30.0, float(_CHAT_TIMEOUT_S)),
+        pool=min(20.0, float(_CHAT_TIMEOUT_S)),
+    )
+    headers = _pat_headers(credentials, "text/event-stream")
+    with httpx.Client(timeout=timeout) as client:
+        with client.stream("POST", url, headers=headers, content=payload) as response:
+            response.raise_for_status()
+            decoder = _SSEDecoder()
+            for chunk in response.iter_bytes():
+                if stop.is_set():
+                    return
+                for event in decoder.feed(chunk):
+                    yield event
+            if not stop.is_set():
+                yield from decoder.finish()
+
+
+def _event_error_code(event: str, data: dict[str, Any]) -> int | None:
+    if event != "error" or not isinstance(data, dict):
+        return None
+    try:
+        return int(data.get("code"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _semantic_event(event: str, data: dict[str, Any]) -> bool:
+    return event == "output" and bool(
+        data.get("reasoning_content") or data.get("response") or data.get("tool_calls")
+    )
+
+
+def stream_pat_native(
+    native_msgs: list[dict[str, Any]],
+    model: str,
+    tools: list[dict[str, Any]] | None = None,
+    *,
+    stop: threading.Event | None = None,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """稳定主备的 PAT 真流式入口；首个语义事件后永不重放或拼流。"""
+    start_token_keeper()  # 幂等：请求路径兜底拉起自愈循环
+    _reload_pat_models()
+    if model not in PAT_MODELS:
+        raise HTTPException(status_code=400, detail=f"模型 {model} 不在 PAT 通道目录内")
+    quota_class = _quota_class(model)
+    profiles = _ordered_available_profiles(quota_class)
+    if not profiles:
+        raise HTTPException(status_code=429, detail=f"PAT {quota_class} 账号均在额度冷却中")
+
+    upstream_model, config = PAT_MODELS[model]
+    body = _build_pat_body(native_msgs, upstream_model, config, True, tools, model_id=model)
+    payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    url = f"{_chat_base(model)}/api/agent/v3/llm_utils_chat"
+    stop = stop or threading.Event()
+    last_status: int | None = None
+
+    have_credentials = False
+    for profile in profiles:
+        try:
+            credentials = _get_profile_credentials(profile)
+        except HTTPException:
+            # 同非流式路径：单账号换不到凭据时跳过，不让它拖垮整个通道。
+            continue
+        have_credentials = True
+        refreshed = False
+        rejected_token: str | None = None
+        while True:
+            committed = False
+            saw_terminal = False
+            try:
+                for event, data in _stream_profile_events(url, payload, credentials, stop):
+                    if stop.is_set():
+                        return
+                    code = _event_error_code(event, data)
+                    if code is not None:
+                        if not committed and code in _FAILOVER_SSE_CODES:
+                            _mark_cooldown(profile, quota_class)
+                            last_status = code
+                            break
+                        yield event, data
+                        return
+                    if _semantic_event(event, data):
+                        committed = True
+                    if event == "done":
+                        if not committed:
+                            raise HTTPException(
+                                status_code=502, detail="trae PAT stream returned no content")
+                        saw_terminal = True
+                        yield event, data
+                        return
+                    yield event, data
+                else:
+                    if stop.is_set():
+                        return
+                    if not committed:
+                        raise HTTPException(
+                            status_code=502, detail="trae PAT stream returned no content")
+                    if not saw_terminal:
+                        raise HTTPException(
+                            status_code=502, detail="trae PAT stream ended before completion")
+                    return
+                # 只有首个语义事件前的白名单错误才会走到这里并尝试下一账号。
+                break
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                last_status = status
+                if status == 401 and not refreshed:
+                    refreshed = True
+                    rejected_token = credentials.token
+                    try:
+                        credentials = _get_profile_credentials(
+                            profile, force_refresh=True, rejected_token=rejected_token)
+                    except HTTPException:
+                        raise HTTPException(
+                            status_code=502, detail="trae PAT credential refresh unavailable") from None
+                    continue
+                if status in (403, 429):
+                    _mark_account_cooldown(profile, retry_after=exc.response.headers.get("Retry-After"))
+                    break
+                if status == 401 and credentials.token != rejected_token:
+                    _mark_account_cooldown(profile)
+                    break
+                raise HTTPException(
+                    status_code=502, detail=f"trae PAT chat failed: HTTP {status}") from None
+            except HTTPException:
+                raise
+            except Exception as exc:
+                log.warning("PAT stream 传输失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
+                raise HTTPException(status_code=502, detail="trae PAT chat transport failed") from None
+
+    if not have_credentials:
+        raise HTTPException(status_code=502, detail="trae PAT credential unavailable")
+    status = 429 if last_status in (403, 429) or last_status in _FAILOVER_SSE_CODES else 401
+    raise HTTPException(status_code=status, detail="trae PAT 所有账号均不可用")
+
+
 def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                     tools: list[dict[str, Any]] | None = None) -> str:
-    """PAT 通道发送（线上格式 messages 直通，供 native 通道拦截复用）。
-
-    扩展目录模型走 TRAE_PAT_PLUS_GATEWAY（未配置则报 503）；端点路径、
-    headers、body 形状与 native 通道一致，返回原始 SSE 文本。
-    """
+    """稳定主备发送；同一序列化 payload/session 在所有账号和重放间保持不变。"""
+    start_token_keeper()  # 幂等：请求路径兜底拉起自愈循环
     _reload_pat_models()
     if model not in PAT_MODELS:
         raise HTTPException(status_code=400, detail=f"模型 {model} 不在 PAT 通道目录内")
     upstream_model, config = PAT_MODELS[model]
-    if pat_gateway_is_plus(model):
-        base = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
-        if not base:
-            raise HTTPException(status_code=503, detail=(
-                f"模型 {model} 需要在 .env 配置 TRAE_PAT_PLUS_GATEWAY 后可用（见 .token.md）"))
-    else:
-        base = str(BASE_URL_CN).rstrip("/")
-    token, uid = get_pat_credentials()
-    body = _build_pat_body(native_msgs, upstream_model, config, stream, tools)
-    headers = {**_build_headers(token, uid),
-               "Accept": "text/event-stream" if stream else "application/json"}
-    url = f"{base}/api/agent/v3/llm_utils_chat"
-    payload = json.dumps(body).encode("utf-8")
-    try:
-        with urllib.request.urlopen(urllib.request.Request(
-                url, data=payload, headers=headers, method="POST"),
-                timeout=_CHAT_TIMEOUT_S) as resp:
-            return resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")[:500]
-        if e.code in (401, 403):
-            # token 可能刚过期：强制重换一次再试
+    quota_class = _quota_class(model)
+    profiles = _ordered_available_profiles(quota_class)
+    if not profiles:
+        raise HTTPException(status_code=429, detail=f"PAT {quota_class} 账号均在额度冷却中")
+
+    # 必须在账号循环外构造一次，保证 messages/tools/request_id/session_id 完全相同。
+    body = _build_pat_body(native_msgs, upstream_model, config, stream, tools, model_id=model)
+    payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    url = f"{_chat_base(model)}/api/agent/v3/llm_utils_chat"
+    last_status: int | None = None
+
+    have_credentials = False
+    for profile in profiles:
+        try:
+            credentials = _get_profile_credentials(profile)
+        except HTTPException:
+            # 换不到凭据（如该账号从未换到 token 且交换端点当前不可达）不是额度
+            # 信号，不标记冷却；也不能让单个账号拖垮整个通道——后面账号可能仍有
+            # 未过期缓存 token（交换端点离线时这是唯一可用凭据）。全部账号都
+            # 拿不到凭据时才整体失败。
+            continue
+        have_credentials = True
+        refreshed = False
+        rejected_token: str | None = None
+        while True:
             try:
-                token, uid = get_pat_credentials(force_refresh=True)
-                headers = {**_build_headers(token, uid),
-                           "Accept": "text/event-stream" if stream else "application/json"}
-                with urllib.request.urlopen(urllib.request.Request(
-                        url, data=payload, headers=headers, method="POST"),
-                        timeout=_CHAT_TIMEOUT_S) as resp:
-                    return resp.read().decode("utf-8", errors="replace")
-            except HTTPException:
-                raise
-            except Exception as e2:
-                raise HTTPException(status_code=401, detail=f"trae PAT auth failed: {e2}") from e2
-        raise HTTPException(status_code=502, detail=f"trae PAT chat failed: {e.code} {detail}")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"trae PAT chat failed: {e}") from e
+                raw = _post_chat(url, payload, credentials, stream)
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                last_status = status
+                # 消耗响应体但不记录、不回显，避免上游把秘密带进诊断。
+                try:
+                    exc.read()
+                except Exception:
+                    pass
+                if status == 401 and not refreshed:
+                    refreshed = True
+                    rejected_token = credentials.token
+                    try:
+                        credentials = _get_profile_credentials(
+                            profile, force_refresh=True, rejected_token=rejected_token)
+                    except HTTPException:
+                        # 强刷交换失败不是账号故障；保持在当前账号并返回中性错误。
+                        raise HTTPException(
+                            status_code=502, detail="trae PAT credential refresh unavailable") from None
+                    continue
+                if status in (403, 429):
+                    _mark_account_cooldown(
+                        profile,
+                        retry_after=exc.headers.get("Retry-After") if exc.headers else None,
+                    )
+                    break
+                if status == 401:
+                    # 只有确实取得不同的新 token 后仍被拒绝，才证明是账号级故障。
+                    # 此时允许尝试下一账号，并记录短暂的账号级 cooldown。
+                    if credentials.token != rejected_token:
+                        _mark_account_cooldown(profile)
+                        break
+                    raise HTTPException(status_code=401, detail="trae PAT authentication failed") from None
+                raise HTTPException(status_code=502,
+                                    detail=f"trae PAT chat failed: HTTP {status}") from None
+            except Exception as exc:
+                log.warning("PAT chat 传输失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
+                raise HTTPException(status_code=502, detail="trae PAT chat transport failed") from None
+            failover_code = _sse_failover_code(raw)
+            if failover_code is not None:
+                _mark_cooldown(profile, quota_class)
+                last_status = failover_code
+                break
+            # 非白名单错误也可能包在裸 JSON 里（解析层认不出 SSE 事件）；
+            # 保持原样返回会变成"空响应"，改为带码号的脱敏错误。
+            if raw.lstrip().startswith("{"):
+                code = _json_error_code(raw.lstrip())
+                if code is not None:
+                    raise HTTPException(status_code=502,
+                                        detail=f"trae PAT chat failed: code {code}") from None
+            return raw
+
+    if not have_credentials:
+        raise HTTPException(status_code=502, detail="trae PAT credential unavailable")
+    status = 429 if last_status in (403, 429) or last_status in _FAILOVER_SSE_CODES else 401
+    raise HTTPException(status_code=status, detail="trae PAT 所有账号均不可用")
 
 
 def send_pat_chat(messages: list[dict[str, Any]], model: str, stream: bool,
                   tools: list[dict[str, Any]] | None = None) -> str:
-    """PAT 通道发送（OpenAI 风格 messages 入参），与 send_trae_chat 同契约。"""
-    native_msgs = [{"role": m.get("role", "user"), "content": _content_blocks(m.get("content"))}
-                   for m in messages]
+    native_msgs = [{"role": message.get("role", "user"),
+                    "content": _content_blocks(message.get("content"))}
+                   for message in messages]
     return send_pat_native(native_msgs, model, stream, tools)
 
 
-# 模块导入时先加载一次，保证任何首调用前目录可用
+# ───────────────────────── 凭证自愈（后台保活） ─────────────────────────
+#
+# 背景故障模式：换 token 端点只在特定网络环境可达；离线期间新加的账号永远
+# 换不到 token，缓存 token 过期后也只能等网络恢复。靠请求路径被动补签会让
+# 第一个撞上的用户吃到 502——改为后台循环主动补：环境恢复后自动把缺失/
+# 临期的 token 补齐，并把状态透出给 UI，故障可自愈也可观测。
+
+_KEEPALIVE_INTERVAL_S = max(0, int(os.environ.get("WB_TRAE_TOKEN_KEEPALIVE_S", "600")))
+_keeper_thread: threading.Thread | None = None
+_keeper_lock = threading.Lock()
+_keeper_round_lock = threading.Lock()
+_keeper_last: dict[str, Any] = {"at": 0.0, "env_ready": None, "refreshed": [], "waiting": []}
+
+
+def _exchange_env_ready(timeout: float = 3.0) -> bool:
+    """探测换 token 端点当前是否可达（DNS+TCP 层）；不可达说明本轮无法签发。"""
+    for key in (_AUTH_URL, _TOKEN_URL):
+        raw = os.environ.get(key, "").strip()
+        host = urllib.parse.urlsplit(raw).hostname if raw else None
+        if not host:
+            continue
+        try:
+            infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except OSError:
+            return False
+        for info in infos[:2]:
+            try:
+                # sockaddr 可能是 IPv6 四元组，create_connection 只接受 (host, port)
+                with socket.create_connection(info[4][:2], timeout=timeout):
+                    break
+            except OSError:
+                continue
+        else:
+            return False
+    return True
+
+
+def _needs_refresh(state: dict[str, Any], now: float) -> bool:
+    current = _credentials_from_state(state)
+    if current is None:
+        return True
+    try:
+        expires_at = float(state.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        return True
+    return expires_at - now <= _REFRESH_MARGIN_S
+
+
+def _keeper_round() -> dict[str, Any]:
+    """一轮自愈：环境可达时补签缺失/临期 token；不可达时短路与记录。"""
+    now = time.time()
+    profiles = _load_profiles()
+    refreshed: list[str] = []
+    waiting: list[str] = []
+    if not _exchange_env_ready():
+        for profile in profiles:
+            if _needs_refresh(_account_state(profile.cache_key), now):
+                waiting.append(profile.id)
+        return {"at": time.time(), "env_ready": False, "refreshed": [], "waiting": waiting}
+    for profile in profiles:
+        if not _needs_refresh(_account_state(profile.cache_key), now):
+            continue
+        try:
+            _get_profile_credentials(profile)
+        except Exception as exc:
+            waiting.append(profile.id)
+            log.warning("PAT 凭证自愈未成功，账号 %s（%s）", profile.id, type(exc).__name__)
+        else:
+            refreshed.append(profile.id)
+            log.info("PAT 凭证自愈：账号 %s 已补签 token", profile.id)
+    return {"at": time.time(), "env_ready": True, "refreshed": refreshed, "waiting": waiting}
+
+
+def refresh_missing_tokens() -> dict[str, Any]:
+    """立即执行一轮凭证补签并返回脱敏状态，供 UI 手动触发。
+
+    与后台循环共用互斥锁，避免用户连点、定时轮询和真实请求同时惊群。
+    只处理缺失或临期账号；健康 token 不会被强制刷新。
+    """
+    with _keeper_round_lock:
+        result = _keeper_round()
+        with _keeper_lock:
+            _keeper_last.update(result)
+    return {**result, "accounts": accounts_status(start_keeper=False)["accounts"]}
+
+
+def _keeper_loop(interval: int) -> None:
+    while True:
+        try:
+            refresh_missing_tokens()
+        except Exception as exc:
+            log.warning("PAT 凭证自愈循环异常（%s）", type(exc).__name__)
+        time.sleep(interval)
+
+
+def start_token_keeper() -> None:
+    """启动后台凭证自愈循环（幂等）。``WB_TRAE_TOKEN_KEEPALIVE_S=0`` 可关闭。"""
+    global _keeper_thread
+    if _KEEPALIVE_INTERVAL_S <= 0 or not pat_enabled():
+        return
+    with _keeper_lock:
+        if _keeper_thread is not None and _keeper_thread.is_alive():
+            return
+        _keeper_thread = threading.Thread(
+            target=_keeper_loop, args=(_KEEPALIVE_INTERVAL_S,),
+            name="pat-token-keeper", daemon=True)
+        _keeper_thread.start()
+
+
+def accounts_status(*, start_keeper: bool = True) -> dict[str, Any]:
+    """各账号本地凭证/冷却状态 + 自愈循环最近一轮结果（不触网、无秘密）。"""
+    if start_keeper:
+        start_token_keeper()  # 幂等：兜底保证查看状态时循环一定已拉起
+    now = time.time()
+    accounts: list[dict[str, Any]] = []
+    try:
+        profiles = _load_profiles()
+    except _PatConfigError:
+        profiles = ()
+    for profile in profiles:
+        state = _account_state(profile.cache_key)
+        current = _credentials_from_state(state)
+        try:
+            expires_at = float(state.get("expires_at") or 0)
+        except (TypeError, ValueError):
+            expires_at = 0
+        cooling = []
+        cooldowns = state.get("cooldowns") if isinstance(state.get("cooldowns"), dict) else {}
+        for kind, until in cooldowns.items():
+            try:
+                minutes_left = (float(until) - now) / 60
+            except (TypeError, ValueError):
+                continue
+            if minutes_left > 0:
+                cooling.append({"kind": kind, "minutes_left": round(minutes_left)})
+        hours_left = (expires_at - now) / 3600 if current else None
+        accounts.append({
+            "id": profile.id,
+            "priority": profile.priority,
+            "token": ("ok" if current and hours_left > _REFRESH_MARGIN_S / 3600
+                      else "expiring" if current else "missing"),
+            "hours_left": round(hours_left, 1) if current else None,
+            "refreshed_at": state.get("refreshed_at"),
+            "cooling": cooling,
+        })
+    with _keeper_lock:
+        keeper = dict(_keeper_last)
+    return {"accounts": accounts, "keeper": keeper,
+            "keepalive_s": _KEEPALIVE_INTERVAL_S, "enabled": pat_enabled()}
+
+
 _reload_pat_models()
