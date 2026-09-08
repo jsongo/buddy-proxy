@@ -245,6 +245,39 @@ async def ui_checkin(request: Request):
     return await manager.claim_now(provider_id)
 
 
+@app.post("/ui/api/traepat/model-status")
+async def ui_traepat_model_status(request: Request):
+    """手动触发 traepat 模型负载查询（10 分钟内重复触发走缓存，避免频打上游）。"""
+    _ensure_local(request)
+    try:
+        from .trae.pat import fetch_pat_model_status
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
+    return await asyncio.to_thread(fetch_pat_model_status)
+
+
+@app.get("/ui/api/traepat/accounts")
+async def ui_traepat_accounts(request: Request):
+    """traepat 各账号本地凭证/冷却状态 + 后台自愈循环最近一轮结果（纯本地，不触网）。"""
+    _ensure_local(request)
+    try:
+        from .trae.pat import accounts_status
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
+    return await asyncio.to_thread(accounts_status)
+
+
+@app.post("/ui/api/traepat/refresh-tokens")
+async def ui_traepat_refresh_tokens(request: Request):
+    """立即补签 traepat 缺失/临期 Token；健康账号不强刷。"""
+    _ensure_local(request)
+    try:
+        from .trae.pat import refresh_missing_tokens
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
+    return await asyncio.to_thread(refresh_missing_tokens)
+
+
 @app.get("/ui/api/codebuddy/usage-records")
 async def ui_codebuddy_usage_records(
     request: Request, days: int = 7, page: int = 1, page_size: int = 20
@@ -903,13 +936,95 @@ function renderBenefits() {
     const headSum = head ? `<span class="mono" style="margin-left:auto">
       <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(head.remaining)}</span>
       <span class="muted">/ ${fmtNum(head.total)}</span></span>` : '';
+    const statusBtn = p.id === 'traepat'
+      ? `<span style="margin-left:auto;display:flex;gap:6px">
+          <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
+          <button class="primary" onclick="loadTraepatStatus(this)">查询模型负载</button>
+        </span>` : '';
+    const statusBox = p.id === 'traepat'
+      ? `<div id="traepat-accounts" class="muted" style="font-size:12px;margin-top:6px">账号状态加载中…</div><div id="traepat-status"></div>` : '';
     return `<div class="chart-card" style="margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="font-weight:600">${esc(p.name)}</span>
         ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}
-        ${headSum}
-      </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
+        ${headSum}${statusBtn}
+      </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}${statusBox}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
+  loadTraepatAccounts();
+}
+
+async function loadTraepatAccounts() {
+  const box = document.getElementById('traepat-accounts');
+  if (!box) return;
+  try {
+    const r = await api('/ui/api/traepat/accounts');
+    if (!r.enabled) { box.textContent = ''; return; }
+    const tag = (t) => t === 'ok' ? '<span class="tag ok">token 正常</span>'
+      : t === 'expiring' ? '<span class="tag" style="color:var(--warn)">临期</span>'
+      : '<span class="tag bad">无 token</span>';
+    const rows = (r.accounts || []).map(a => {
+      const cool = (a.cooling || []).map(c => `${c.kind} 冷却 ${c.minutes_left}min`).join(' · ');
+      const left = a.hours_left != null ? `剩 ${a.hours_left}h` : '';
+      return `<div style="display:flex;gap:8px;align-items:center;padding:1px 0">
+        <span class="mono">${esc(a.id)}</span>
+        <span class="muted">P${a.priority}</span>
+        ${tag(a.token)}${left ? `<span class="muted">${left}</span>` : ''}
+        ${cool ? `<span class="muted" style="color:var(--warn)">${cool}</span>` : ''}</div>`;
+    }).join('');
+    const k = r.keeper || {};
+    const kAt = k.at ? new Date(k.at * 1000).toLocaleTimeString('zh-CN') : '—';
+    const kState = k.env_ready === false ? '<span style="color:var(--warn)">换 token 端点不可达，等网络恢复</span>'
+      : k.env_ready === true ? `上轮补签 ${((k.refreshed || []).length)} 个${(k.waiting || []).length ? `，待补 ${(k.waiting).length} 个` : ''}`
+      : '尚未运行';
+    box.innerHTML = `<div style="margin-top:4px">每 ${Math.round((r.keepalive_s || 0) / 60)} 分钟自愈 · ${kState}（${kAt}）</div>${rows}`;
+  } catch (e) { box.textContent = `账号状态加载失败：${e.message}`; }
+}
+
+async function refreshTraepatTokens(btn) {
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '补签中…'; }
+  try {
+    const r = await api('/ui/api/traepat/refresh-tokens', {method: 'POST'});
+    const n = (r.refreshed || []).length;
+    const waiting = r.waiting || [];
+    if (r.env_ready === false) {
+      toast(`补签端点暂不可达，${waiting.length} 个账号等待中`, true);
+    } else if (waiting.length) {
+      toast(`已补签 ${n} 个，仍有 ${waiting.length} 个待补`, true);
+    } else {
+      toast(`✓ Token 补签完成${n ? `（更新 ${n} 个）` : '（无需更新）'}`);
+    }
+    await loadTraepatAccounts();
+  } catch (e) { toast('Token 补签失败：' + e.message, true); }
+  if (btn) { btn.disabled = false; btn.textContent = old || '补签 Token'; }
+}
+
+async function loadTraepatStatus(btn) {
+  const box = document.getElementById('traepat-status');
+  if (!box) return;
+  if (btn) { btn.disabled = true; btn.textContent = '查询中…'; }
+  box.innerHTML = '<div class="empty" style="padding:8px 0">正在查询模型负载…</div>';
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '查询模型负载'; } };
+  try {
+    const r = await api('/ui/api/traepat/model-status', {method: 'POST'});
+    const rows = (r.models || []).map(m => {
+      const w = m.workload;
+      const hasW = w != null;
+      const pct = hasW ? Math.max(0, Math.min(100, Number(w))) : 0;
+      const color = pct >= 80 ? 'var(--err)' : pct >= 50 ? 'var(--warn)' : 'var(--ok)';
+      const label = hasW ? `${Math.round(pct)}%` : '—';
+      const bar = hasW ? `<div class="qbar"><div style="width:${Math.max(2, pct)}%;background:${color}"></div></div>` : '';
+      const extra = [m.credits ? `积分 ${esc(m.credits)}` : '', m.max_input ? `输入上限 ${fmtNum(m.max_input)}` : ''].filter(Boolean).join(' · ');
+      return `<div class="qitem"><div class="qhead"><span>${esc(m.name || m.id)}${extra ? ` <span class="muted">${extra}</span>` : ''}</span><span class="mono">${label}</span></div>${bar}</div>`;
+    }).join('');
+    const ts = r.fetched_at ? new Date(r.fetched_at * 1000).toLocaleTimeString('zh-CN') : '';
+    box.innerHTML = `<div style="margin-top:8px;border-top:1px solid var(--border,#333);padding-top:8px">
+      <div class="muted" style="font-size:12px;margin-bottom:6px">模型负载（数值越高越繁忙）${ts ? ` · ${ts} 更新` : ''}</div>
+      ${rows || '<div class="empty" style="padding:8px 0">无负载数据</div>'}</div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty" style="padding:8px 0">查询失败：${esc(e.message)}</div>`;
+  }
+  restore();
 }
 
 async function claimNow(pid) {
