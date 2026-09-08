@@ -11,6 +11,7 @@ import io
 import json
 import os
 import stat
+import time
 import urllib.error
 from typing import Any
 
@@ -348,14 +349,24 @@ def test_stream_does_not_switch_after_semantic_commit(monkeypatch):
     ],
 )
 def test_stream_rejects_empty_or_incomplete_success(monkeypatch, events, detail):
+    """空 done / 未收尾：换号重试耗尽后仍必须显式报错，不能吞成空响应。"""
     _configure_two(monkeypatch)
     _install_credentials(monkeypatch)
-    monkeypatch.setattr(pat, "_stream_profile_events", lambda *_args: iter(events))
+    calls: list[str] = []
+
+    def source(*_args, credentials=None, **_kw):
+        calls.append(credentials.uid if credentials is not None else "anon")
+        return iter(events)
+
+    monkeypatch.setattr(pat, "_stream_profile_events", source)
     stream = pat.stream_pat_native([], "standard-model")
     with pytest.raises(HTTPException) as caught:
         list(stream)
     assert caught.value.status_code == 502
     assert detail in str(caught.value.detail)
+    if detail == "no content":
+        # 空响应假成功：两个账号各重试一次（上限 2），仍未拿到内容才报错。
+        assert len(calls) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -734,3 +745,92 @@ def test_model_function_override_used_in_payload(monkeypatch):
     assert captured["body"]["function"] == "solo_agent"
     pat.send_pat_native([{"role": "user", "content": "hi"}], "standard-model", False)
     assert captured["body"]["function"] == os.environ.get("WB_TRAE_NATIVE_FUNCTION", "chat_v3")
+
+
+# ---------------------------------------------------------------------------
+# 空响应假成功（2026-09-09 gpt-5.6-sol 实测）：换号重试兼容
+# ---------------------------------------------------------------------------
+
+_EMPTY_OK_STREAM = [("done", {}), ("token_usage", {"completion_tokens": 3})]
+_GOOD_STREAM = [("output", {"response": "hello"}), ("done", {})]
+
+
+def test_stream_empty_success_retries_next_account(monkeypatch):
+    """账号A 空响应假成功 -> 换账号B 拿到正常内容；不标任何冷却。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls: list[str] = []
+
+    def source(_url, _payload, credentials, _stop):
+        calls.append(credentials.uid)
+        return iter(_EMPTY_OK_STREAM if credentials.uid == "uid-primary" else _GOOD_STREAM)
+
+    monkeypatch.setattr(pat, "_stream_profile_events", source)
+    events = list(pat.stream_pat_native([], "standard-model"))
+    assert ("output", {"response": "hello"}) in events
+    assert calls == ["uid-primary", "uid-backup"]
+    # 空响应不是额度故障：两个账号都不应进入冷却
+    profiles = pat.ensure_pat_config()
+    for p in profiles:
+        assert pat._cooldown_until(p, "standard") <= time.time()
+
+
+def test_stream_empty_success_all_accounts_raises_502(monkeypatch):
+    """所有账号都空响应：显式 502（不是 401，避免误导客户端重登）。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    monkeypatch.setattr(pat, "_stream_profile_events",
+                        lambda *_a: iter(_EMPTY_OK_STREAM))
+    with pytest.raises(HTTPException) as caught:
+        list(pat.stream_pat_native([], "standard-model"))
+    assert caught.value.status_code == 502
+    assert "no content" in str(caught.value.detail)
+
+
+def test_stream_semantic_event_prevents_retry(monkeypatch):
+    """已产出语义内容后收到空 done：绝不重放（防重复计费），正常收尾。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls: list[str] = []
+
+    def source(_url, _payload, credentials, _stop):
+        calls.append(credentials.uid)
+        return iter(_GOOD_STREAM)
+
+    monkeypatch.setattr(pat, "_stream_profile_events", source)
+    events = list(pat.stream_pat_native([], "standard-model"))
+    assert ("output", {"response": "hello"}) in events
+    assert ("done", {}) in events
+    assert calls == ["uid-primary"]  # 单账号完成，不重试
+
+
+def test_send_native_empty_success_retries_next_account(monkeypatch):
+    """非流式：账号A 返回零语义 SSE -> 换账号B 拿到正常响应。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    _EMPTY_RAW = 'event: done\ndata: {}\n\nevent: token_usage\ndata: {"completion_tokens": 1}\n\n'
+    calls: list[str] = []
+
+    def post(_url, _payload, credentials, _stream):
+        calls.append(credentials.uid)
+        return _EMPTY_RAW if credentials.uid == "uid-primary" else _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    assert calls == ["uid-primary", "uid-backup"]
+
+
+def test_send_native_error_event_is_not_empty_success(monkeypatch):
+    """带 error 事件的非白名单响应不是假成功：不换号（保持旧行为）。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls: list[str] = []
+    raw = 'event: error\ndata: {"code": 3003, "message": "no switch"}\n\n'
+
+    def post(_url, _payload, credentials, _stream):
+        calls.append(credentials.uid)
+        return raw
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == raw
+    assert calls == ["uid-primary"]

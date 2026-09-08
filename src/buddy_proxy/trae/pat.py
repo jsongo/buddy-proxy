@@ -654,6 +654,40 @@ def _sse_failover_code(raw: str) -> int | None:
     return None
 
 
+def _sse_has_semantic_content(raw: str) -> bool:
+    """非流式整段 SSE 是否含任何语义内容（text/tool_calls/reasoning）。
+
+    用于「假成功」检测：上游正常返回 done（甚至带 token_usage）但全文
+    零语义——2026-09-09 实测 gpt-5.6-sol 间歇性出现，此时换号重试一次
+    往往能拿到正常响应。含显式 error 事件的响应不属于假成功（旧逻辑
+    已按错误码处理），不在此重试。
+    """
+    stripped = raw.lstrip()
+    if stripped.startswith("{"):
+        # 裸 JSON：只有携带语义字段才算有内容（错误 JSON 已在别处拦截）。
+        try:
+            data = json.loads(stripped)
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+        choices = data.get("choices") or []
+        for choice in choices:
+            message = (choice or {}).get("message") or {}
+            if message.get("content") or message.get("tool_calls"):
+                return True
+        return False
+    try:
+        for event, data in _parse_sse(raw):
+            if event == "error":
+                return True  # 显式错误走原有错误处理，不是假成功
+            if _semantic_event(event, data):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 # ───────────────────────── 额度查询 ─────────────────────────
 
 def _cached_quota(profile: PatProfile, quota_class: str) -> list[dict[str, Any]] | None:
@@ -846,6 +880,16 @@ def _semantic_event(event: str, data: dict[str, Any]) -> bool:
     )
 
 
+# 上游「假成功」防护：done 正常到达但全程零语义内容（无 text/tool_calls/
+# reasoning）的响应换号重试。2026-09-09 实测 gpt-5.6-sol 间歇性出现该形态
+# （upstream_done=true、chunk 很多但 response 全空），当时没有任何账号级
+# 429/403——是上游服务端抖动，不是额度故障。因此：
+# - 不标记账号冷却（避免误伤额度正常的账号）；
+# - 最多换号重试 2 次（防空响应风暴放大上游故障）；
+# - 重试同样受「未提交」约束——首个语义事件出现后绝不重放（防重复计费）。
+_EMPTY_SUCCESS_RETRIES = 2
+
+
 def stream_pat_native(
     native_msgs: list[dict[str, Any]],
     model: str,
@@ -869,6 +913,7 @@ def stream_pat_native(
     url = f"{_chat_base(model)}/api/agent/v3/llm_utils_chat"
     stop = stop or threading.Event()
     last_status: int | None = None
+    empty_retries = 0
 
     have_credentials = False
     for profile in profiles:
@@ -899,8 +944,20 @@ def stream_pat_native(
                         committed = True
                     if event == "done":
                         if not committed:
+                            # 上游假成功：done 已到但零语义内容。未向客户端
+                            # 提交过任何事件，换号重放无副作用；不是额度
+                            # 故障，不标冷却。达到重试上限后显式报 502。
+                            empty_retries += 1
+                            if empty_retries <= _EMPTY_SUCCESS_RETRIES:
+                                log.warning(
+                                    "PAT stream 空响应假成功（done 无内容），换号重试 "
+                                    "%d/%d，账号序号=%d",
+                                    empty_retries, _EMPTY_SUCCESS_RETRIES, profile.index)
+                                break
                             raise HTTPException(
-                                status_code=502, detail="trae PAT stream returned no content")
+                                status_code=502,
+                                detail="trae PAT stream returned no content "
+                                       f"(after {empty_retries - 1} retries)")
                         saw_terminal = True
                         yield event, data
                         return
@@ -909,6 +966,13 @@ def stream_pat_native(
                     if stop.is_set():
                         return
                     if not committed:
+                        # 流自然耗尽也无语义内容：与 done 分支同处理。
+                        empty_retries += 1
+                        if empty_retries <= _EMPTY_SUCCESS_RETRIES:
+                            log.warning(
+                                "PAT stream 流耗尽零内容，换号重试 %d/%d，账号序号=%d",
+                                empty_retries, _EMPTY_SUCCESS_RETRIES, profile.index)
+                            break
                         raise HTTPException(
                             status_code=502, detail="trae PAT stream returned no content")
                     if not saw_terminal:
@@ -946,6 +1010,13 @@ def stream_pat_native(
 
     if not have_credentials:
         raise HTTPException(status_code=502, detail="trae PAT credential unavailable")
+    if empty_retries > 0:
+        # 所有账号均返回空响应假成功：不是额度故障，报 502 而非 401，
+        # 避免误导客户端去重新登录。
+        raise HTTPException(
+            status_code=502,
+            detail="trae PAT stream returned no content (empty success on "
+                   f"{empty_retries} account(s))")
     status = 429 if last_status in (403, 429) or last_status in _FAILOVER_SSE_CODES else 401
     raise HTTPException(status_code=status, detail="trae PAT 所有账号均不可用")
 
@@ -968,6 +1039,7 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
     payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     url = f"{_chat_base(model)}/api/agent/v3/llm_utils_chat"
     last_status: int | None = None
+    empty_retries = 0
 
     have_credentials = False
     for profile in profiles:
@@ -1028,16 +1100,33 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                 last_status = failover_code
                 break
             # 非白名单错误也可能包在裸 JSON 里（解析层认不出 SSE 事件）；
-            # 保持原样返回会变成"空响应"，改为带码号的脱敏错误。
+            # 保持原样返回会变成“空响应”，改为带码号的脱敏错误。
             if raw.lstrip().startswith("{"):
                 code = _json_error_code(raw.lstrip())
                 if code is not None:
                     raise HTTPException(status_code=502,
                                         detail=f"trae PAT chat failed: code {code}") from None
+            # 上游「假成功」防护：请求成功返回但全文零语义内容（2026-09-09
+            # 实测 gpt-5.6-sol 间歇性出现）。非流式响应尚未提交给客户端，
+            # 换号重放无重复计费风险；不是额度故障，不标冷却。
+            if not _sse_has_semantic_content(raw):
+                empty_retries += 1
+                if empty_retries <= _EMPTY_SUCCESS_RETRIES:
+                    log.warning(
+                        "PAT chat 空响应假成功（零语义内容），换号重试 %d/%d，账号序号=%d",
+                        empty_retries, _EMPTY_SUCCESS_RETRIES, profile.index)
+                    break
             return raw
 
     if not have_credentials:
         raise HTTPException(status_code=502, detail="trae PAT credential unavailable")
+    if empty_retries > 0:
+        # 所有账号均返回空响应假成功：不是额度故障，报 502 而非 401，
+        # 避免误导客户端去重新登录。
+        raise HTTPException(
+            status_code=502,
+            detail="trae PAT chat returned no content (empty success on "
+                   f"{empty_retries} account(s))")
     status = 429 if last_status in (403, 429) or last_status in _FAILOVER_SSE_CODES else 401
     raise HTTPException(status_code=status, detail="trae PAT 所有账号均不可用")
 
