@@ -233,12 +233,30 @@ class CDPDoubaoClient:
 
         # 连到的可能只是 Helper 的 chrome:// 占位页（如
         # chrome://doubaowork-chat/cross-site-support/，无 bdms/cookie，
-        # 直接发请求会报 710020202 invalid param）—— 主动导航到聊天页。
+        # 直接发请求会报 710020202 invalid param）—— 但绝不能劫持 App 的
+        # 内部服务页（doubaowork-background 等）。background 页承载 agent
+        # 运行时（本地电脑环境/工具桥），导航走它会导致 App 端「工作环境
+        # 准备中」卡死、工具全部失灵（2026-09-08 实测）。
+        # 找不到豆包域名页时改为新开独立标签页，而不是导航现有 target。
         href = await asyncio.to_thread(self._evaluate, "location.href")
         if "doubao.com" not in (href or ""):
-            log.info("CDPDoubaoClient: target is %s, navigating to chat page", href)
+            log.info("CDPDoubaoClient: target is %s, opening dedicated tab for chat", href)
+            # Page.navigate 在 App 的内部页上会劫持它；改用 Target.createTarget
+            # 新开一个 doubao.com 聊天标签（不动 App 自己的页面）。
             with self._ws_lock:
-                self._ws.cmd("Page.navigate", {"url": "https://www.doubao.com/chat/"})
+                r = self._ws.cmd(
+                    "Target.createTarget",
+                    {"url": "https://www.doubao.com/chat/", "background": False},
+                )
+            new_target_id = (r.get("result") or {}).get("targetId")
+            if not new_target_id:
+                # createTarget 不可用时退回 Page.navigate（旧路径）
+                log.warning("CDPDoubaoClient: createTarget failed, fallback navigate")
+                with self._ws_lock:
+                    self._ws.cmd("Page.navigate", {"url": "https://www.doubao.com/chat/"})
+            else:
+                # 重连到新开标签页的 target
+                await asyncio.to_thread(self._switch_to_target_by_id, new_target_id)
             # 等导航完成（readyState=complete 且已到豆包域名）
             deadline = time.time() + 30
             while time.time() < deadline:
@@ -338,6 +356,30 @@ class CDPDoubaoClient:
     # 内部：CDP 辅助
     # ------------------------------------------------------------------
 
+    def _switch_to_target_by_id(self, target_id: str) -> None:
+        """切换 WebSocket 连接到指定 target（Target.createTarget 后重连）。
+
+        createTarget 返回的 targetId 不带 webSocketDebuggerUrl，需要从
+        /json/list 里按 id 匹配再重连。
+        """
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            for t in self._fetch_targets():
+                if t.get("id") == target_id and t.get("webSocketDebuggerUrl"):
+                    ws_url = t["webSocketDebuggerUrl"]
+                    path = ws_url.split(f":{self.port}", 1)[1]
+                    new_ws = _WS("127.0.0.1", self.port, path)
+                    old = self._ws
+                    self._ws = new_ws
+                    if old:
+                        try:
+                            old.close()
+                        except Exception:
+                            pass
+                    return
+            time.sleep(0.3)
+        raise RuntimeError(f"new tab target {target_id} not found in /json/list")
+
     def _evaluate(self, expr: str, timeout: float = 30.0, await_promise: bool = True) -> Any:
         """同步执行 Runtime.evaluate（返回 JS 值或错误标记）。
 
@@ -386,7 +428,10 @@ class CDPDoubaoClient:
                 url = t.get("url", "")
                 if not t.get("webSocketDebuggerUrl"):
                     continue
-                if "doubao.com" in url:
+                # 只认真正的聊天页（type=page）。iframe（drive-iframe 等）
+                # 虽然在豆包域名下，但 localStorage 里没有 web_id、
+                # bdms 上下文也不对，连上后请求会 710020202。
+                if "doubao.com" in url and t.get("type") == "page":
                     return t
                 if fallback is None and t.get("type") == "page":
                     fallback = t
