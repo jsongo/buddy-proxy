@@ -268,6 +268,18 @@ def test_metrics_persist_and_reload(tmp_path):
     assert rec["ttft_ms"] == 45 and rec["cached_tokens"] == 3 and rec["credit"] == 0.5
 
 
+def test_metrics_record_account_and_default_empty(env):
+    # traepat 多账号：record 带 account，最近请求里可见；其它通道缺省为空串
+    env.state.metrics.record(provider="traepat", model="gpt-6", protocol="openai",
+                             status=200, duration_ms=10, account="primary")
+    env.state.metrics.record(provider="codebuddy", model="glm-5.3",
+                             status=200, duration_ms=10)
+    recent = env.state.metrics.snapshot()["recent"]
+    by_provider = {r["provider"]: r for r in recent}
+    assert by_provider["traepat"]["account"] == "primary"
+    assert by_provider["codebuddy"]["account"] == ""
+
+
 # ---------------------------------------------------------------------------
 # 流式 usage 提取（SSE）
 # ---------------------------------------------------------------------------

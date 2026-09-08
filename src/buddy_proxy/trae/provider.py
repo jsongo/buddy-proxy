@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import queue
@@ -341,8 +342,11 @@ class TraeProvider(BaseProvider):
                 except BaseException as e:  # noqa: BLE001 — 原样转主线程抛出
                     _ev_q.put(("error", e))
 
-            threading.Thread(target=_read_upstream, daemon=True,
-                             name="trae-sse-reader").start()
+            # 读线程以请求上下文的副本运行：ContextVar 赋值不跨线程，PAT 子类的
+            # 发送钩子靠这份副本读到请求级账号 holder（ACCOUNT_META）并上报账号
+            _request_ctx = contextvars.copy_context()
+            threading.Thread(target=_request_ctx.run, args=(_read_upstream,),
+                             daemon=True, name="trae-sse-reader").start()
             raw: str | None = None
             used_native = native is not None
             _waited = 0

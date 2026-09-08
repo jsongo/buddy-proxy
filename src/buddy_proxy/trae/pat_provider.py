@@ -14,6 +14,7 @@ from typing import Any, Sequence
 
 from fastapi import HTTPException
 
+from ..metrics import ACCOUNT_META
 from .pat import ensure_pat_config, pat_enabled, pat_model_names, fetch_pat_ent_usage
 from .provider import TraeProvider
 
@@ -56,14 +57,18 @@ class TraePatProvider(TraeProvider):
 
     def _send_native_request(self, native_msgs, model, stream, tools):
         from .pat import send_pat_native
-        return send_pat_native(native_msgs, model, stream, tools)
+        # 请求级账号 holder：调用方线程带请求上下文副本（读线程经 copy_context、
+        # _collect 经 asyncio.to_thread），未设置（直连调用/测试）时为 None
+        return send_pat_native(native_msgs, model, stream, tools,
+                               meta=ACCOUNT_META.get())
 
     def _keeps_native_error(self, model: str) -> bool:
         return True
 
     def _stream_native_events(self, native_msgs, model, tools, stop):
         from .pat import stream_pat_native
-        return stream_pat_native(native_msgs, model, tools, stop=stop)
+        return stream_pat_native(native_msgs, model, tools, stop=stop,
+                                 meta=ACCOUNT_META.get())
 
     def _uses_native_mode(self) -> bool:
         # PAT 只有独立原生传输路径；不受个人通道开关影响，杜绝凭证穿透。

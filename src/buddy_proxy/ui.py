@@ -1446,9 +1446,13 @@ function renderRecent() {
     }
     const creditTxt = r.credit != null ? r.credit
                     : cmap[r.provider + '/' + r.model] || null;
+    // 多账号通道（traepat）：括号内展示账号缩略，hover 看完整 id；≤10 字符直接全显
+    const acct = r.account
+      ? ` <span class="muted" title="账号：${esc(r.account)}">(${esc(r.account.length > 10 ? r.account.slice(0, 6) + '…' : r.account)})</span>`
+      : '';
     return `<tr>
       <td class="mono muted">${fmtTime(r.ts)}</td>
-      <td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i><span class="mono muted">${esc(r.provider)}</span></td>
+      <td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i><span class="mono muted">${esc(r.provider)}</span>${acct}</td>
       <td class="mono">${esc(r.model)}</td>
       <td class="mono muted" title="客户端来源：X-Client-Name 自声明 > UA 推断（旧记录无此字段）">${r.client ? esc(r.client) : '<span class="muted">—</span>'}</td>
       <td class="num mono">${r.ttft_ms != null ? ttft : '—'}</td>

@@ -27,6 +27,17 @@ from buddy_proxy.trae.sse import _SSEDecoder
 _OK = 'event: output\ndata: {"response":"ok"}\n\nevent: done\ndata: {}\n\n'
 
 
+@pytest.fixture(autouse=True)
+def _isolate_state_files(monkeypatch, tmp_path):
+    """隔离真实状态文件：冷却/额度写入必须落在临时目录，不污染 ~/.buddy-proxy。"""
+    monkeypatch.setenv("TRAE_PAT_TOKEN_FILE", str(tmp_path / "trae_pat_token.json"))
+    monkeypatch.setenv("TRAE_WORK_CRED_PATH", str(tmp_path / "trae_work.json"))
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(pat, "_quota_code_hits", {})
+    monkeypatch.setattr(pat, "_channel_exhausted", {})
+    yield
+
+
 def _profiles(*items: dict[str, Any]) -> str:
     return json.dumps(list(items), ensure_ascii=False)
 
@@ -412,6 +423,56 @@ def test_http_403_and_429_switch_to_backup(monkeypatch, status):
     monkeypatch.setattr(pat, "_post_chat", post)
     assert pat.send_pat_native([], "advanced-model", False) == _OK
     assert calls == ["uid-primary", "uid-backup"]
+
+
+# ---------------------------------------------------------------------------
+# 请求级账号上报（metrics.ACCOUNT_META holder → 最近请求表格）
+# ---------------------------------------------------------------------------
+def test_send_and_stream_report_used_account(monkeypatch):
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    monkeypatch.setattr(pat, "_post_chat", lambda *_a, **_k: _OK)
+
+    meta: dict[str, Any] = {}
+    assert pat.send_pat_native([], "standard-model", False, meta=meta) == _OK
+    assert meta == {"account": "primary"}
+
+
+def test_stream_reports_used_account(monkeypatch):
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def source(*_args, **_kwargs):
+        yield ("output", {"response": "ok"})
+        yield ("done", {})
+
+    monkeypatch.setattr(pat, "_stream_profile_events", source)
+    meta: dict[str, Any] = {}
+    assert list(pat.stream_pat_native([], "standard-model", meta=meta)) == [
+        ("output", {"response": "ok"}), ("done", {})]
+    assert meta == {"account": "primary"}
+
+
+def test_failover_reports_final_account(monkeypatch):
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def post(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            raise _http_error(403, retry_after="60")
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    meta: dict[str, Any] = {}
+    assert pat.send_pat_native([], "advanced-model", False, meta=meta) == _OK
+    assert meta == {"account": "backup"}
+
+
+def test_account_meta_is_optional(monkeypatch):
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    monkeypatch.setattr(pat, "_post_chat", lambda *_a, **_k: _OK)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
 
 
 def test_401_refresh_service_failure_does_not_switch(monkeypatch):
@@ -834,3 +895,117 @@ def test_send_native_error_event_is_not_empty_success(monkeypatch):
     monkeypatch.setattr(pat, "_post_chat", post)
     assert pat.send_pat_native([], "standard-model", False) == raw
     assert calls == ["uid-primary"]
+
+
+# ---------------------------------------------------------------------------
+# 白名单额度码分级冷却：首次短冷却，反复撞码才升级到次日
+# ---------------------------------------------------------------------------
+
+def _quota_fail(_url, _payload, credentials, _stream):
+    calls.append(credentials.uid)
+    return 'event: error\ndata: {"code": 4031, "message": "quota"}\n\n'
+
+
+def test_quota_code_first_hit_short_cooldown(monkeypatch):
+    """首次撞 4031：只短冷却（5分钟内恢复），不冷却到次日。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls = []
+
+    def post(_url, _payload, credentials, _stream):
+        calls.append(credentials.uid)
+        return 'event: error\ndata: {"code": 4031, "message": "quota"}\n\n'
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    with pytest.raises(HTTPException):
+        pat.send_pat_native([], "standard-model", False)
+    profile = pat.ensure_pat_config()[0]
+    left = pat._cooldown_until(profile, "standard") - time.time()
+    assert left <= pat._ACCOUNT_COOLDOWN_S * 5 + 1  # 短冷却，不是到次日
+    assert "standard" in json.dumps(json.load(open(os.environ["TRAE_PAT_TOKEN_FILE"]))["profiles"][profile.cache_key]["cooldowns"])
+
+
+def test_quota_code_repeated_hits_escalate_to_next_day(monkeypatch):
+    """同一账号 5 分钟内撞码 3 次：升级为冷却到次日。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    profile = pat.ensure_pat_config()[0]
+    for _ in range(pat._QUOTA_CODE_ESCALATE_HITS):
+        pat._mark_cooldown(profile, "standard", code=4031)
+    left = pat._cooldown_until(profile, "standard") - time.time()
+    # 到次日 = 剩余 > 20 小时（现在距午夜至少几小时）
+    assert left > 3600
+
+
+def test_quota_code_hits_isolated_per_account_and_class(monkeypatch):
+    """撞码计数按账号+额度类隔离：A 账号反复撞不影响 B 账号首次短冷却。"""
+    _configure_two(monkeypatch)
+    profiles = pat.ensure_pat_config()
+    for _ in range(pat._QUOTA_CODE_ESCALATE_HITS):
+        pat._mark_cooldown(profiles[0], "standard", code=4031)
+    # B 账号首次撞码仍是短冷却
+    pat._mark_cooldown(profiles[1], "standard", code=4031)
+    left_b = pat._cooldown_until(profiles[1], "standard") - time.time()
+    assert left_b <= pat._ACCOUNT_COOLDOWN_S * 5 + 1
+    # 跨额度类也隔离
+    left_a_adv = pat._cooldown_until(profiles[0], "advanced") - time.time()
+    assert left_a_adv <= 0
+
+
+# ---------------------------------------------------------------------------
+# 通道级 4031 快速失败：全账号同窗口被拦时不再逐个探测
+# ---------------------------------------------------------------------------
+
+def test_channel_exhausted_4031_fast_fails_subsequent_requests(monkeypatch):
+    """首个 4031 标记通道：后续请求不再探测任何账号，快速 429 带重探提示。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls: list[str] = []
+
+    def post(_url, _payload, credentials, _stream):
+        calls.append(credentials.uid)
+        return 'event: error\ndata: {"code": 4031, "message": ""}\n\n'
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    with pytest.raises(HTTPException):
+        pat.send_pat_native([], "standard-model", False)
+    first_round = len(calls)  # 首次仍会逐账号探测
+    assert first_round == 2
+    # 第二次请求：通道级标记生效，零上游调用
+    with pytest.raises(HTTPException) as caught:
+        pat.send_pat_native([], "standard-model", False)
+    assert caught.value.status_code == 429
+    assert "4031" in str(caught.value.detail)
+    assert len(calls) == first_round  # 没有新增上游调用
+
+
+def test_channel_exhausted_ttl_expires(monkeypatch):
+    """TTL 过期后恢复探测（自愈路径）。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def post(_url, _payload, credentials, _stream):
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    expired = time.time() - 1
+    pat._channel_exhausted["standard"] = expired
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+
+
+def test_channel_exhausted_only_for_4031(monkeypatch):
+    """非 4031 白名单码（如 4008）不触发通道级标记。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls: list[str] = []
+
+    def post(_url, _payload, credentials, _stream):
+        calls.append(credentials.uid)
+        if credentials.uid == "uid-primary":
+            return 'event: error\ndata: {"code": 4008, "message": ""}\n\n'
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    assert pat._channel_exhausted_until("standard") is None
+    assert calls == ["uid-primary", "uid-backup"]

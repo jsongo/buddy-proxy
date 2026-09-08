@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import collections
+import contextvars
 import json
 import os
 import pathlib
@@ -26,6 +27,14 @@ MAX_RECENT = 200
 _TAIL_BYTES = 2_000_000
 # 聚合只保留最近 N 天，更早的启动回读时丢弃
 KEEP_DAYS = 30
+
+# 请求级账号 holder（traepat 多账号 failover 用；其余 provider 单账号不写）。
+# 请求开始时 _instrument 放入空 dict，pat.py 选定账号后在深处写入 account id。
+# 之所以是「ContextVar 持有可变 dict」而非直接赋值：流式路径的写入发生在
+# SSE 读线程/to_thread worker 里，ContextVar 赋值不跨线程传播，但同一 dict
+# 对象的变更全局可见，_instrument 落库时从同一对象读回。
+ACCOUNT_META: contextvars.ContextVar[Optional[dict[str, Any]]] = contextvars.ContextVar(
+    "account_meta", default=None)
 
 
 def _date_str(ts: float) -> str:
@@ -142,6 +151,7 @@ class MetricsCollector:
         credit: Optional[float] = None,
         credit_estimated: bool = False,
         client: str = "",
+        account: str = "",
     ) -> None:
         ts = time.time()
         rec = {
@@ -161,6 +171,7 @@ class MetricsCollector:
             "chunk_count": int(chunk_count or 0),
             "error": (error or "")[:300],
             "client": (client or "")[:40],
+            "account": (account or "")[:40],
         }
         with self._lock:
             self._recent.append(rec)

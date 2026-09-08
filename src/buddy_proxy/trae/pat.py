@@ -159,7 +159,11 @@ def pat_enabled() -> bool:
 
 def _token_file() -> pathlib.Path:
     configured = os.environ.get(_TOKEN_FILE, "")
-    return pathlib.Path(configured) if configured else pathlib.Path.home() / ".ethan" / "trae_pat_token.json"
+    if configured:
+        return pathlib.Path(configured)
+    # 状态统一收敛到 ~/.buddy-proxy/；首次访问自动从 ~/.ethan/ 迁移。
+    from ..paths import state_file
+    return state_file("trae_pat_token.json", legacy="trae_pat_token.json")
 
 
 # ───────────────────────── 模型目录 ─────────────────────────
@@ -583,8 +587,68 @@ def _quota_reset_timestamp(now: float, quota_class: str) -> float:
     return _next_day_timestamp(now)
 
 
-def _mark_cooldown(profile: PatProfile, quota_class: str) -> None:
-    until = _quota_reset_timestamp(time.time(), quota_class)
+# 白名单额度码的分级冷却：首次撞码只做短冷却并立即换号（防上游偶发误报
+# 毁掉整个通道一整天）；短窗口内同一账号同类反复撞码才升级为「冷却到次日」
+#（真额度耗尽）。内存计数即可——重启后重新探测一次的代价远小于误冷却。
+_QUOTA_CODE_HIT_WINDOW_S = 300
+_QUOTA_CODE_ESCALATE_HITS = 3
+_quota_code_hits: dict[tuple[str, str], list[float]] = {}
+_quota_code_hits_lock = threading.Lock()
+
+# 通道级额度限制标记：4031（日额度包耗尽）实测会在同一窗口内拦截全部账号
+# —— 判定维度不是单账号余额（余额 0/58 的账号同样 4031，疑似按 IP/租户维度）。
+# 此时逐个探测 10 个账号毫无意义，改为快速失败 + 短 TTL 定期重探（默认 5 分钟）：
+# 上游限制解除后自动恢复；若真有个别账号仍有余量，最多 5 分钟后也会被发现。
+_channel_exhausted: dict[str, float] = {}
+_channel_exhausted_lock = threading.Lock()
+_CHANNEL_EXHAUSTED_TTL_S = 300
+
+
+def _channel_exhausted_until(quota_class: str) -> float | None:
+    with _channel_exhausted_lock:
+        until = float(_channel_exhausted.get(quota_class) or 0)
+    return until if until > time.time() else None
+
+
+def _mark_channel_exhausted(quota_class: str) -> None:
+    until = time.time() + _CHANNEL_EXHAUSTED_TTL_S
+    with _channel_exhausted_lock:
+        _channel_exhausted[quota_class] = until
+
+
+def _raise_channel_exhausted(quota_class: str) -> None:
+    until = _channel_exhausted_until(quota_class)
+    if not until:
+        return
+    retry = max(0, int(until - time.time()))
+    raise HTTPException(
+        status_code=429,
+        detail=(f"PAT {quota_class} 全账号当前均被上游 4031 限额拦截（判定维度疑似非账号级，"
+                f"切号无效），{retry}s 后自动重探；日包重置 00:00，期间可改用 trae/ 或 codebuddy/ 通道"))
+
+
+def _record_quota_code_hit(cache_key: str, quota_class: str) -> int:
+    """记录一次额度码撞码，返回窗口内累计次数。"""
+    now = time.monotonic()
+    key = (cache_key, quota_class)
+    with _quota_code_hits_lock:
+        hits = [t for t in _quota_code_hits.get(key, []) if now - t < _QUOTA_CODE_HIT_WINDOW_S]
+        hits.append(now)
+        _quota_code_hits[key] = hits
+        return len(hits)
+
+
+def _mark_cooldown(
+    profile: PatProfile, quota_class: str, *, code: int | None = None,
+) -> None:
+    """额度码冷却：首次短冷却（5分钟）换号，反复撞码升级为冷却到次日。"""
+    hits = _record_quota_code_hit(profile.cache_key, quota_class)
+    if hits >= _QUOTA_CODE_ESCALATE_HITS:
+        until = _quota_reset_timestamp(time.time(), quota_class)
+        until_desc = "至次日"
+    else:
+        until = time.time() + _ACCOUNT_COOLDOWN_S * 5
+        until_desc = "5分钟（首次，未升级）"
 
     def store(state: dict[str, Any]) -> None:
         cooldowns = state.setdefault("cooldowns", {})
@@ -595,6 +659,10 @@ def _mark_cooldown(profile: PatProfile, quota_class: str) -> None:
         cooldowns[quota_class] = max(old, until)
 
     _mutate_account(profile.cache_key, store)
+    log.warning(
+        "PAT 账号序号=%d %s 类冷却%s（触发码=%s，窗口内第%d次）",
+        profile.index, quota_class, until_desc,
+        code if code is not None else "unknown", hits)
 
 
 def _mark_account_cooldown(profile: PatProfile, *, retry_after: str | None = None) -> None:
@@ -896,13 +964,19 @@ def stream_pat_native(
     tools: list[dict[str, Any]] | None = None,
     *,
     stop: threading.Event | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
-    """稳定主备的 PAT 真流式入口；首个语义事件后永不重放或拼流。"""
+    """稳定主备的 PAT 真流式入口；首个语义事件后永不重放或拼流。
+
+    ``meta`` 为请求级账号 holder（metrics.ACCOUNT_META 的 dict）：每次开始
+    使用某账号时写入 ``meta["account"]``，failover 后被覆盖为最终账号。
+    """
     start_token_keeper()  # 幂等：请求路径兜底拉起自愈循环
     _reload_pat_models()
     if model not in PAT_MODELS:
         raise HTTPException(status_code=400, detail=f"模型 {model} 不在 PAT 通道目录内")
     quota_class = _quota_class(model)
+    _raise_channel_exhausted(quota_class)  # 通道级 4031 限制期：快速失败，不逐账号探测
     profiles = _ordered_available_profiles(quota_class)
     if not profiles:
         raise HTTPException(status_code=429, detail=f"PAT {quota_class} 账号均在额度冷却中")
@@ -923,6 +997,8 @@ def stream_pat_native(
             # 同非流式路径：单账号换不到凭据时跳过，不让它拖垮整个通道。
             continue
         have_credentials = True
+        if meta is not None:
+            meta["account"] = profile.id
         refreshed = False
         rejected_token: str | None = None
         while True:
@@ -935,7 +1011,9 @@ def stream_pat_native(
                     code = _event_error_code(event, data)
                     if code is not None:
                         if not committed and code in _FAILOVER_SSE_CODES:
-                            _mark_cooldown(profile, quota_class)
+                            if code == 4031:
+                                _mark_channel_exhausted(quota_class)
+                            _mark_cooldown(profile, quota_class, code=code)
                             last_status = code
                             break
                         yield event, data
@@ -1022,14 +1100,19 @@ def stream_pat_native(
 
 
 def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
-                    tools: list[dict[str, Any]] | None = None) -> str:
-    """稳定主备发送；同一序列化 payload/session 在所有账号和重放间保持不变。"""
+                    tools: list[dict[str, Any]] | None = None,
+                    meta: dict[str, Any] | None = None) -> str:
+    """稳定主备发送；同一序列化 payload/session 在所有账号和重放间保持不变。
+
+    ``meta`` 语义同 :func:`stream_pat_native`：记录最终使用的账号 id。
+    """
     start_token_keeper()  # 幂等：请求路径兜底拉起自愈循环
     _reload_pat_models()
     if model not in PAT_MODELS:
         raise HTTPException(status_code=400, detail=f"模型 {model} 不在 PAT 通道目录内")
     upstream_model, config = PAT_MODELS[model]
     quota_class = _quota_class(model)
+    _raise_channel_exhausted(quota_class)  # 通道级 4031 限制期：快速失败，不逐账号探测
     profiles = _ordered_available_profiles(quota_class)
     if not profiles:
         raise HTTPException(status_code=429, detail=f"PAT {quota_class} 账号均在额度冷却中")
@@ -1052,6 +1135,8 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
             # 拿不到凭据时才整体失败。
             continue
         have_credentials = True
+        if meta is not None:
+            meta["account"] = profile.id
         refreshed = False
         rejected_token: str | None = None
         while True:
@@ -1096,7 +1181,9 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                 raise HTTPException(status_code=502, detail="trae PAT chat transport failed") from None
             failover_code = _sse_failover_code(raw)
             if failover_code is not None:
-                _mark_cooldown(profile, quota_class)
+                if failover_code == 4031:
+                    _mark_channel_exhausted(quota_class)
+                _mark_cooldown(profile, quota_class, code=failover_code)
                 last_status = failover_code
                 break
             # 非白名单错误也可能包在裸 JSON 里（解析层认不出 SSE 事件）；
@@ -1132,11 +1219,12 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
 
 
 def send_pat_chat(messages: list[dict[str, Any]], model: str, stream: bool,
-                  tools: list[dict[str, Any]] | None = None) -> str:
+                  tools: list[dict[str, Any]] | None = None,
+                  meta: dict[str, Any] | None = None) -> str:
     native_msgs = [{"role": message.get("role", "user"),
                     "content": _content_blocks(message.get("content"))}
                    for message in messages]
-    return send_pat_native(native_msgs, model, stream, tools)
+    return send_pat_native(native_msgs, model, stream, tools, meta=meta)
 
 
 # ───────────────────────── 凭证自愈（后台保活） ─────────────────────────
