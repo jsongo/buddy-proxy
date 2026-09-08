@@ -101,3 +101,158 @@ def test_classic_payload_has_no_agent_fields():
     assert "agent_mode" not in p["option"]
     assert "model_config" not in p["option"]
     assert "aggregate_params" not in p["option"]
+
+
+# ---------------------------------------------------------------------------
+# 目标选择优先级（2026-09-09：App 聊天窗口是工具可用的上下文，优先直连）
+# ---------------------------------------------------------------------------
+
+def _tgt(url: str, type_: str = "page", ws: bool = True) -> dict:
+    t = {"url": url, "type": type_, "id": url[:8]}
+    if ws:
+        t["webSocketDebuggerUrl"] = f"devtools/browser/{url[:8]}"
+    return t
+
+
+def _wait_for_target_once(targets: list[dict], timeout: float = 1.0) -> dict | None:
+    import asyncio
+
+    client = CDPDoubaoClient()
+    client._fetch_targets = lambda: targets  # type: ignore[method-assign]
+    return asyncio.run(client._wait_for_target(timeout=timeout))
+
+
+def test_target_prefers_app_chat_window():
+    """App 自己的聊天窗口优先于豆包域名页（工具只在 App 上下文可用）。"""
+    picked = _wait_for_target_once([
+        _tgt("https://www.doubao.com/chat/123"),
+        _tgt("doubaowork://doubaowork-background/"),
+        _tgt("doubaowork://doubaowork-chat/chat/456"),
+    ])
+    assert picked is not None
+    assert "doubaowork-chat/chat" in picked["url"]
+
+
+def test_target_falls_back_to_doubao_page():
+    """没有 App 聊天窗口时用豆包域名页。"""
+    picked = _wait_for_target_once([
+        _tgt("doubaowork://doubaowork-background/"),
+        _tgt("https://www.doubao.com/chat/123"),
+    ])
+    assert picked is not None
+    assert "doubao.com" in picked["url"]
+
+
+def test_target_ignores_iframe_and_non_page():
+    """iframe 与无 WS 的 target 不参与选择；只剩普通页时作兜底。"""
+    picked = _wait_for_target_once([
+        _tgt("https://www.doubao.com/drive-iframe/drive/home/", type_="iframe"),
+        _tgt("doubaowork://doubaowork-chat/cross-site-support/", type_="other"),
+        _tgt("doubaowork://doubaowork-background/"),
+    ])
+    assert picked is not None
+    assert "doubaowork-background" in picked["url"]
+
+
+def test_usable_chat_href():
+    from buddy_proxy.doubao.cdp_client import _usable_chat_href
+    assert _usable_chat_href("chrome://doubaowork-chat/chat/123")
+    assert _usable_chat_href("doubaowork://doubaowork-chat/chat/123")
+    assert _usable_chat_href("https://www.doubao.com/chat/")
+    # App 内部服务页不可直接发请求（否则会走到新开标签页/报错路径）
+    assert not _usable_chat_href("doubaowork://doubaowork-background/")
+    assert not _usable_chat_href("chrome://doubaowork-chat/cross-site-support/")
+    assert not _usable_chat_href("")
+    assert not _usable_chat_href(None)
+
+
+# ---------------------------------------------------------------------------
+# 新会话引导（2026-09-09：runtime_type=2 的新会话未完成运行时握手，
+# 首条消息的工具调用会卡死；先纯文本建会话再续聊发正式任务）
+# ---------------------------------------------------------------------------
+
+class _FakeClient:
+    """记录 chat_completion 调用并回放脚本化 SSE 事件。"""
+
+    def __init__(self, script):
+        self.script = script  # list[list[dict]]：每次调用的水位事件
+        self.calls: list[dict] = []
+        self.failures = 0
+
+    def record_failure(self, code=0):
+        self.failures += 1
+
+    def record_success(self):
+        pass
+
+    @staticmethod
+    def extract_conversation_id(event):
+        return event.get("ack_client_meta", {}).get("conversation_id")
+
+    async def chat_completion(self, text, conversation_id=None, bot_id=None,
+                              use_deep_think=0, model_spec=None):
+        self.calls.append({"text": text, "conversation_id": conversation_id})
+        for ev in self.script[len(self.calls) - 1]:
+            yield ev
+
+
+def _run_agent_task(provider, task, session_id=None):
+    import asyncio
+
+    async def _collect():
+        return [chunk async for chunk in
+                provider.stream_agent_task(task, session_id, "doubao-auto",
+                                           {"item_key": "9", "extra": {}, "provider": ""})]
+    return asyncio.run(_collect())
+
+
+def _provider_with(fake_client):
+    from buddy_proxy.doubao_provider import DoubaoProvider
+    p = DoubaoProvider.__new__(DoubaoProvider)  # 跳过 __init__（不起 CDP）
+    p._client = fake_client
+    p._agent_session = None
+    p._started = True
+    return p
+
+
+def test_new_session_bootstraps_then_sends_task_as_continuation():
+    boot = [{"ack_client_meta": {"conversation_id": "conv-boot"}},
+            {"_event": "CHUNK_DELTA", "text": "就绪"}]
+    real = [{"ack_client_meta": {"conversation_id": "conv-boot"}},
+            {"_event": "CHUNK_DELTA", "text": "答案"}]
+    p = _provider_with(_FakeClient([boot, real]))
+    chunks = _run_agent_task(p, "帮我读一下桌面文件")
+    types = [__import__("json").loads(c[6:])["type"] for c in chunks]
+    assert types[0] == "start"
+    assert "session" in types
+    # 第一次调用无会话 id（引导建会话），第二次续聊引导出的会话
+    assert p._client.calls[0]["conversation_id"] is None
+    assert p._client.calls[1]["conversation_id"] == "conv-boot"
+    # 引导消息不是任务文本；正式任务以续聊发出
+    assert p._client.calls[0]["text"] != "帮我读一下桌面文件"
+    assert p._client.calls[1]["text"] == "帮我读一下桌面文件"
+    # 引导回复不透出，正式回复透出
+    texts = "".join(chunks)
+    assert "就绪" not in texts
+    assert "答案" in texts
+    assert types[-1] == "done"
+    # 默认会话跟随引导出的会话
+    assert p._agent_session == "conv-boot"
+
+
+def test_existing_session_skips_bootstrap():
+    real = [{"ack_client_meta": {"conversation_id": "conv-x"}},
+            {"_event": "CHUNK_DELTA", "text": "ok"}]
+    p = _provider_with(_FakeClient([real]))
+    chunks = _run_agent_task(p, "任务", session_id="conv-x")
+    assert len(p._client.calls) == 1
+    assert p._client.calls[0]["conversation_id"] == "conv-x"
+    assert "ok" in "".join(chunks)
+
+
+def test_bootstrap_upstream_error_fails_task():
+    boot = [{"error": True, "status": 502, "body": "boom"}]
+    p = _provider_with(_FakeClient([boot]))
+    chunks = _run_agent_task(p, "任务", session_id="new")
+    assert len(p._client.calls) == 1  # 引导失败即终止，不发正式任务
+    assert '"type":"error"' in "".join(chunks).replace(" ", "")
