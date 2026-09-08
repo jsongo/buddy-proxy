@@ -931,9 +931,10 @@ function renderBenefits() {
       return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${reset}</span>${nums}</div>${bar}</div>`;
     }).join('');
     // 标题行汇总：剩余/总额（取第一个可合计的条目；CodeBuddy 是积分合计，
-    // zcode 取最紧的窗口。各明细条目仍完整列在下方）
+    // zcode 取最紧的窗口。各明细条目仍完整列在下方。traepat 不展示：包是
+    // 多个独立额度，头部合计无意义，账号状态面板已自带操作按钮）
     const head = (q.items || []).find(it => it.remaining != null && it.total != null);
-    const headSum = head ? `<span class="mono" style="margin-left:auto">
+    const headSum = (head && p.id !== 'traepat') ? `<span class="mono" style="margin-left:auto">
       <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(head.remaining)}</span>
       <span class="muted">/ ${fmtNum(head.total)}</span></span>` : '';
     const statusBtn = p.id === 'traepat'

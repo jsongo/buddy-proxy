@@ -83,12 +83,11 @@ class TraePatProvider(TraeProvider):
 
     def quota(self) -> dict[str, Any] | None:
         try:
-            return {"items": fetch_pat_ent_usage(), "level": "PAT"}
+            return {"items": fetch_pat_ent_usage()}
         except Exception as e:
             # 额度查询失败不抛——UI 展示为查询错误，不影响其它 provider
             return {"items": [{"label": "PAT 额度查询失败", "used": None, "total": None,
-                               "remaining": str(e)[:120], "percent": None, "reset_ts": None}],
-                    "level": "PAT"}
+                               "remaining": str(e)[:120], "percent": None, "reset_ts": None}]}
 
     # —— 打卡/积分/用量记录均为个人账号专属：显式覆盖为 None，防止继承的
     # TraeProvider 实现拿个人凭证调用（supports_checkin=False 已挡住 UI 调度）——

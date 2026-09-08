@@ -132,13 +132,14 @@ class BenefitsManager:
     # ------------------------------------------------------------------
 
     def _providers(self) -> dict[str, Any]:
-        """已启用 provider + 默认 codebuddy 通道（打卡/额度能力均不支持，UI 显示占位）。"""
-        providers = dict(getattr(self._state, "providers", {}) or {})
+        """默认 codebuddy 通道 + 已启用 provider（UI 面板按此顺序渲染，
+        codebuddy 恒排首位，其余按注册序）。"""
         try:
             from buddy_proxy.codebuddy_provider import _default_codebuddy
-            providers.setdefault("codebuddy", _default_codebuddy)
+            providers = {"codebuddy": _default_codebuddy}
         except Exception:
-            pass
+            providers = {}
+        providers.update(getattr(self._state, "providers", {}) or {})
         return providers
 
     def checkin_providers(self) -> dict[str, Any]:
