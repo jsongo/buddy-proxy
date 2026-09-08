@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  buddy-proxy 常驻服务（LaunchAgent：随登录启动、崩溃自动重启）。
+
+  安装（一次性）：
+    cp deploy/com.buddy-proxy.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.buddy-proxy.plist
+
+  卸载：
+    launchctl unload ~/Library/LaunchAgents/com.buddy-proxy.plist
+    rm ~/Library/LaunchAgents/com.buddy-proxy.plist
+
+  说明：
+  - KeepAlive：进程退出/崩溃后 launchd 自动拉起（10s 退避）。
+  - RunAtLoad：登录即启动。
+  - 装了它之后就不要再手动 nohup 启动，避免端口冲突（8787 被占时新进程起不来）。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.buddy-proxy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jsongo/code/life/buddy-proxy/.venv/bin/python</string>
+        <string>-m</string>
+        <string>buddy_proxy</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8787</string>
+        <string>--log-file</string>
+        <string>/Users/jsongo/code/life/buddy-proxy/logs/buddy-proxy.jsonl</string>
+        <string>--desensitize</string>
+        <string>--trae</string>
+        <string>--doubao</string>
+        <string>--zcode</string>
+        <string>--default-provider</string>
+        <string>trae</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jsongo/code/life/buddy-proxy</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jsongo/code/life/buddy-proxy/logs/launchd-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/jsongo/code/life/buddy-proxy/logs/launchd-stderr.log</string>
+</dict>
+</plist>
