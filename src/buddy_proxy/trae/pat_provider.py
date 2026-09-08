@@ -14,7 +14,7 @@ from typing import Any, Sequence
 
 from fastapi import HTTPException
 
-from .pat import pat_enabled, pat_model_names, fetch_pat_ent_usage, get_pat_credentials
+from .pat import ensure_pat_config, pat_enabled, pat_model_names, fetch_pat_ent_usage
 from .provider import TraeProvider
 
 
@@ -47,14 +47,34 @@ class TraePatProvider(TraeProvider):
         return out
 
     def ensure_auth(self) -> None:
-        get_pat_credentials()
+        # 启动/健康检查只做本地严格配置校验；token 交换延迟到真实请求，避免阻塞。
+        ensure_pat_config()
+        # 顺带拉起后台凭证自愈循环（幂等）：离线期间缺失/临期的 token 在网络
+        # 恢复后自动补齐，不靠第一个撞上的请求去踩 502。
+        from .pat import start_token_keeper
+        start_token_keeper()
+
+    def _send_native_request(self, native_msgs, model, stream, tools):
+        from .pat import send_pat_native
+        return send_pat_native(native_msgs, model, stream, tools)
+
+    def _keeps_native_error(self, model: str) -> bool:
+        return True
+
+    def _stream_native_events(self, native_msgs, model, tools, stop):
+        from .pat import stream_pat_native
+        return stream_pat_native(native_msgs, model, tools, stop=stop)
+
+    def _uses_native_mode(self) -> bool:
+        # PAT 只有独立原生传输路径；不受个人通道开关影响，杜绝凭证穿透。
+        return True
 
     async def forward(self, body, protocol, original=None):
         # 防穿透守卫：非 PAT 目录模型绝不经由本 provider 转发——否则会穿透到
         # 继承的个人通道逻辑，拿用户个人凭证调用、消耗个人额度（已发生过的 bug）
         model = str(body.get("model", "") or "")
-        from .pat import PAT_MODELS
-        if model and model not in PAT_MODELS:
+        from .pat import is_pat_model
+        if model and not is_pat_model(model):
             raise HTTPException(
                 status_code=400,
                 detail=f"模型 {model} 不在 traepat 目录（PAT 通道仅含扩展模型与"

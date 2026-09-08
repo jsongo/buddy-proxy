@@ -147,6 +147,8 @@ def _debug_dump(event: str, **kwargs: Any) -> None:
 # 超时计时器（续命），又让下游 UI 知道中转还在等。45s 意味着 120s 超时窗口
 # 内至少有 2 次心跳，单次 SSE 分包延迟也不会误杀；每条 ~30 字节，开销可忽略。
 TRAE_HEARTBEAT_INTERVAL = max(0, int(os.environ.get("WB_TRAE_HEARTBEAT_INTERVAL", "45")))
+# 首个或相邻两个真实语义事件之间的最长等待；协议注释/保活不算模型进展。
+TRAE_SEMANTIC_TIMEOUT = max(1, int(os.environ.get("WB_TRAE_SEMANTIC_TIMEOUT", "180")))
 
 
 def _heartbeat_text(waited: int) -> str:

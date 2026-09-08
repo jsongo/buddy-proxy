@@ -23,9 +23,9 @@ from .config import (
     MODEL_MAP,
     MODEL_TIERS,
     TRAE_HEARTBEAT_INTERVAL,
+    TRAE_SEMANTIC_TIMEOUT,
     _NATIVE_TOOLS_ENABLED,
     _debug_dump,
-    _heartbeat_text,
 )
 from .credentials import _auth
 from .leak_guard import _StreamLeakCleaner, _sanitize_agent_leak
@@ -41,13 +41,6 @@ from .text_toolcall import _StreamToolCallSplitter, _parse_tool_calls, _tool_nam
 from .transport import send_trae_chat
 
 log = logging.getLogger(__name__)
-
-def _is_pat_model(model: str) -> bool:
-    """PAT 扩展目录模型：4001 时不回落文本协议——这些模型不在默认网关目录里，
-    回落必然再次失败，且会盖掉 PAT 侧的真实错误（如缺权益/网关未配置）。"""
-    from .pat import is_pat_model
-    return is_pat_model(model)
-
 
 class TraeProvider(BaseProvider):
     id = "trae"
@@ -93,6 +86,34 @@ class TraeProvider(BaseProvider):
 
     def ensure_auth(self) -> None:
         _auth()
+
+    def _send_native_request(
+        self,
+        native_msgs: list[dict[str, Any]],
+        model: str,
+        stream: bool,
+        tools: list[dict[str, Any]] | None,
+    ) -> str:
+        """Provider 级发送钩子；PAT 子类覆盖后不会因重叠模型串到个人账号。"""
+        return _send_native_chat(native_msgs, model, stream, tools)
+
+    def _keeps_native_error(self, model: str) -> bool:
+        """PAT 子类覆写为 True，避免把其真实错误回落到个人文本通道。"""
+        return False
+
+    def _uses_native_mode(self) -> bool:
+        """是否使用原生传输；PAT 子类始终启用以隔离账号体系。"""
+        return _NATIVE_TOOLS_ENABLED
+
+    def _stream_native_events(
+        self,
+        native_msgs: list[dict[str, Any]],
+        model: str,
+        tools: list[dict[str, Any]] | None,
+        stop: threading.Event,
+    ):
+        """PAT 子类覆盖为增量事件源；个人通道继续沿用整段兼容路径。"""
+        return None
 
     # ---- 打卡 / 额度（/ui 管理页消费，均经 asyncio.to_thread 调用） ----
 
@@ -175,7 +196,7 @@ class TraeProvider(BaseProvider):
         # 预设，纯聊天不再需要 guard 注入与泄漏清洗。上游 4001 拒绝时自动回落
         # 文本协议（prompt 始终照算，它就是兜底路径的输入：纯聊天带 guard、
         # 工具请求带教学）。
-        native_mode = _NATIVE_TOOLS_ENABLED
+        native_mode = self._uses_native_mode()
         prompt = _extract_prompt(
             messages, guard=not agent_mode, tools=tools if agent_mode else None
         )
@@ -235,6 +256,8 @@ class TraeProvider(BaseProvider):
         request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         usage: dict[str, Any] | None = None
+        stop_signal: threading.Event | None = None
+        last_semantic_at = time.monotonic()
 
         def chunk(delta: dict[str, Any], finish: str | None = None) -> str:
             payload = {
@@ -280,15 +303,27 @@ class TraeProvider(BaseProvider):
             # 间隙按 TRAE_HEARTBEAT_INTERVAL 发 reasoning 心跳：喂饱下游超时
             # 计时器（续命），也让下游 UI 知道中转还在等上游。
             _ev_q: queue.Queue = queue.Queue()
+            _stop = threading.Event()
+            stop_signal = _stop
+            incremental = False
 
             def _read_upstream() -> None:
                 try:
                     if native is not None:
-                        raw_text = _send_native_chat(
+                        event_source = self._stream_native_events(
+                            native["messages"], model, native["tools"], _stop)
+                        if event_source is not None:
+                            for upstream_event in event_source:
+                                if _stop.is_set():
+                                    return
+                                _ev_q.put(("event", upstream_event))
+                            _ev_q.put(("eof", None))
+                            return
+                        raw_text = self._send_native_request(
                             native["messages"], model, stream=True,
                             tools=native["tools"])
                         used = True
-                        if _native_rejected(raw_text) and not _is_pat_model(model):
+                        if _native_rejected(raw_text) and not self._keeps_native_error(model):
                             log.warning(
                                 "trae native tools rejected (4001), "
                                 "fallback to text protocol: model=%s", model)
@@ -309,22 +344,36 @@ class TraeProvider(BaseProvider):
             threading.Thread(target=_read_upstream, daemon=True,
                              name="trae-sse-reader").start()
             raw: str | None = None
-            used_native = False
+            used_native = native is not None
             _waited = 0
-            while raw is None:
+            pending_event: tuple[str, dict[str, Any]] | None = None
+            while raw is None and pending_event is None:
+                semantic_left = TRAE_SEMANTIC_TIMEOUT - (time.monotonic() - last_semantic_at)
+                timeout = (min(TRAE_HEARTBEAT_INTERVAL, semantic_left)
+                           if TRAE_HEARTBEAT_INTERVAL > 0 else semantic_left)
                 try:
-                    if TRAE_HEARTBEAT_INTERVAL > 0:
-                        kind, payload = _ev_q.get(timeout=TRAE_HEARTBEAT_INTERVAL)
-                    else:
-                        kind, payload = _ev_q.get()  # 心跳关闭：纯阻塞等
+                    kind, payload = _ev_q.get(timeout=max(0.001, timeout))
                 except queue.Empty:
-                    _waited += TRAE_HEARTBEAT_INTERVAL
-                    _debug_dump("trae_heartbeat", waited=_waited)
-                    yield chunk({"reasoning_content": _heartbeat_text(_waited)})
+                    idle_for = time.monotonic() - last_semantic_at
+                    _waited += max(0, timeout)
+                    if idle_for >= TRAE_SEMANTIC_TIMEOUT:
+                        _stop.set()
+                        raise HTTPException(
+                            status_code=504,
+                            detail=f"trae stream produced no content for {round(idle_for)}s")
+                    _debug_dump("trae_heartbeat", waited=round(_waited))
+                    if TRAE_HEARTBEAT_INTERVAL > 0:
+                        yield ": heartbeat\n\n"
                     continue
                 if kind == "error":
                     raise payload
-                raw, used_native = payload
+                if kind == "eof":
+                    raise HTTPException(status_code=502, detail="trae stream returned no content")
+                if kind == "event":
+                    incremental = True
+                    pending_event = payload
+                else:
+                    raw, used_native = payload
             acc = _NativeToolAccumulator() if used_native else None
             cleaner = (
                 _StreamLeakCleaner() if sanitize and not used_native else None
@@ -334,7 +383,52 @@ class TraeProvider(BaseProvider):
                 if tools and not used_native else None
             )
             dbg_parts: list[str] = []
-            for event, data in _parse_sse(raw):
+            semantic_seen = False
+            done_seen = False
+            event_iter = iter((pending_event,)) if incremental else iter(_parse_sse(raw or ""))
+            while True:
+                try:
+                    item = next(event_iter)
+                except StopIteration:
+                    if not incremental:
+                        break
+                    semantic_left = TRAE_SEMANTIC_TIMEOUT - (time.monotonic() - last_semantic_at)
+                    timeout = (min(TRAE_HEARTBEAT_INTERVAL, semantic_left)
+                               if TRAE_HEARTBEAT_INTERVAL > 0 else semantic_left)
+                    try:
+                        kind, payload = _ev_q.get(timeout=max(0.001, timeout))
+                    except queue.Empty:
+                        idle_for = time.monotonic() - last_semantic_at
+                        _waited += max(0, timeout)
+                        if idle_for >= TRAE_SEMANTIC_TIMEOUT:
+                            _stop.set()
+                            raise HTTPException(
+                                status_code=504,
+                                detail=f"trae stream produced no content for {round(idle_for)}s")
+                        _debug_dump("trae_heartbeat", waited=round(_waited))
+                        if TRAE_HEARTBEAT_INTERVAL > 0:
+                            yield ": heartbeat\n\n"
+                        continue
+                    if kind == "error":
+                        raise payload
+                    if kind == "eof":
+                        if not semantic_seen:
+                            raise HTTPException(status_code=502, detail="trae stream returned no content")
+                        if not done_seen:
+                            raise HTTPException(status_code=502, detail="trae stream ended before completion")
+                        break
+                    if kind != "event":
+                        raise RuntimeError("unexpected trae stream message")
+                    item = payload
+                event, data = item
+                if event == "output" and (
+                    data.get("reasoning_content") or data.get("response") or data.get("tool_calls")
+                ):
+                    semantic_seen = True
+                    last_semantic_at = time.monotonic()
+                    _waited = 0
+                if event == "done":
+                    done_seen = True
                 if event == "error":
                     yield error_chunk(_trae_error_text(data), (data or {}).get("code"))
                     yield "data: [DONE]\n\n"
@@ -343,8 +437,6 @@ class TraeProvider(BaseProvider):
                     if data.get("reasoning_content"):
                         yield chunk({"reasoning_content": data["reasoning_content"]})
                     if acc is not None:
-                        # 原生通道：tool_calls 按结构化事件累积，正文不经
-                        # 清洗/分流（无 agent 预设，没有可泄漏的协议语法）
                         if data.get("tool_calls"):
                             acc.feed(data["tool_calls"])
                         text = data.get("response") or ""
@@ -371,16 +463,32 @@ class TraeProvider(BaseProvider):
                     except (TypeError, ValueError):
                         usage = None
                 elif event == "done":
+                    if incremental:
+                        break
                     break
+            if not semantic_seen:
+                raise HTTPException(status_code=502, detail="trae stream returned no content")
+            if incremental and not done_seen:
+                raise HTTPException(status_code=502, detail="trae stream ended before completion")
+        except GeneratorExit:
+            if stop_signal is not None:
+                stop_signal.set()
+            raise
         except HTTPException as e:
+            if stop_signal is not None:
+                stop_signal.set()
             yield error_chunk(f"trae error {e.status_code}: {e.detail}", e.status_code)
             yield "data: [DONE]\n\n"
             return
         except Exception as e:
+            if stop_signal is not None:
+                stop_signal.set()
             log.error("Trae stream error: %s", e)
             yield error_chunk(f"trae stream error: {e}")
             return
 
+        if stop_signal is not None:
+            stop_signal.set()
         finish = "stop"
         dbg_calls: list[dict[str, Any]] = []
         if used_native:
@@ -434,10 +542,10 @@ class TraeProvider(BaseProvider):
         usage_real: dict[str, Any] | None = None
 
         if native is not None:
-            raw = _send_native_chat(
+            raw = self._send_native_request(
                 native["messages"], model, stream=False, tools=native["tools"])
             used_native = True
-            if _native_rejected(raw) and not _is_pat_model(model):
+            if _native_rejected(raw) and not self._keeps_native_error(model):
                 log.warning(
                     "trae native tools rejected (4001), "
                     "fallback to text protocol: model=%s", model)
