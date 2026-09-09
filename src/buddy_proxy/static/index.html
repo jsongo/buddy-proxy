@@ -41,6 +41,11 @@
   .rb-btn:hover { color: var(--text); border-color: var(--accent); }
   .rb-btn.active { color: var(--text); border-color: var(--accent);
                    background: rgba(79,140,255,.13); font-weight: 600; }
+  /* 请求日志快速筛选（通道/模型，复用 .rb-btn 按钮态） */
+  .log-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 2px 0 10px; }
+  .log-filters .lf-label { font-size: 12px; color: var(--muted); }
+  .log-filters .rb-btn { display: inline-flex; align-items: center; }
+  .log-filters .lf-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 6px; }
   .rb-sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
   .rb-dash { color: var(--muted); font-size: 12px; }
   .rangebar input[type="date"] { background: var(--card2); border: 1px solid var(--line);
@@ -245,6 +250,7 @@
   <section class="page" id="page-log">
     <div class="range-slot"></div>
     <h2>最近请求 <span class="sub" id="recent-sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
+    <div class="log-filters" id="log-filters"></div>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>
         <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>客户端</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 粗估（trae：(输入+输出)/1M × 100 × 模型倍率，非实扣）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
@@ -402,6 +408,35 @@ function onDateInput() {
 document.getElementById('rb-start').addEventListener('change', onDateInput);
 document.getElementById('rb-end').addEventListener('change', onDateInput);
 
+// ---- 请求日志快速筛选（通道 / 模型）----
+// 点一次选中、再点取消；组内多选 = OR，通道与模型两组之间 = AND；全不选 = 不筛。
+// 候选按钮从当前日期范围有流量的数据动态生成（RANGE_MODELS）。
+const LOG_FILTERS = { provider: new Set(), model: new Set() };
+
+function renderLogFilters() {
+  const el = document.getElementById('log-filters');
+  if (!el) return;
+  const provs = [...new Set(RANGE_MODELS.map(m => m.provider))];
+  const models = [...new Set(RANGE_MODELS.map(m => m.model))];
+  const btn = (kind, val, inner) =>
+    `<button class="rb-btn${LOG_FILTERS[kind].has(val) ? ' active' : ''}" data-kind="${kind}" data-val="${esc(val)}">${inner}</button>`;
+  el.innerHTML =
+    (provs.length ? `<span class="lf-label">通道</span>` +
+      provs.map(p => btn('provider', p,
+        `<i class="lf-dot" style="background:${pcolor(p)}"></i>${esc(p)}`)).join('') : '') +
+    (models.length ? `<span class="rb-sep"></span><span class="lf-label">模型</span>` +
+      models.map(m => btn('model', m, esc(m))).join('') : '');
+}
+document.getElementById('log-filters').addEventListener('click', ev => {
+  const b = ev.target.closest('.rb-btn'); if (!b) return;
+  const set = LOG_FILTERS[b.dataset.kind];
+  const v = b.dataset.val;
+  if (set.has(v)) set.delete(v); else set.add(v);
+  RECENT_PAGE = 1;
+  renderLogFilters();
+  renderRecent();
+});
+
 // 由 STATS.model_daily 按所选范围过滤 + 按（通道/模型）聚合，
 // 结构与后端 STATS.models 一致（供 Top10、平均耗时图、悬停共用）。
 let RANGE_MODELS = [];
@@ -442,6 +477,7 @@ function render() {
   // 范围选择器 + 当前范围下的模型聚合（Top10/耗时图/悬停共用）
   renderRangeQuick();
   RANGE_MODELS = modelsInRange();
+  renderLogFilters();  // 筛选候选随范围数据刷新，选中态保留
 
   // 状态条
   const dot = document.getElementById('status-dot');
@@ -1197,8 +1233,12 @@ async function renderRecent() {
   const seq = ++RECENT_SEQ;
   let resp;
   try {
-    const qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}` +
-               `&page=${RECENT_PAGE}&page_size=${RECENT_SIZE}`;
+    let qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}` +
+             `&page=${RECENT_PAGE}&page_size=${RECENT_SIZE}`;
+    if (LOG_FILTERS.provider.size)
+      qs += `&provider=${encodeURIComponent([...LOG_FILTERS.provider].join(','))}`;
+    if (LOG_FILTERS.model.size)
+      qs += `&model=${encodeURIComponent([...LOG_FILTERS.model].join(','))}`;
     resp = await api('/ui/api/logs?' + qs);
   } catch (e) {
     if (seq !== RECENT_SEQ) return;  // 已被更晚的请求取代
@@ -1212,7 +1252,9 @@ async function renderRecent() {
   const pages = resp.pages || 1;
   RECENT_PAGE = resp.page || 1;  // 后端已收敛到合法区间
   if (!rows.length) {
-    el.innerHTML = `<tr><td colspan="9" class="empty">${total ? '所选范围内没有请求记录' : '还没有请求记录'}</td></tr>`;
+    const filtered = LOG_FILTERS.provider.size || LOG_FILTERS.model.size;
+    el.innerHTML = `<tr><td colspan="9" class="empty">${
+      filtered ? '当前筛选条件下没有请求记录' : (total ? '所选范围内没有请求记录' : '还没有请求记录')}</td></tr>`;
     pager.innerHTML = '';
     return;
   }

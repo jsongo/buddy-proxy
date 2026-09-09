@@ -338,11 +338,14 @@ class MetricsCollector:
         end: Optional[str] = None,
         page: int = 1,
         page_size: int = 20,
+        providers: Optional[list[str]] = None,
+        models: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """按日期范围（YYYY-MM-DD，含端点）分页读日志文件，按 ts 倒序返回。
 
         数据源：当前 metrics.jsonl + 落在 [start, end] 的按天归档文件。未落盘
         （log_path=None）时退回内存 recent。范围缺省为最近 KEEP_DAYS 天。
+        providers/models：非空时按白名单过滤（组内 OR，供 UI 快速筛选）。
         """
         page_size = max(1, min(int(page_size or 20), 200))
         page = max(1, int(page or 1))
@@ -371,11 +374,17 @@ class MetricsCollector:
                 rows.extend(self._read_all(path))
             rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
 
-        # 逐条按日期范围过滤（内存 recent 分支也走这里）
-        if start or end:
+        # 逐条按日期范围 + 通道/模型白名单过滤（内存 recent 分支也走这里）
+        if start or end or providers or models:
             def _in(rec: dict[str, Any]) -> bool:
                 d = _date_str(rec.get("ts", 0))
-                return (not start or d >= start) and (not end or d <= end)
+                if (start and d < start) or (end and d > end):
+                    return False
+                if providers and rec.get("provider", "") not in providers:
+                    return False
+                if models and rec.get("model", "") not in models:
+                    return False
+                return True
             rows = [r for r in rows if _in(r)]
 
         total = len(rows)

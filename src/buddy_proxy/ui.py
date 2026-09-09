@@ -223,16 +223,22 @@ async def ui_stats(request: Request):
 
 @app.get("/ui/api/logs")
 async def ui_logs(request: Request, start: str = "", end: str = "",
-                  page: int = 1, page_size: int = 20):
-    """请求日志分页查询：按日期范围直接读 metrics.jsonl + 30 天归档（服务端分页）。"""
+                  page: int = 1, page_size: int = 20,
+                  provider: str = "", model: str = ""):
+    """请求日志分页查询：按日期范围直接读 metrics.jsonl + 30 天归档（服务端分页）。
+
+    provider/model：逗号分隔白名单（UI 快速筛选，组内 OR、组间 AND），空 = 不筛。
+    """
     _ensure_local(request)
     state = get_state()
     metrics = getattr(state, "metrics", None)
     if metrics is None:
         return {"rows": [], "total": 0, "page": 1, "page_size": page_size,
                 "pages": 1, "from_disk": False}
+    provs = [p.strip() for p in provider.split(",") if p.strip()] or None
+    mds = [m.strip() for m in model.split(",") if m.strip()] or None
     return await asyncio.to_thread(
-        metrics.query_logs, start or None, end or None, page, page_size)
+        metrics.query_logs, start or None, end or None, page, page_size, provs, mds)
 
 
 @app.get("/ui/api/benefits")

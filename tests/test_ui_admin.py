@@ -506,6 +506,25 @@ def test_query_logs_memory_fallback():
     assert r["from_disk"] is False
 
 
+def test_query_logs_provider_model_filter(tmp_path):
+    """通道/模型白名单过滤：组内 OR、组间 AND；空 = 不筛。"""
+    m = MetricsCollector(tmp_path / "metrics.jsonl")
+    m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=1)
+    m.record(provider="traepat", model="openrouter-3o-max", status=200, duration_ms=1)
+    m.record(provider="traepat", model="glm-4.7", status=200, duration_ms=1)
+
+    assert m.query_logs()["total"] == 3                          # 不筛
+    assert m.query_logs(providers=["traepat"])["total"] == 2     # 单通道
+    assert m.query_logs(providers=["zcode", "traepat"])["total"] == 3  # 通道 OR
+    assert m.query_logs(models=["glm-5.3", "glm-4.7"])["total"] == 2   # 模型 OR
+    assert m.query_logs(providers=["traepat"], models=["glm-4.7"])["total"] == 1  # AND
+    assert m.query_logs(providers=["traepat"], models=["glm-5.3"])["total"] == 0  # AND 无交集
+    assert m.query_logs(providers=["不存在的通道"])["total"] == 0
+    # 过滤结果内容正确（只含 traepat/glm-4.7）
+    rows = m.query_logs(providers=["traepat"], models=["glm-4.7"])["rows"]
+    assert all(r["provider"] == "traepat" and r["model"] == "glm-4.7" for r in rows)
+
+
 # ---------------------------------------------------------------------------
 # settings 模块
 # ---------------------------------------------------------------------------
