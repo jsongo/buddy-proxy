@@ -41,6 +41,7 @@ from .cooldown import (
     _mark_account_cooldown,
     _mark_channel_exhausted,
     _mark_cooldown,
+    _mark_quota_exhausted,
     _ordered_available_profiles,
     _quota_class,
     _raise_channel_exhausted,
@@ -285,6 +286,9 @@ def stream_pat_native(
     stop = stop or threading.Event()
     last_status: int | None = None
     empty_retries = 0
+    # 见 send_pat_native：仅当被尝试的账号全部撞 4031 才升级为通道级快速失败。
+    attempted_accounts = 0
+    accounts_4031 = 0
 
     have_credentials = False
     for profile in profiles:
@@ -294,6 +298,7 @@ def stream_pat_native(
             # 同非流式路径：单账号换不到凭据时跳过，不让它拖垮整个通道。
             continue
         have_credentials = True
+        attempted_accounts += 1
         if meta is not None:
             meta["account"] = profile.id
         refreshed = False
@@ -309,12 +314,14 @@ def stream_pat_native(
                     if code is not None:
                         if not committed and code in _FAILOVER_SSE_CODES:
                             if code == 4031:
-                                # 4031 是通道/租户级日额度耗尽（实测所有账号同时
-                                # 命中，切号无效）：只标记通道级短 TTL 并立即快速
-                                # 失败，绝不写账号级 standard 冷却——否则一次
-                                # failover 扫描就会把 10 个账号钉到次日冷却。
-                                _mark_channel_exhausted(quota_class)
-                                _raise_channel_exhausted(quota_class)
+                                # 4031 = 该账号该池日额度耗尽。每账号日包独立，先给
+                                # 当前账号短冷却并换号去试下一个额度未耗尽的账号；
+                                # 只有本轮所有账号都撞 4031 才升级为通道级快速失败。
+                                # 未提交任何语义事件，换号重放无重复计费风险。
+                                _mark_quota_exhausted(profile, quota_class)
+                                accounts_4031 += 1
+                                last_status = code
+                                break
                             _mark_cooldown(profile, quota_class, code=code)
                             last_status = code
                             break
@@ -397,6 +404,10 @@ def stream_pat_native(
             status_code=502,
             detail="trae PAT stream returned no content (empty success on "
                    f"{empty_retries} account(s))")
+    if last_status == 4031 and attempted_accounts > 0 and accounts_4031 == attempted_accounts:
+        # 本轮被尝试的账号全部撞 4031：标记通道级短 TTL 并快速失败，见 send_pat_native。
+        _mark_channel_exhausted(quota_class)
+        _raise_channel_exhausted(quota_class)
     status = 429 if last_status in (403, 429) or last_status in _FAILOVER_SSE_CODES else 401
     raise HTTPException(status_code=status, detail="trae PAT 所有账号均不可用")
 
@@ -425,6 +436,10 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
     url = f"{_chat_base(model)}/api/agent/v3/llm_utils_chat"
     last_status: int | None = None
     empty_retries = 0
+    # 每个被尝试的账号是否都因 4031 日额度耗尽退出——只有全部如此才升级为
+    # 通道级快速失败（任一账号是别的失败原因就不算通道级耗尽）。
+    attempted_accounts = 0
+    accounts_4031 = 0
 
     have_credentials = False
     for profile in profiles:
@@ -437,6 +452,7 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
             # 拿不到凭据时才整体失败。
             continue
         have_credentials = True
+        attempted_accounts += 1
         if meta is not None:
             meta["account"] = profile.id
         refreshed = False
@@ -484,10 +500,14 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
             failover_code = _sse_failover_code(raw)
             if failover_code is not None:
                 if failover_code == 4031:
-                    # 通道/租户级日额度耗尽：同流式路径，只标记通道级短 TTL 并
-                    # 立即快速失败，不写账号级 standard 冷却。
-                    _mark_channel_exhausted(quota_class)
-                    _raise_channel_exhausted(quota_class)
+                    # 4031 = 该账号该池日额度耗尽。每个账号的日包相互独立，故先给
+                    # 当前账号打短冷却并换号，去试下一个额度未耗尽的账号；只有本轮
+                    # 所有账号都撞 4031（可用账号清空）时才升级为通道级快速失败，
+                    # 避免下一个请求再逐个探测全部账号。
+                    _mark_quota_exhausted(profile, quota_class)
+                    accounts_4031 += 1
+                    last_status = failover_code
+                    break
                 _mark_cooldown(profile, quota_class, code=failover_code)
                 last_status = failover_code
                 break
@@ -525,6 +545,12 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
             status_code=502,
             detail="trae PAT chat returned no content (empty success on "
                    f"{empty_retries} account(s))")
+    if last_status == 4031 and attempted_accounts > 0 and accounts_4031 == attempted_accounts:
+        # 本轮被尝试的账号全部撞 4031（该池日额度均耗尽）：标记通道级短 TTL 并
+        # 快速失败，让后续请求直接 429、不再逐个探测；日包 00:00 重置或 TTL 到期
+        # 后自动恢复。任一账号是别的失败原因（401/传输错误）时不视为通道级耗尽。
+        _mark_channel_exhausted(quota_class)
+        _raise_channel_exhausted(quota_class)
     status = 429 if last_status in (403, 429) or last_status in _FAILOVER_SSE_CODES else 401
     raise HTTPException(status_code=status, detail="trae PAT 所有账号均不可用")
 

@@ -957,8 +957,9 @@ def test_quota_code_hits_isolated_per_account_and_class(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_channel_exhausted_4031_fast_fails_immediately_and_subsequent(monkeypatch):
-    """首个 4031 立即通道级快速失败：当次即停在首账号（不再逐账号扫描），
-    后续请求同样零上游调用，均 429 带重探提示；且不写任何账号级 standard 冷却。"""
+    """4031 先跨账号 failover：所有账号都撞 4031 才升级为通道级快速失败。
+    首个请求扫描全部账号（每个都短冷却）；标记通道级后，后续请求零上游调用、
+    均 429 带重探提示；且绝不写次日级 standard 冷却。"""
     _configure_two(monkeypatch)
     _install_credentials(monkeypatch)
     calls: list[str] = []
@@ -972,19 +973,46 @@ def test_channel_exhausted_4031_fast_fails_immediately_and_subsequent(monkeypatc
         pat.send_pat_native([], "standard-model", False)
     assert first.value.status_code == 429
     assert "4031" in str(first.value.detail)
-    # 4031 通道级：首个账号命中即快速失败，不扫描第二账号
-    assert calls == ["uid-primary"]
+    # 4031 逐账号 failover：两个账号都被尝试，都撞 4031
+    assert calls == ["uid-primary", "uid-backup"]
     # 第二次请求：通道级标记生效，零新增上游调用
     with pytest.raises(HTTPException) as caught:
         pat.send_pat_native([], "standard-model", False)
     assert caught.value.status_code == 429
     assert "4031" in str(caught.value.detail)
-    assert calls == ["uid-primary"]  # 没有新增上游调用
-    # 关键：4031 绝不写账号级 standard 冷却（否则一次扫描钉死所有账号到次日）
+    assert calls == ["uid-primary", "uid-backup"]  # 没有新增上游调用
+    # 4031 只写 5 分钟短冷却，绝不升级为次日级（避免钉死账号一整天）
+    now = time.time()
     for p in pat.ensure_pat_config():
         state = pat._account_state(p.cache_key)
-        cooldowns = state.get("cooldowns") or {}
-        assert "standard" not in cooldowns
+        until = float((state.get("cooldowns") or {}).get("standard") or 0)
+        assert 0 < until - now <= pat._ACCOUNT_COOLDOWN_S * 5 + 5
+
+
+def test_4031_failover_uses_backup_when_primary_exhausted(monkeypatch):
+    """关键修复：1 号账号 4031（日额度耗尽）时自动切到额度未耗尽的 2 号账号，
+    而不是通道级快速失败——备用账号的日包相互独立。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls: list[str] = []
+
+    def post(_url, _payload, credentials, _stream):
+        calls.append(credentials.uid)
+        if credentials.uid == "uid-primary":
+            return 'event: error\ndata: {"code": 4031, "message": ""}\n\n'
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    assert calls == ["uid-primary", "uid-backup"]
+    # 未全部耗尽：不升级为通道级
+    assert pat._channel_exhausted_until("standard") is None
+    # 1 号被短冷却跳过；2 号无冷却
+    now = time.time()
+    profiles = pat.ensure_pat_config()
+    p1 = float((pat._account_state(profiles[0].cache_key).get("cooldowns") or {}).get("standard") or 0)
+    p2 = (pat._account_state(profiles[1].cache_key).get("cooldowns") or {}).get("standard")
+    assert p1 > now and p2 is None
 
 
 def test_channel_exhausted_4031_does_not_record_quota_hits(monkeypatch):
@@ -1015,9 +1043,9 @@ def test_channel_exhausted_ttl_expires(monkeypatch):
     assert pat.send_pat_native([], "standard-model", False) == _OK
 
 
-def test_channel_exhausted_stream_4031_fast_fails_no_cooldown(monkeypatch):
-    """流式 4031：首账号命中即通道级快速失败（429），不扫描第二账号，
-    不写账号级 standard 冷却。"""
+def test_channel_exhausted_stream_all_4031_escalates(monkeypatch):
+    """流式 4031：先跨账号 failover，全部撞 4031 才升级为通道级快速失败（429）；
+    每个账号写 5 分钟短冷却，绝不升级为次日级，也不进撞码计数。"""
     _configure_two(monkeypatch)
     _install_credentials(monkeypatch)
     calls: list[str] = []
@@ -1031,12 +1059,35 @@ def test_channel_exhausted_stream_4031_fast_fails_no_cooldown(monkeypatch):
         list(pat.stream_pat_native([], "standard-model"))
     assert caught.value.status_code == 429
     assert "4031" in str(caught.value.detail)
-    assert calls == ["uid-primary"]
+    assert calls == ["uid-primary", "uid-backup"]
     assert pat._channel_exhausted_until("standard") is not None
+    now = time.time()
     for p in pat.ensure_pat_config():
         state = pat._account_state(p.cache_key)
-        assert "standard" not in (state.get("cooldowns") or {})
+        until = float((state.get("cooldowns") or {}).get("standard") or 0)
+        assert 0 < until - now <= pat._ACCOUNT_COOLDOWN_S * 5 + 5
     assert pat._quota_code_hits == {}
+
+
+def test_stream_4031_failover_uses_backup_when_primary_exhausted(monkeypatch):
+    """流式：1 号账号 4031 时切到 2 号成功，不升级为通道级。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls: list[str] = []
+
+    def source(_url, _payload, credentials, _stop):
+        calls.append(credentials.uid)
+        if credentials.uid == "uid-primary":
+            yield "error", {"code": 4031, "message": ""}
+        else:
+            yield "output", {"response": "backup"}
+            yield "done", {}
+
+    monkeypatch.setattr(pat, "_stream_profile_events", source)
+    events = list(pat.stream_pat_native([], "standard-model"))
+    assert calls == ["uid-primary", "uid-backup"]
+    assert pat._channel_exhausted_until("standard") is None
+    assert events == [("output", {"response": "backup"}), ("done", {})]
 
 
 def test_channel_exhausted_only_for_4031(monkeypatch):
@@ -1077,21 +1128,6 @@ def test_clear_standard_cooldowns_idempotent(monkeypatch):
     assert "advanced" in state["cooldowns"]  # 只清 standard
     # 幂等：已无 standard，二次调用清理 0 个
     assert pat._clear_standard_cooldowns() == 0
-    """非 4031 白名单码（如 4008）不触发通道级标记。"""
-    _configure_two(monkeypatch)
-    _install_credentials(monkeypatch)
-    calls: list[str] = []
-
-    def post(_url, _payload, credentials, _stream):
-        calls.append(credentials.uid)
-        if credentials.uid == "uid-primary":
-            return 'event: error\ndata: {"code": 4008, "message": ""}\n\n'
-        return _OK
-
-    monkeypatch.setattr(pat, "_post_chat", post)
-    assert pat.send_pat_native([], "standard-model", False) == _OK
-    assert pat._channel_exhausted_until("standard") is None
-    assert calls == ["uid-primary", "uid-backup"]
 
 
 def test_send_native_three_accounts_empty_never_returns_fake_200(monkeypatch):

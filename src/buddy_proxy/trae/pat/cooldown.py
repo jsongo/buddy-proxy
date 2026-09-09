@@ -145,6 +145,25 @@ def _mark_cooldown(
         code if code is not None else "unknown", hits)
 
 
+def _mark_quota_exhausted(profile: PatProfile, quota_class: str) -> None:
+    """4031（该账号该池日额度耗尽）：给该账号该池打短冷却（5分钟，不升级次日），
+    以便 failover 跳过它去试下一个额度独立的账号。日包按 00:00 重置，短冷却只是
+    避免同一请求/短窗口内反复撞同一个耗尽账号——真正恢复靠日界或次日额度。"""
+    until = time.time() + _ACCOUNT_COOLDOWN_S * 5
+
+    def store(state: dict[str, Any]) -> None:
+        cooldowns = state.setdefault("cooldowns", {})
+        try:
+            old = float(cooldowns.get(quota_class) or 0)
+        except (TypeError, ValueError):
+            old = 0
+        cooldowns[quota_class] = max(old, until)
+
+    _mutate_account(profile.cache_key, store)
+    log.warning("PAT 账号序号=%d %s 类日额度耗尽（4031），短冷却5分钟并换号",
+                profile.index, quota_class)
+
+
 def _mark_account_cooldown(profile: PatProfile, *, retry_after: str | None = None) -> None:
     now = time.time()
     until = now + (_retry_after_seconds(retry_after, now) or _ACCOUNT_COOLDOWN_S)
