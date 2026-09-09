@@ -263,6 +263,29 @@ def _event_error_code(event: str, data: dict[str, Any]) -> int | None:
         return None
 
 
+def _sse_error_extra(raw: str) -> Any:
+    """从 SSE error 事件里提取 extra 字段（4031 携带 standard 池用量）。
+
+    供被动额度采集用：standard 池无主动查询接口，4031 的 ``extra``
+    （used/quota/next_flash）是唯一信号源，撞码时顺手接住存档。
+    解析失败返回 None，绝不影响 failover 主流程。
+    """
+    stripped = raw.lstrip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except Exception:
+            return None
+        return data.get("extra") if isinstance(data, dict) else None
+    try:
+        for event, data in _parse_sse(raw):
+            if event == "error" and isinstance(data, dict) and data.get("code") == 4031:
+                return data.get("extra")
+    except Exception:
+        return None
+    return None
+
+
 def _semantic_event(event: str, data: dict[str, Any]) -> bool:
     return event == "output" and bool(
         data.get("reasoning_content") or data.get("response") or data.get("tool_calls")
@@ -341,6 +364,7 @@ def stream_pat_native(
                                 # 当前账号短冷却并换号去试下一个额度未耗尽的账号；
                                 # 只有本轮所有账号都撞 4031 才升级为通道级快速失败。
                                 # 未提交任何语义事件，换号重放无重复计费风险。
+                                _ns._record_standard_pool_4031(profile, data.get("extra"))
                                 _mark_quota_exhausted(profile, quota_class)
                                 accounts_4031 += 1
                                 last_status = code
@@ -534,6 +558,7 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                     # 当前账号打短冷却并换号，去试下一个额度未耗尽的账号；只有本轮
                     # 所有账号都撞 4031（可用账号清空）时才升级为通道级快速失败，
                     # 避免下一个请求再逐个探测全部账号。
+                    _ns._record_standard_pool_4031(profile, _sse_error_extra(raw))
                     _mark_quota_exhausted(profile, quota_class)
                     accounts_4031 += 1
                     last_status = failover_code

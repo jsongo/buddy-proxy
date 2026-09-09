@@ -74,7 +74,13 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
 
 
 def fetch_pat_ent_usage() -> list[dict[str, Any]]:
-    """按账号查询 advanced 额度；失败只使用该账号自己的缓存。"""
+    """按账号查询 advanced 额度；失败只使用该账号自己的缓存。
+
+    末尾附带被动采集的 standard 池数据（若有）：standard 走外网中继、无主动
+    查询接口，唯一信号源是撞 4031 时错误体 ``extra`` 携带的 used/quota，由
+    ``_record_standard_pool_4031`` 在撞码时写入**撞码账号自己**的缓存（4031
+    实测为账号级分桶，非租户共享）。
+    """
     plus = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
     if not plus:
         raise HTTPException(status_code=503, detail="PAT 通道未配置 TRAE_PAT_PLUS_GATEWAY")
@@ -98,6 +104,9 @@ def fetch_pat_ent_usage() -> list[dict[str, Any]]:
             if cached:
                 all_items.extend(dict(item, label=f"{item['label']}·缓存") for item in cached)
             log.warning("PAT 额度查询失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
+    standard_pool = _ns._standard_pool_items()
+    if standard_pool:
+        all_items.extend(standard_pool)
     if not all_items and failures:
         raise HTTPException(status_code=502, detail="PAT 额度查询失败")
     return all_items

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -103,8 +104,8 @@ def _raise_channel_exhausted(quota_class: str) -> None:
     retry = max(0, int(until - time.time()))
     raise HTTPException(
         status_code=429,
-        detail=(f"PAT {quota_class} 全账号当前均被上游 4031 限额拦截（判定维度疑似非账号级，"
-                f"切号无效），{retry}s 后自动重探；日包重置 00:00，期间可改用 trae/ 或 codebuddy/ 通道"))
+        detail=(f"PAT {quota_class} 租户级日额度已耗尽（4031，全部账号共享同一池、"
+                f"切号无效，次日 00:00 重置），{retry}s 后自动重探；期间可改用 trae/ 或 codebuddy/ 通道"))
 
 
 def _record_quota_code_hit(cache_key: str, quota_class: str) -> int:
@@ -162,6 +163,82 @@ def _mark_quota_exhausted(profile: PatProfile, quota_class: str) -> None:
     _mutate_account(profile.cache_key, store)
     log.warning("PAT 账号序号=%d %s 类日额度耗尽（4031），短冷却5分钟并换号",
                 profile.index, quota_class)
+
+
+def _record_standard_pool_4031(profile: PatProfile, extra: Any) -> None:
+    """从 4031 extra 被动采集 standard 池用量（无主动查询接口，唯一信号源）。
+
+    2026-09-10 实测：4031 是**账号级**分桶（同租户 #0 撞 4031 weekly 160/160、
+    #1 同秒成功出流），且账本有 daily/weekly 两个池（extra.dimension 区分）。
+    成功流不带任何账单事件——只有撞码才回 extra，因此被动采集挂在 4031
+    路径上。数据写入**撞码账号自己**的 ``quota["standard"]``，供 /ui 额度页
+    按账号展示；只解析公共计费字段（used/quota/next_flash/dimension），绝不
+    落盘 token/uid/body。extra 可能是 dict 或 JSON 字符串，解析失败静默放弃
+    （诊断采集不能影响 failover 主流程）。
+    """
+    try:
+        if isinstance(extra, str):
+            extra = json.loads(extra)
+        if not isinstance(extra, dict):
+            return
+        used = extra.get("used")
+        quota = extra.get("quota")
+        if not isinstance(used, (int, float)) or not isinstance(quota, (int, float)) or quota <= 0:
+            return
+        dimension = extra.get("dimension") if isinstance(extra.get("dimension"), str) else ""
+        reset_ts = extra.get("next_flash")
+        reset = reset_ts / 1000 if isinstance(reset_ts, (int, float)) else None
+        # 撞码时 extra 报的是已满的那个池；另一个池余量未知，只有撞到才有数。
+        label = "standard 池"
+        if dimension:
+            label = f"standard {dimension} 池"
+        item = {
+            "label": label,
+            "used": round(float(used), 2),
+            "total": round(float(quota), 2),
+            "remaining": round(quota - used, 2),
+            "percent": round(used / quota * 100),
+            "reset_ts": int(reset) if reset else None,
+            "source": "4031",
+        }
+
+        def store(state: dict[str, Any]) -> None:
+            quotas = state.setdefault("quota", {})
+            existing = quotas.get("standard") if isinstance(quotas.get("standard"), dict) else {}
+            items = existing.get("items") if isinstance(existing.get("items"), list) else []
+            # 同维度覆盖更新，不同维度各存一条（daily + weekly 并存）
+            items = [i for i in items if i.get("label") != label] + [item]
+            quotas["standard"] = {"items": items, "fetched_at": time.time()}
+
+        _mutate_account(profile.cache_key, store)
+    except Exception:
+        pass
+
+
+def _standard_pool_items() -> list[dict[str, Any]]:
+    """汇总各账号被动采集的 standard 池数据（无数据的账号不产出条目）。
+
+    14 天未刷新的条目视为陈旧丢弃（账号早已删配/池结构变化时不展示旧账）。
+    """
+    out: list[dict[str, Any]] = []
+    profiles = ensure_pat_config()
+    multi = len(profiles) > 1
+    for profile in profiles:
+        state = _account_state(profile.cache_key)
+        quotas = state.get("quota") if isinstance(state.get("quota"), dict) else {}
+        value = quotas.get("standard") if isinstance(quotas, dict) else None
+        items = value.get("items") if isinstance(value, dict) else None
+        if not (isinstance(items, list) and items):
+            continue
+        fetched_at = value.get("fetched_at") or 0
+        stale = time.time() - fetched_at > 14 * 86400
+        for item in items:
+            if stale or not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "standard 池")
+            out.append(dict(item, label=f"PAT #{profile.index + 1} · {label}"
+                           if multi else label))
+    return out
 
 
 def _mark_account_cooldown(profile: PatProfile, *, retry_after: str | None = None) -> None:
