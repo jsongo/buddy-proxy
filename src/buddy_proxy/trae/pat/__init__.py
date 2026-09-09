@@ -55,6 +55,7 @@ from .credentials import (  # noqa: F401
 )
 from .cooldown import (  # noqa: F401
     _channel_exhausted,
+    _clear_standard_cooldowns,
 )
 from .status import fetch_pat_model_status  # noqa: F401
 from .quota import fetch_pat_ent_usage  # noqa: F401

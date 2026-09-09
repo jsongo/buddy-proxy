@@ -21,6 +21,7 @@ import buddy_proxy.trae.pat as _ns
 
 from .config import _AUTH_URL, _REFRESH_MARGIN_S, _TOKEN_URL, _PatConfigError, _load_profiles, pat_enabled
 from .credentials import _credentials_from_state
+from .cooldown import _clear_standard_cooldowns
 from .store import _account_state
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,21 @@ _keeper_thread: threading.Thread | None = None
 _keeper_lock = threading.Lock()
 _keeper_round_lock = threading.Lock()
 _keeper_last: dict[str, Any] = {"at": 0.0, "env_ready": None, "refreshed": [], "waiting": []}
+
+# 一次性迁移标记：清理旧 4031 逻辑误写的账号级 standard 冷却（见
+# cooldown._clear_standard_cooldowns）。每进程只跑一次，幂等。
+_standard_cooldown_migrated = False
+
+
+def _migrate_standard_cooldowns_once() -> None:
+    global _standard_cooldown_migrated
+    if _standard_cooldown_migrated:
+        return
+    _standard_cooldown_migrated = True
+    try:
+        _clear_standard_cooldowns()
+    except Exception as exc:  # 迁移失败不应阻断保活循环启动
+        log.warning("PAT standard 冷却清理失败（%s）", type(exc).__name__)
 
 
 def _exchange_env_ready(timeout: float = 3.0) -> bool:
@@ -128,6 +144,7 @@ def start_token_keeper() -> None:
     with _keeper_lock:
         if _keeper_thread is not None and _keeper_thread.is_alive():
             return
+        _migrate_standard_cooldowns_once()
         _keeper_thread = threading.Thread(
             target=_keeper_loop, args=(_KEEPALIVE_INTERVAL_S,),
             name="pat-token-keeper", daemon=True)

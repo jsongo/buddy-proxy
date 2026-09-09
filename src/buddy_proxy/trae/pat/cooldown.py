@@ -164,3 +164,32 @@ def _ordered_available_profiles(quota_class: str) -> tuple[PatProfile, ...]:
     now = time.time()
     return tuple(profile for profile in ensure_pat_config()
                  if _cooldown_until(profile, quota_class) <= now)
+
+
+def _clear_standard_cooldowns() -> int:
+    """一次性清理被旧逻辑误写的账号级 ``standard`` 冷却。
+
+    历史上 4031（通道/租户级日额度耗尽）会同时触发账号级 ``_mark_cooldown``，
+    短窗口内一次 failover 扫描就把多个账号的 ``standard`` 冷却升级到次日。改为
+    仅通道级快速失败后，这些残留冷却需要清掉，否则用户要等到次日或手改状态文件。
+
+    幂等：账号无 ``standard`` 冷却时不写盘。返回被清理的账号数。
+    """
+    cleared = 0
+    for profile in ensure_pat_config():
+        state = _account_state(profile.cache_key)
+        cooldowns = state.get("cooldowns")
+        if not (isinstance(cooldowns, dict) and cooldowns.get("standard")):
+            continue
+
+        def store(current: dict[str, Any]) -> None:
+            cds = current.get("cooldowns")
+            if isinstance(cds, dict):
+                cds.pop("standard", None)
+
+        _mutate_account(profile.cache_key, store)
+        cleared += 1
+    if cleared:
+        log.info("PAT 清理误写的账号级 standard 冷却：%d 个账号", cleared)
+    return cleared
+

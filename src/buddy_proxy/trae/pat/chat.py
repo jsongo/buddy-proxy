@@ -309,7 +309,12 @@ def stream_pat_native(
                     if code is not None:
                         if not committed and code in _FAILOVER_SSE_CODES:
                             if code == 4031:
+                                # 4031 是通道/租户级日额度耗尽（实测所有账号同时
+                                # 命中，切号无效）：只标记通道级短 TTL 并立即快速
+                                # 失败，绝不写账号级 standard 冷却——否则一次
+                                # failover 扫描就会把 10 个账号钉到次日冷却。
                                 _mark_channel_exhausted(quota_class)
+                                _raise_channel_exhausted(quota_class)
                             _mark_cooldown(profile, quota_class, code=code)
                             last_status = code
                             break
@@ -479,7 +484,10 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
             failover_code = _sse_failover_code(raw)
             if failover_code is not None:
                 if failover_code == 4031:
+                    # 通道/租户级日额度耗尽：同流式路径，只标记通道级短 TTL 并
+                    # 立即快速失败，不写账号级 standard 冷却。
                     _mark_channel_exhausted(quota_class)
+                    _raise_channel_exhausted(quota_class)
                 _mark_cooldown(profile, quota_class, code=failover_code)
                 last_status = failover_code
                 break
