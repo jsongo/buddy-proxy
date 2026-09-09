@@ -680,11 +680,13 @@ async function loadTraepatAccounts() {
     const tag = (t) => t === 'ok' ? '<span class="tag ok">token 正常</span>'
       : t === 'expiring' ? '<span class="tag" style="color:var(--warn)">临期</span>'
       : '<span class="tag bad">无 token</span>';
-    // 每账号一行：sa_… Pxx token正常 剩Xh（+ 冷却），逐行竖排在左栏
-    const rows = (r.accounts || []).map(a => {
+    // 每账号一行：#N sa_… Pxx token正常 剩Xh（+ 冷却），逐行竖排在左栏。
+    // #N 顺序与上方日包/周包的「PAT #N」分组一一对应，便于对照。
+    const rows = (r.accounts || []).map((a, i) => {
       const cool = (a.cooling || []).map(c => `${c.kind} 冷却 ${c.minutes_left}min`).join(' · ');
       const left = a.hours_left != null ? `剩 ${a.hours_left}h` : '';
       return `<div class="pat-acct">
+        <span class="muted" style="min-width:26px">#${i + 1}</span>
         <span class="mono">${esc(a.id)}</span>
         <span class="muted">P${a.priority}</span>
         ${tag(a.token)}${left ? `<span class="muted">${left}</span>` : ''}
