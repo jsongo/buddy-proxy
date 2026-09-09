@@ -378,6 +378,9 @@ def test_stream_rejects_empty_or_incomplete_success(monkeypatch, events, detail)
     if detail == "no content":
         # 空响应假成功：两个账号各重试一次（上限 2），仍未拿到内容才报错。
         assert len(calls) == 2
+    else:
+        # 已产出语义内容但缺 done：不能换号重放（防重复计费/副作用）。
+        assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1009,3 +1012,46 @@ def test_channel_exhausted_only_for_4031(monkeypatch):
     assert pat.send_pat_native([], "standard-model", False) == _OK
     assert pat._channel_exhausted_until("standard") is None
     assert calls == ["uid-primary", "uid-backup"]
+
+
+def test_send_native_three_accounts_empty_never_returns_fake_200(monkeypatch):
+    """≥3 账号全空：重试上限耗尽必须 502，不能从循环中途 return 空 SSE 假 200。"""
+    monkeypatch.setenv(
+        "TRAE_PAT_BEARER_PROFILES",
+        _profiles(
+            {"id": "primary", "bearer": "bearer-primary", "priority": 0},
+            {"id": "backup", "bearer": "bearer-backup", "priority": 1},
+            {"id": "third", "bearer": "bearer-third", "priority": 2},
+        ),
+    )
+    monkeypatch.setattr(pat, "_get_profile_credentials", _fake_credentials)
+    empty = 'event: done\ndata: {}\n\n'
+    calls: list[str] = []
+
+    def post(_url, _payload, credentials, _stream):
+        calls.append(credentials.uid)
+        return empty
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    with pytest.raises(HTTPException) as caught:
+        pat.send_pat_native([], "standard-model", False)
+    assert caught.value.status_code == 502
+    assert "no content" in str(caught.value.detail)
+    # A/B 各消耗一次重试，C 第三次空响应触发上限并直接 502。
+    assert calls == ["uid-primary", "uid-backup", "uid-third"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"response":"ok"}',
+        '{"reasoning_content":"thinking"}',
+        '{"tool_calls":[{"id":"call-1"}]}',
+        '{"data":{"response":"ok"}}',
+        '{"data":{"tool_calls":[{"id":"call-1"}]}}',
+        '{"choices":[{"message":{"reasoning_content":"thinking"}}]}',
+    ],
+)
+def test_bare_json_native_semantic_fields_are_not_empty(raw):
+    """裸 JSON 的 Trae 原生字段也算语义内容，不应触发空响应换号。"""
+    assert pat._sse_has_semantic_content(raw) is True

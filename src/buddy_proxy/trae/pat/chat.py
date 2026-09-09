@@ -104,10 +104,20 @@ def _sse_has_semantic_content(raw: str) -> bool:
             return False
         if not isinstance(data, dict):
             return False
+        # 上游裸 JSON 可能走 OpenAI choices 形态，也可能直接返回 Trae 原生
+        # 字段（response/reasoning_content/tool_calls，或嵌在 data 下）；两种
+        # 都算语义内容，避免把有效原生响应误判为空而多余换号重试。
+        native_nodes = [data]
+        if isinstance(data.get("data"), dict):
+            native_nodes.append(data["data"])
+        for node in native_nodes:
+            if node.get("response") or node.get("reasoning_content") or node.get("tool_calls"):
+                return True
         choices = data.get("choices") or []
         for choice in choices:
             message = (choice or {}).get("message") or {}
-            if message.get("content") or message.get("tool_calls"):
+            if (message.get("content") or message.get("reasoning_content")
+                    or message.get("tool_calls")):
                 return True
         return False
     try:
@@ -486,6 +496,12 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                         "PAT chat 空响应假成功（零语义内容），换号重试 %d/%d，账号序号=%d",
                         empty_retries, _EMPTY_SUCCESS_RETRIES, profile.index)
                     break
+                # ≥3 个账号时重试次数可能在账号循环中途耗尽；必须在这里
+                # 显式报 502，不能落回 return raw 把空 SSE 伪装成 200。
+                raise HTTPException(
+                    status_code=502,
+                    detail="trae PAT chat returned no content (empty success on "
+                           f"{empty_retries} account(s))")
             return raw
 
     if not have_credentials:

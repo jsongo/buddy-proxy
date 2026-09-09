@@ -4,6 +4,9 @@
   buddy-proxy 常驻服务（LaunchAgent：随登录启动、崩溃自动重启）。
 
   安装（一次性）：
+    # 先把所有 /Users/jsongo/code/life/buddy-proxy 替换成你的实际仓库绝对路径；
+    # launchd 不会自动展开 $HOME / ~。日志目录必须预先存在，否则服务无法启动。
+    mkdir -p /你的仓库路径/buddy-proxy/logs
     cp deploy/com.buddy-proxy.plist ~/Library/LaunchAgents/
     launchctl load ~/Library/LaunchAgents/com.buddy-proxy.plist
 
@@ -14,6 +17,10 @@
   说明：
   - KeepAlive：进程退出/崩溃后 launchd 自动拉起（10s 退避）。
   - RunAtLoad：登录即启动。
+  - 安全默认：仅监听 127.0.0.1。/v1/* 模型代理端点本身没有 API 鉴权，
+    不要无感改成 0.0.0.0——否则同一局域网任何人都能消耗你的 PAT/订阅额度。
+    确需 LAN 访问时，必须自行加防火墙/反向代理鉴权，并理解暴露风险。
+  - 模板里的 /Users/jsongo/... 是示例/作者机器路径，安装前必须按实际路径修改。
   - 装了它之后就不要再手动 nohup 启动，避免端口冲突（8787 被占时新进程起不来）。
 -->
 <plist version="1.0">
@@ -27,7 +34,7 @@
         <string>-m</string>
         <string>buddy_proxy</string>
         <string>--host</string>
-        <string>0.0.0.0</string>
+        <string>127.0.0.1</string>
         <string>--port</string>
         <string>8787</string>
         <string>--log-file</string>
