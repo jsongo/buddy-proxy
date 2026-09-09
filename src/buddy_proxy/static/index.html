@@ -513,6 +513,7 @@ function switchTab(name) {
   history.replaceState(null, '', '#' + name);
   try { localStorage.setItem('bp-tab', name); } catch (e) {}
   refreshStickyVars();
+  if (typeof syncPatStatusAuto === 'function') syncPatStatusAuto();  // 进/离额度页 → 起停模型负载自动刷新
 }
 document.querySelectorAll('.tab').forEach(
   b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
@@ -670,6 +671,7 @@ function renderTraepatPanel() {
     </div>`;
   loadTraepatAccounts();
   loadTraepatStatus(null, false);
+  syncPatStatusAuto();  // 面板每次重建（含 30s loadAll）后按当前页是否可见起停自动刷新
 }
 
 async function loadTraepatAccounts() {
@@ -727,12 +729,13 @@ async function refreshTraepatTokens(btn) {
   if (btn) { btn.disabled = false; btn.textContent = old || '补签 Token'; }
 }
 
-// force=false：读缓存（GET，不触网），页面默认展示；force=true：点「更新」强制查询（POST）
-async function loadTraepatStatus(btn, force) {
+// force=false：读缓存（GET，不触网），页面默认展示；force=true：强制查询（POST）。
+// silent=true：后台自动刷新用，不清空面板、不占用按钮（避免每轮闪烁）。
+async function loadTraepatStatus(btn, force, silent) {
   const box = document.getElementById('traepat-status');
   if (!box) return;
   if (btn) { btn.disabled = true; btn.textContent = '更新中…'; }
-  if (force) box.innerHTML = '<div class="empty" style="padding:8px 0">正在查询模型负载…</div>';
+  if (force && !silent) box.innerHTML = '<div class="empty" style="padding:8px 0">正在查询模型负载…</div>';
   const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '更新'; } };
   try {
     const r = force
@@ -749,16 +752,43 @@ async function loadTraepatStatus(btn, force) {
       return `<div class="qitem"><div class="qhead"><span>${esc(m.name || m.id)}${extra ? ` <span class="muted">${extra}</span>` : ''}</span><span class="mono">${label}</span></div>${bar}</div>`;
     }).join('');
     const ts = r.fetched_at ? new Date(r.fetched_at * 1000).toLocaleTimeString('zh-CN') : '';
+    const auto = PAT_STATUS_TIMER ? ' · 自动每分钟' : '';
     const hint = !r.fetched_at
       ? '尚无缓存，点「更新」查询'
-      : `数值越高越繁忙 · ${ts} ${r.cached ? '缓存' : '更新'}`;
+      : `数值越高越繁忙 · ${ts} ${r.cached ? '缓存' : '更新'}${auto}`;
     box.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px">${hint}</div>` +
       (rows || '<div class="empty" style="padding:8px 0">无负载数据</div>');
   } catch (e) {
-    box.innerHTML = `<div class="empty" style="padding:8px 0">查询失败：${esc(e.message)}</div>`;
+    // 后台静默刷新失败不覆盖已有数据，仅手动/首屏才提示
+    if (!silent) box.innerHTML = `<div class="empty" style="padding:8px 0">查询失败：${esc(e.message)}</div>`;
   }
   restore();
 }
+
+// 模型负载自动刷新：仅当「打卡 & 额度」页可见时每 60s 强制查一次；
+// 切走或标签页隐藏即停，避免后台持续打上游。
+let PAT_STATUS_TIMER = null;
+const PAT_STATUS_INTERVAL = 60000;
+function patStatusAutoActive() {
+  const page = document.getElementById('page-benefits');
+  return !!page && page.classList.contains('active')
+    && document.visibilityState === 'visible'
+    && !!document.getElementById('traepat-status');
+}
+function syncPatStatusAuto() {
+  if (patStatusAutoActive()) {
+    if (!PAT_STATUS_TIMER) {
+      PAT_STATUS_TIMER = setInterval(() => {
+        if (patStatusAutoActive()) loadTraepatStatus(null, true, true);
+        else syncPatStatusAuto();  // 定时器还在但已不该跑：清掉
+      }, PAT_STATUS_INTERVAL);
+    }
+  } else if (PAT_STATUS_TIMER) {
+    clearInterval(PAT_STATUS_TIMER);
+    PAT_STATUS_TIMER = null;
+  }
+}
+document.addEventListener('visibilitychange', syncPatStatusAuto);
 
 async function claimNow(pid) {
   try {
