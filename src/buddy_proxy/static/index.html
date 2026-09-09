@@ -153,14 +153,16 @@
                   color: var(--muted); margin-bottom: 4px; }
   .qbar { background: var(--bg); height: 8px; border-radius: 4px; overflow: hidden; }
   .qbar > div { height: 100%; border-radius: 4px; }
-  /* TRAE PAT 面板：账号奇偶两栏；token 状态 / 模型负载左右两栏 */
+  /* TRAE PAT 面板：日包/周包按 PAT 单双数两栏；下方 账号状态 / 模型负载 左右两栏 */
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .pat-head .name { font-weight: 600; }
   .pat-head .grow { flex: 1; }
-  .pat-acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 22px; }
-  @media (max-width: 720px) { .pat-acct-grid { grid-template-columns: 1fr; } }
+  .pat-quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px; }
+  @media (max-width: 720px) { .pat-quota-grid { grid-template-columns: 1fr; } }
+  .pat-pkg { padding: 8px 0; border-bottom: 1px solid rgba(38,47,60,.4); }
+  .pat-pkg-name { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
   .pat-acct { display: flex; gap: 8px; align-items: center; padding: 3px 0;
-              border-bottom: 1px solid rgba(38,47,60,.4); }
+              border-bottom: 1px solid rgba(38,47,60,.4); font-size: 12px; }
   .pat-keeper { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
   .pat-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
   @media (max-width: 720px) { .pat-cols { grid-template-columns: 1fr; } }
@@ -575,30 +577,15 @@ function renderBenefits() {
     </div>`;
   }).join('') : '<div class="empty" style="padding:14px 0">当前没有支持打卡的通道</div>';
 
-  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported);
+  // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
+  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat');
   document.getElementById('quota-list').innerHTML = qps.length ? qps.map(p => {
     const q = p.quota;
-    const items = (q.items || []).map(it => {
-      let pct = it.percent;
-      if (pct == null && it.used != null && it.total) pct = Math.round(it.used / it.total * 100);
-      const hasBar = pct != null;
-      pct = Math.max(0, Math.min(100, Number(pct) || 0));
-      const color = pct >= 85 ? 'var(--err)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)';
-      let rem = it.remaining;
-      if (rem == null && it.used != null && it.total != null) rem = it.total - it.used;
-      const hasNums = rem != null || it.total != null;
-      const reset = it.reset_ts ? ` · ${new Date(it.reset_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'})} 重置` : '';
-      const nums = hasNums
-        ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
-        : '<span class="mono"></span>';
-      const bar = hasBar ? `<div class="qbar"><div style="width:${Math.max(2, pct)}%;background:${color}"></div></div>` : '';
-      return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${reset}</span>${nums}</div>${bar}</div>`;
-    }).join('');
+    const items = (q.items || []).map(quotaItemHtml).join('');
     // 标题行汇总：剩余/总额（取第一个可合计的条目；CodeBuddy 是积分合计，
-    // zcode 取最紧的窗口。各明细条目仍完整列在下方。traepat 不展示：包是
-    // 多个独立额度，头部合计无意义，账号状态/负载单独放底部面板）
+    // zcode 取最紧的窗口。各明细条目仍完整列在下方）
     const head = (q.items || []).find(it => it.remaining != null && it.total != null);
-    const headSum = (head && p.id !== 'traepat') ? `<span class="mono" style="margin-left:auto">
+    const headSum = head ? `<span class="mono" style="margin-left:auto">
       <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(head.remaining)}</span>
       <span class="muted">/ ${fmtNum(head.total)}</span></span>` : '';
     return `<div class="chart-card" style="margin-bottom:12px">
@@ -611,14 +598,48 @@ function renderBenefits() {
   renderTraepatPanel();
 }
 
+// 单条额度条目 → HTML（周包/日包/积分窗口通用；PAT 面板与额度列表共用）
+function quotaItemHtml(it) {
+  let pct = it.percent;
+  if (pct == null && it.used != null && it.total) pct = Math.round(it.used / it.total * 100);
+  const hasBar = pct != null;
+  pct = Math.max(0, Math.min(100, Number(pct) || 0));
+  const color = pct >= 85 ? 'var(--err)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)';
+  let rem = it.remaining;
+  if (rem == null && it.used != null && it.total != null) rem = it.total - it.used;
+  const hasNums = rem != null || it.total != null;
+  const reset = it.reset_ts ? ` · ${new Date(it.reset_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'})} 重置` : '';
+  const nums = hasNums
+    ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
+    : '<span class="mono"></span>';
+  const bar = hasBar ? `<div class="qbar"><div style="width:${Math.max(2, pct)}%;background:${color}"></div></div>` : '';
+  return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${reset}</span>${nums}</div>${bar}</div>`;
+}
+
 // ---- TRAE PAT 面板（底部整宽卡片）----
-// 结构：账号奇偶两栏 → 下方 Token 状态 / 模型负载 左右两栏。
+// 结构：上方 日包/周包 按 PAT 单双数左右两栏；下方 账号状态（左）/ 模型负载（右）左右两栏。
 // 模型负载默认读缓存（GET，不触网），点「更新」再强制查询（POST）。
 function renderTraepatPanel() {
   const panel = document.getElementById('traepat-panel');
   if (!panel) return;
-  const has = (BENEFITS.providers || []).some(p => p.id === 'traepat' && p.quota && p.quota.supported);
-  if (!has) { panel.innerHTML = ''; return; }
+  const pat = (BENEFITS.providers || []).find(p => p.id === 'traepat' && p.quota && p.quota.supported);
+  if (!pat) { panel.innerHTML = ''; return; }
+
+  // 日包/周包按「PAT #N」分组（label 形如「PAT #1 · 周包（通用额度）」）
+  const groups = new Map();
+  for (const it of pat.quota.items || []) {
+    const idx = it.label.indexOf(' · ');
+    const grp = idx >= 0 ? it.label.slice(0, idx) : (pat.name || 'PAT');
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => `
+    <div class="pat-pkg">
+      <div class="pat-pkg-name">${esc(grp)}</div>
+      ${its.map(quotaItemHtml).join('')}
+    </div>`).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
+
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
@@ -627,14 +648,14 @@ function renderTraepatPanel() {
         <span class="grow"></span>
         <span class="pat-keeper" id="pat-keeper"></span>
       </div>
-      <div id="traepat-accounts" class="muted" style="font-size:12px">账号状态加载中…</div>
+      <div class="pat-quota-grid">${quotaHtml}</div>
       <div class="pat-cols">
         <div>
           <div class="pat-col-head">
-            <span>Token 状态</span><span class="grow"></span>
+            <span>账号状态</span><span class="grow"></span>
             <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
           </div>
-          <div id="traepat-token"><div class="empty" style="padding:8px 0">加载中…</div></div>
+          <div id="traepat-accounts"><div class="empty" style="padding:8px 0">账号状态加载中…</div></div>
         </div>
         <div>
           <div class="pat-col-head">
@@ -651,7 +672,6 @@ function renderTraepatPanel() {
 
 async function loadTraepatAccounts() {
   const box = document.getElementById('traepat-accounts');
-  const tokBox = document.getElementById('traepat-token');
   const keeperBox = document.getElementById('pat-keeper');
   if (!box) return;
   try {
@@ -660,7 +680,7 @@ async function loadTraepatAccounts() {
     const tag = (t) => t === 'ok' ? '<span class="tag ok">token 正常</span>'
       : t === 'expiring' ? '<span class="tag" style="color:var(--warn)">临期</span>'
       : '<span class="tag bad">无 token</span>';
-    // 账号奇偶两栏排列（grid 逐个填充：a1|a2 / a3|a4 …）
+    // 每账号一行：sa_… Pxx token正常 剩Xh（+ 冷却），逐行竖排在左栏
     const rows = (r.accounts || []).map(a => {
       const cool = (a.cooling || []).map(c => `${c.kind} 冷却 ${c.minutes_left}min`).join(' · ');
       const left = a.hours_left != null ? `剩 ${a.hours_left}h` : '';
@@ -670,25 +690,17 @@ async function loadTraepatAccounts() {
         ${tag(a.token)}${left ? `<span class="muted">${left}</span>` : ''}
         ${cool ? `<span class="muted" style="color:var(--warn)">${cool}</span>` : ''}</div>`;
     }).join('');
-    box.innerHTML = `<div class="pat-acct-grid">${rows}</div>`;
-    // keeper 自愈状态 → 头部；Token 状态列展示同一份说明
+    box.innerHTML = rows || '<div class="empty" style="padding:8px 0">无账号</div>';
+    // keeper 自愈状态 → 头部
     const k = r.keeper || {};
     const kAt = k.at ? new Date(k.at * 1000).toLocaleTimeString('zh-CN') : '—';
     const kState = k.env_ready === false ? '<span style="color:var(--warn)">换 token 端点不可达，等网络恢复</span>'
       : k.env_ready === true ? `上轮补签 ${((k.refreshed || []).length)} 个${(k.waiting || []).length ? `，待补 ${(k.waiting).length} 个` : ''}`
       : '尚未运行';
-    const keeperTxt = `每 ${Math.round((r.keepalive_s || 0) / 60)} 分钟自愈 · ${kState}（${kAt}）`;
-    if (keeperBox) keeperBox.innerHTML = keeperTxt;
-    if (tokBox) {
-      const bad = (r.accounts || []).filter(a => a.token !== 'ok');
-      tokBox.innerHTML = `<div class="muted" style="font-size:12px">${keeperTxt}</div>` +
-        (bad.length
-          ? `<div class="muted" style="font-size:12px;margin-top:6px">${bad.length} 个账号需补签：${bad.map(a => esc(a.id)).join('、')}</div>`
-          : '<div class="tag ok" style="margin-top:8px">全部账号 token 正常</div>');
-    }
+    if (keeperBox) keeperBox.innerHTML =
+      `每 ${Math.round((r.keepalive_s || 0) / 60)} 分钟自愈 · ${kState}（${kAt}）`;
   } catch (e) {
-    box.textContent = `账号状态加载失败：${e.message}`;
-    if (tokBox) tokBox.innerHTML = `<div class="empty" style="padding:8px 0">加载失败：${esc(e.message)}</div>`;
+    box.innerHTML = `<div class="empty" style="padding:8px 0">账号状态加载失败：${esc(e.message)}</div>`;
   }
 }
 
