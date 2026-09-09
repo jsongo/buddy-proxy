@@ -6,7 +6,7 @@
 - reasoning_effort 传递与默认值
 - 第三方模型（cis provider）字段
 
-运行：PYTHONPATH=src python3 -m pytest test_doubao_agent_pipeline.py -v
+运行：PYTHONPATH=src python3 -m pytest tests/test_doubao_agent_pipeline.py -v
 """
 from __future__ import annotations
 

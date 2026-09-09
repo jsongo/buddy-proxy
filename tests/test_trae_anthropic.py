@@ -8,7 +8,7 @@
 - 请求侧回归：system / tools / tool_result 经 anthropic_to_chat 正确转成 chat 请求
 
 运行：
-    .venv/bin/python -m pytest test_trae_anthropic.py -v
+    .venv/bin/python -m pytest tests/test_trae_anthropic.py -v
 """
 from __future__ import annotations
 

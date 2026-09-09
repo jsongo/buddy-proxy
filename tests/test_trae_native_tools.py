@@ -8,7 +8,7 @@
 - 工具载荷形状：parameters 序列化为 JSON 字符串（上游 Go schema 要求）
 
 运行：
-    PYTHONPATH=src python3 -m pytest test_trae_native_tools.py -v
+    PYTHONPATH=src python3 -m pytest tests/test_trae_native_tools.py -v
 """
 from __future__ import annotations
 

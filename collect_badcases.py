@@ -10,7 +10,7 @@
 签名判定：assistant 消息正文里含调用语法特征、但 tool_calls 字段为空
 （即泄漏而非正常调用）。输出消息 id / 会话 / 模型 / 特征，可直接定位到
 http://localhost:8900/chat/<session_id> 复核；--save 后把 payload 内联进
-test_badcase_*.py 或用其生成回归断言。
+tests/test_badcase_*.py 或用其生成回归断言。
 
 只读打开 db，不写任何数据。
 """

@@ -1108,6 +1108,150 @@ def test_channel_exhausted_only_for_4031(monkeypatch):
     assert calls == ["uid-primary", "uid-backup"]
 
 
+# ---------------------------------------------------------------------------
+# 4031 extra 被动采集（standard 租户池唯一信号源）
+# ---------------------------------------------------------------------------
+_EXTRA_4031 = {
+    "code": 4031, "message": "",
+    "extra": {"used": 58, "quota": 58, "dimension": "daily",
+              "next_flash": int((time.time() + 3600) * 1000)},
+}
+
+
+def test_4031_extra_captured_to_standard_pool(monkeypatch):
+    """非流式 4031：extra（used/quota/next_flash）被动采集写入首账号缓存，
+    fetch_pat_ent_usage 末尾带出供 UI 展示；extra 缺失/畸形不影响 failover。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def post(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            payload = json.dumps(_EXTRA_4031)
+            return f"event: error\ndata: {payload}\n\n"
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    items = pat._standard_pool_items()
+    assert items is not None and len(items) == 1
+    item = items[0]
+    assert item["used"] == 58 and item["total"] == 58
+    assert item["percent"] == 100
+    assert item["reset_ts"] is not None and item["reset_ts"] > time.time()
+    # 只写首账号（租户共享池，任意撞码账号看到的是同一份数据）
+    profiles = pat.ensure_pat_config()
+    state = pat._account_state(profiles[0].cache_key)
+    assert isinstance(state.get("quota", {}).get("standard"), dict)
+    state2 = pat._account_state(profiles[1].cache_key)
+    assert not (state2.get("quota") or {}).get("standard")
+
+
+def test_4031_extra_capture_stream(monkeypatch):
+    """流式 4031：error 事件携带的 extra 同样被动采集。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def source(_url, _payload, credentials, _stop):
+        if credentials.uid == "uid-primary":
+            yield "error", {"code": 4031, "message": "",
+                            "extra": _EXTRA_4031["extra"]}
+        else:
+            yield "output", {"response": "backup"}
+            yield "done", {}
+
+    monkeypatch.setattr(pat, "_stream_profile_events", source)
+    events = list(pat.stream_pat_native([], "standard-model"))
+    assert events == [("output", {"response": "backup"}), ("done", {})]
+    items = pat._standard_pool_items()
+    assert items is not None
+    assert items[0]["used"] == 58 and items[0]["total"] == 58
+
+
+def test_4031_extra_missing_or_malformed_is_tolerated(monkeypatch):
+    """extra 缺失/非 dict/坏 JSON 字符串：采集静默放弃，failover 不受影响。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def _clear_cooldowns():
+        # 4031 会给撞码账号打 5 分钟 standard 冷却；子用例间清掉，保证每个
+        # 子用例都真正从 #1 起步（不是测冷却逻辑，是被测路径的前提）。
+        for p in pat.ensure_pat_config():
+            pat._mutate_account(p.cache_key,
+                                 lambda s: s.get("cooldowns", {}).clear())
+
+    def _clear_standard_quota():
+        # 畸形数据子用例要验证「不写入」而不是「不清空旧值」：先把上一子
+        # 用例的合法记录抹掉再验 None。
+        for p in pat.ensure_pat_config():
+            def drop(s):
+                (s.get("quota") or {}).pop("standard", None)
+            pat._mutate_account(p.cache_key, drop)
+
+    def post(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            # 4031 但不带 extra（历史形态，见旧测试 fixture）
+            return 'event: error\ndata: {"code": 4031, "message": ""}\n\n'
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    assert pat._standard_pool_items() is None
+
+    # extra 为字符串 JSON（真实上游出现过）：应解析成功
+    def post2(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            body = dict(_EXTRA_4031)
+            body["extra"] = json.dumps(body["extra"])
+            return f"event: error\ndata: {json.dumps(body)}\n\n"
+        return _OK
+
+    _clear_cooldowns()
+    monkeypatch.setattr(pat, "_post_chat", post2)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    items = pat._standard_pool_items()
+    assert items is not None and items[0]["used"] == 58
+
+    # 畸形数据：非数字 used 静默丢弃
+    def post3(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            return 'event: error\ndata: {"code": 4031, "extra": {"used": "x", "quota": 58}}\n\n'
+        return _OK
+
+    _clear_cooldowns()
+    _clear_standard_quota()
+    monkeypatch.setattr(pat, "_post_chat", post3)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    assert pat._standard_pool_items() is None
+
+
+def test_4031_extra_json_error_body_captured(monkeypatch):
+    """裸 JSON 错误体（非 SSE 包装）同样提取 extra。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def post(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            return json.dumps(_EXTRA_4031)
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    items = pat._standard_pool_items()
+    assert items is not None and items[0]["total"] == 58
+
+
+def test_standard_pool_not_returned_when_never_4031(monkeypatch):
+    """从未撞过 4031：fetch_pat_ent_usage 不带 standard 池条目（不能把
+    「无数据」伪装成 0%——那是误导）。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    monkeypatch.setattr(
+        pat, "_post_chat", lambda _u, _p, _c, _s: _OK)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    assert pat._standard_pool_items() is None
+
+
 def test_clear_standard_cooldowns_idempotent(monkeypatch):
     """迁移清理：删除旧逻辑误写的账号级 standard 冷却，advanced 保留；二次调用无副作用。"""
     _configure_two(monkeypatch)

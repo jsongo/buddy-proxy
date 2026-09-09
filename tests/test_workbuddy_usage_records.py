@@ -5,7 +5,7 @@
 www.workbuddy.cn 双 host），本测试不访问远程。
 
 运行：
-    .venv/bin/python -m pytest test_workbuddy_usage_records.py -v
+    .venv/bin/python -m pytest tests/test_workbuddy_usage_records.py -v
 """
 from __future__ import annotations
 

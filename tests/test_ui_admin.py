@@ -6,7 +6,7 @@
 - MetricsCollector：聚合、按模型统计、JSONL 落盘重启恢复、流式 chunk 计数
 
 运行：
-    .venv/bin/python -m pytest test_ui_admin.py -v
+    .venv/bin/python -m pytest tests/test_ui_admin.py -v
 """
 from __future__ import annotations
 
