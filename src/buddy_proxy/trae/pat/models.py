@@ -19,7 +19,21 @@ log = logging.getLogger(__name__)
 
 # ───────────────────────── 模型目录 ─────────────────────────
 
-_MODEL_CONFIG_FILE = pathlib.Path(__file__).resolve().parents[1] / "models_config.json"
+def _find_models_config() -> pathlib.Path:
+    """向上定位 buddy_proxy 包内的 models_config.json。
+
+    拆分教训（2026-09-09）：本文件从 trae/pat.py 移入 trae/pat/models.py 后，
+    硬编码 parents[1] 错位到 trae/ 目录，模型目录静默加载为空（stat 失败
+    被吞掉），traepat 全部模型 400。改为向上搜索，层级变化不再敏感。
+    """
+    for parent in pathlib.Path(__file__).resolve().parents:
+        candidate = parent / "models_config.json"
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("models_config.json 未在包目录上游找到")
+
+
+_MODEL_CONFIG_FILE = _find_models_config()
 PAT_MODELS: dict[str, tuple[str, str]] = {}
 PAT_PLUS_MODELS: dict[str, tuple[str, str]] = {}
 PAT_PUBLIC_MODELS: dict[str, tuple[str, str]] = {}
