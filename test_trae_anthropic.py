@@ -25,6 +25,7 @@ from buddy_proxy import state as st
 from buddy_proxy import trae_provider as tp
 from buddy_proxy.anthropic_adapter import (
     AnthropicStreamConverter,
+    anthropic_request_to_chat,
     chat_completion_to_anthropic_message,
 )
 
@@ -349,6 +350,79 @@ def _anthropic_body(stream: bool, tools: bool = False) -> dict:
     return body
 
 
+def test_anthropic_base64_image_converts_to_trae_image_url():
+    """Claude Code base64 图片必须保留为 Trae 原生通道接受的 data URL。"""
+    body = {
+        "model": "trae/glm-5.3-flash",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "描述这张图"},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+            ],
+        }],
+    }
+    chat = anthropic_request_to_chat(body)
+    assert chat["messages"] == [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "描述这张图"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64,aGVsbG8="}},
+        ],
+    }]
+
+
+def test_anthropic_image_only_message_is_not_dropped():
+    """只有图片、没有文字的消息也必须生成 user message。"""
+    chat = anthropic_request_to_chat({
+        "messages": [{"role": "user", "content": [{
+            "type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg", "data": "/9j/"},
+        }]}],
+    })
+    assert chat["messages"] == [{
+        "role": "user",
+        "content": [{"type": "image_url", "image_url": {
+            "url": "data:image/jpeg;base64,/9j/"}}],
+    }]
+
+
+def test_anthropic_tool_result_keeps_embedded_image():
+    """Claude Code 工具截图常在 tool_result.content 内，转换后仍保留图片。"""
+    chat = anthropic_request_to_chat({
+        "messages": [
+            {"role": "assistant", "content": [{
+                "type": "tool_use", "id": "toolu_img", "name": "screenshot", "input": {}}]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_img", "content": [
+                    {"type": "text", "text": "截图如下"},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/webp", "data": "UklGRg=="}},
+                ],
+            }]},
+        ],
+    })
+    tool = next(m for m in chat["messages"] if m["role"] == "tool")
+    assert tool["content"] == [
+        {"type": "text", "text": "截图如下"},
+        {"type": "image_url", "image_url": {
+            "url": "data:image/webp;base64,UklGRg=="}},
+    ]
+
+
+def test_anthropic_invalid_image_block_is_dropped_without_invalid_upstream_payload():
+    """缺 media_type/data 的半成品图片不得继续发上游触发 4001。"""
+    chat = anthropic_request_to_chat({
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "data": "abc"}},
+            {"type": "text", "text": "仍保留文字"},
+        ]}],
+    })
+    assert chat["messages"] == [{"role": "user", "content": "仍保留文字"}]
+
+
 def test_messages_nonstream_via_trae(client, trae_env):
     state, calls = trae_env
     r = client.post("/v1/messages", json=_anthropic_body(stream=False))
@@ -373,6 +447,28 @@ def test_messages_nonstream_via_trae(client, trae_env):
         for m in upstream_msgs if m["role"] == "user"
         for p in m["content"]
     )
+
+
+def test_messages_image_reaches_trae_upstream(client, trae_env):
+    """端到端：/v1/messages 的 Anthropic 图片最终以 image_url 到达 Trae。"""
+    _, calls = trae_env
+    body = _anthropic_body(stream=False)
+    body["messages"] = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "看图回答"},
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+        ],
+    }]
+    r = client.post("/v1/messages", json=body)
+    assert r.status_code == 200
+    user = next(m for m in calls[0]["messages"] if m["role"] == "user")
+    assert user["content"] == [
+        {"type": "text", "text": "看图回答"},
+        {"type": "image_url", "image_url": {
+            "url": "data:image/png;base64,aGVsbG8="}},
+    ]
 
 
 def test_messages_stream_via_trae(client, trae_env):

@@ -40,14 +40,66 @@ def _extract_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _anthropic_image_to_chat(block: dict[str, Any]) -> dict[str, Any] | None:
+    """Anthropic image block → OpenAI/Trae ``image_url`` block。
+
+    Claude Code 发图使用 ``{type:image, source:{type:base64, media_type,
+    data}}``；Trae ``llm_utils_chat`` 接受的是 OpenAI 风格 image_url（data
+    URL）。同时兼容 Anthropic URL source。字段不完整时丢弃该块，避免把
+    半成品图片继续发给上游触发 4001 param invalid。
+    """
+    source = block.get("source")
+    if not isinstance(source, dict):
+        return None
+    source_type = source.get("type")
+    if source_type == "base64":
+        media_type = str(source.get("media_type") or "").strip()
+        data = source.get("data")
+        if not media_type.startswith("image/") or not isinstance(data, str) or not data:
+            return None
+        url = f"data:{media_type};base64,{data}"
+    elif source_type == "url":
+        url = source.get("url")
+        if not isinstance(url, str) or not url:
+            return None
+    else:
+        return None
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def _anthropic_mixed_content(blocks: list[Any]) -> tuple[list[dict[str, Any]], bool]:
+    """转换 text/image blocks，返回 (OpenAI blocks, 是否包含图片)。"""
+    parts: list[dict[str, Any]] = []
+    has_image = False
+    for block in blocks:
+        if isinstance(block, str):
+            if block:
+                parts.append({"type": "text", "text": block})
+            continue
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and block.get("text"):
+            parts.append({"type": "text", "text": block.get("text", "")})
+        elif block.get("type") == "image":
+            image = _anthropic_image_to_chat(block)
+            if image:
+                parts.append(image)
+                has_image = True
+    return parts, has_image
+
+
+def _chat_content(parts: list[dict[str, Any]], has_image: bool) -> Any:
+    """纯文本保持历史 string 形态；含图时保留有序 block 列表。"""
+    if has_image:
+        return parts
+    return "\n".join(p.get("text", "") for p in parts if p.get("type") == "text")
+
+
 def _convert_anthropic_message(msg: dict) -> list[dict]:
-    """将单条Anthropic消息转换为Chat消息（可能返回多条）
-    
-    Anthropic的content可能包含：
-        - 字符串（纯文本）
-        - [{"type": "text", "text": "..."}, {"type": "tool_result", ...}]
-    
-    tool_result块需要分离成独立的tool消息
+    """将单条 Anthropic 消息转换为 Chat 消息（可能返回多条）。
+
+    支持 text / image / tool_use / tool_result；图片转换成 Trae 可识别的
+    OpenAI ``image_url`` block，tool_result 内嵌图片也保留。
     """
     role = msg.get("role", "user")
     content = msg.get("content", "")
@@ -103,45 +155,32 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
     
     # user消息处理
     elif role == "user":
-        text_parts = []
+        user_parts, has_user_image = _anthropic_mixed_content(content)
         tool_results = []
-        
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            
-            block_type = block.get("type")
-            
-            if block_type == "text":
-                text_parts.append(block.get("text", ""))
-            
-            elif block_type == "tool_result":
-                # tool_result块 → 独立的tool消息
-                result_content = block.get("content", "")
-                if isinstance(result_content, list):
-                    # 提取text块
-                    result_text = []
-                    for part in result_content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            result_text.append(part.get("text", ""))
-                    result_content = "\n".join(result_text)
-                
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": block.get("tool_use_id", ""),
-                    "content": str(result_content),
-                })
-        
-        # 先添加tool结果消息，再添加user文本消息。
-        # 顺序对上游严格校验器（如 DeepSeek 系 tool_call_sequence_broken）至关重要：
-        # assistant 的 tool_calls 之后必须紧跟全部对应 tool 结果，任何中间消息
-        # （包括 user 文本）都会被判为「tool calls and tool results do not match」。
-        # Anthropic 语义里 tool_result 块也应位于 user 消息的 text 块之前。
-        messages.extend(tool_results)
 
-        # 添加user文本消息
-        if text_parts:
-            messages.append({"role": "user", "content": "\n".join(text_parts)})
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            # tool_result 块 → 独立 tool 消息；其 content 内也可能包含截图。
+            result_content = block.get("content", "")
+            if isinstance(result_content, list):
+                result_parts, has_result_image = _anthropic_mixed_content(result_content)
+                converted_result = _chat_content(result_parts, has_result_image)
+            else:
+                converted_result = str(result_content)
+            tool_results.append({
+                "role": "tool",
+                "tool_call_id": block.get("tool_use_id", ""),
+                "content": converted_result,
+            })
+
+        # 先添加 tool 结果，再添加 user 内容，保持严格 tool 配对顺序。
+        messages.extend(tool_results)
+        if user_parts:
+            messages.append({
+                "role": "user",
+                "content": _chat_content(user_parts, has_user_image),
+            })
     
     # 其他角色（system等）
     else:
