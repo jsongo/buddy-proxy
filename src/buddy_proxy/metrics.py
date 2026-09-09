@@ -308,11 +308,94 @@ class MetricsCollector:
                     )
 
     # ------------------------------------------------------------------
-    # 查询（/ui/api/stats）
+    # 查询（/ui/api/logs）：按日期范围分页读日志文件（含 30 天归档）
     # ------------------------------------------------------------------
 
-    def snapshot(self, days: int = 14) -> dict[str, Any]:
-        """返回按模型聚合 + 按天序列 + 最近请求明细。"""
+    def _read_all(self, path: pathlib.Path) -> list[dict[str, Any]]:
+        """整读单个 JSONL 文件（非尾部截断，供分页查询用）。"""
+        if not path.exists():
+            return []
+        out: list[dict[str, Any]] = []
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(rec, dict):
+                        out.append(rec)
+        except OSError:
+            return out
+        return out
+
+    def query_logs(
+        self,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """按日期范围（YYYY-MM-DD，含端点）分页读日志文件，按 ts 倒序返回。
+
+        数据源：当前 metrics.jsonl + 落在 [start, end] 的按天归档文件。未落盘
+        （log_path=None）时退回内存 recent。范围缺省为最近 KEEP_DAYS 天。
+        """
+        page_size = max(1, min(int(page_size or 20), 200))
+        page = max(1, int(page or 1))
+
+        if self.log_path is None:
+            with self._lock:
+                rows = list(reversed(self._recent))
+        else:
+            # 当前文件的日期 + 所有归档日期，取落在 [start, end] 的文件整读
+            today = _date_str(time.time())
+            files: list[pathlib.Path] = [self.log_path]
+            for p in self.log_path.parent.glob(self.log_path.name + ".*"):
+                suffix = p.name[len(self.log_path.name) + 1:]
+                try:
+                    time.strptime(suffix, "%Y-%m-%d")
+                except ValueError:
+                    continue  # 非日期后缀的文件跳过
+                if (start and suffix < start) or (end and suffix > end):
+                    continue
+                files.append(p)
+            # 当前文件写的是「今天」，若范围不含今天则不必读它
+            if end and today > end:
+                files = [f for f in files if f is not self.log_path]
+            rows = []
+            for path in files:
+                rows.extend(self._read_all(path))
+            rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+
+        # 逐条按日期范围过滤（内存 recent 分支也走这里）
+        if start or end:
+            def _in(rec: dict[str, Any]) -> bool:
+                d = _date_str(rec.get("ts", 0))
+                return (not start or d >= start) and (not end or d <= end)
+            rows = [r for r in rows if _in(r)]
+
+        total = len(rows)
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, pages)
+        lo = (page - 1) * page_size
+        return {
+            "rows": rows[lo:lo + page_size],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+            "from_disk": self.log_path is not None,
+        }
+
+    # ------------------------------------------------------------------
+    # 查询（/ui/api/stats）
+
+    def snapshot(self, days: int = 30) -> dict[str, Any]:
+        """返回按模型聚合 + 按天序列 + 逐天×逐模型明细 + 最近请求明细。"""
         now = time.time()
         with self._lock:
             daily = {k: dict(v) for k, v in self._daily.items()}
@@ -349,20 +432,37 @@ class MetricsCollector:
             models.append(agg)
         models.sort(key=lambda m: -m["count"])
 
-        # ---- 按天序列（零填充，图表连续） ----
+        # ---- 按天序列（零填充，图表连续）+ 逐天×逐模型明细 ----
+        # model_daily 直接导出 self._daily 桶（前端按所选日期范围重算耗时/Top10）；
+        # 只保留落在近 days 天窗口内的桶，与 day_list 同口径。
         day_list = []
         for offset in range(days - 1, -1, -1):
             day_start = now - offset * 86400
             date = _date_str(day_start)
-            day_list.append({"date": date, "total": 0, "errors": 0, "by_provider": {}})
+            day_list.append({"date": date, "total": 0, "errors": 0,
+                             "duration_ms_sum": 0, "by_provider": {}})
         by_date = {d["date"]: d for d in day_list}
+        model_daily = []
         for (date, provider, model), b in daily.items():
             d = by_date.get(date)
             if d is None:
                 continue
             d["total"] += b["count"]
             d["errors"] += b["errors"]
+            d["duration_ms_sum"] += b["duration_ms_sum"]
             d["by_provider"][provider] = d["by_provider"].get(provider, 0) + b["count"]
+            model_daily.append({
+                "date": date,
+                "provider": provider,
+                "model": model,
+                "count": b["count"],
+                "errors": b["errors"],
+                "duration_ms_sum": b["duration_ms_sum"],
+                "duration_ms_max": b["duration_ms_max"],
+                "prompt_tokens": b["prompt_tokens"],
+                "completion_tokens": b["completion_tokens"],
+                "last_ts": b["last_ts"],
+            })
 
         # ---- 24h 汇总 + 最近请求 ----
         # 口径限制：24h 汇总基于 recent deque（上限 MAX_RECENT 条）。24h 内请求
@@ -380,6 +480,7 @@ class MetricsCollector:
         return {
             "models": models,
             "daily": day_list,
+            "model_daily": model_daily,
             "recent": list(reversed(recent)),
             "summary": {
                 "total_24h": total_24h,

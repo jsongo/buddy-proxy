@@ -25,17 +25,24 @@ _MODEL_STATUS_TTL_S = 600
 _model_status_cache: dict[str, Any] = {"fetched_at": 0.0, "data": None}
 
 
-def fetch_pat_model_status(force: bool = False) -> dict[str, Any]:
+def fetch_pat_model_status(force: bool = False, cached_only: bool = False) -> dict[str, Any]:
     """手动触发的模型负载查询（用首个账号凭证；结果短 TTL 缓存）。
 
-    返回 {models: [{id, workload(0-100%或None), credits, max_input}], fetched_at}；
+    返回 {models: [{id, workload(0-100%或None), credits, max_input}], fetched_at, cached}；
     只有 plus 网关目录接口提供负载数据。workload 为 None 表示该模型无负载信息。
+
+    cached_only=True 时只读缓存、绝不触网：有缓存返回之（cached=True），
+    无缓存返回空壳（fetched_at=0），供页面默认展示、按钮再强制刷新。
     """
     now = time.time()
     cached = _model_status_cache.get("data")
+    if cached_only:
+        if cached:
+            return {**cached, "cached": True}
+        return {"models": [], "fetched_at": 0.0, "cached": False}
     if (not force and cached and now - float(_model_status_cache.get("fetched_at") or 0)
             < _MODEL_STATUS_TTL_S):
-        return cached
+        return {**cached, "cached": True}
     plus = os.environ.get(_PLUS_GATEWAY, "").strip().rstrip("/")
     if not plus:
         raise HTTPException(status_code=503, detail="PAT 模型服务未配置")
@@ -88,4 +95,4 @@ def fetch_pat_model_status(force: bool = False) -> dict[str, Any]:
         })
     result = {"models": models, "fetched_at": now}
     _model_status_cache.update({"fetched_at": now, "data": result})
-    return result
+    return {**result, "cached": False}

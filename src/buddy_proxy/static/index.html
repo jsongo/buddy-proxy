@@ -30,6 +30,22 @@
               border-radius: 999px; padding: 0 7px; margin-left: 5px; color: var(--muted); }
   .tab .cnt.ok { color: var(--ok); border-color: rgba(62,207,142,.4); }
   .tab .cnt.warn { color: var(--warn); border-color: rgba(240,180,41,.4); }
+  /* 日期范围组件：默认隐藏，随页签移动到当前页挂载点后显示为卡片行 */
+  .rangebar { display: none; align-items: center; gap: 8px; flex-wrap: wrap;
+              background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+              padding: 10px 14px; margin-bottom: 14px; }
+  .rangebar.show { display: flex; }
+  .rb-quick { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  .rb-btn { border: 1px solid var(--line); background: var(--bg); color: var(--muted);
+            border-radius: 999px; padding: 3px 12px; font-size: 12.5px; }
+  .rb-btn:hover { color: var(--text); border-color: var(--accent); }
+  .rb-btn.active { color: var(--text); border-color: var(--accent);
+                   background: rgba(79,140,255,.13); font-weight: 600; }
+  .rb-sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
+  .rb-dash { color: var(--muted); font-size: 12px; }
+  .rangebar input[type="date"] { background: var(--card2); border: 1px solid var(--line);
+    color: var(--text); border-radius: 8px; padding: 3px 8px; font-size: 12.5px;
+    color-scheme: dark; }
   .page { display: none; }
   .page.active { display: block; animation: fade .18s ease; }
   .page h2:first-child { margin-top: 0; }
@@ -137,6 +153,20 @@
                   color: var(--muted); margin-bottom: 4px; }
   .qbar { background: var(--bg); height: 8px; border-radius: 4px; overflow: hidden; }
   .qbar > div { height: 100%; border-radius: 4px; }
+  /* TRAE PAT 面板：账号奇偶两栏；token 状态 / 模型负载左右两栏 */
+  .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .pat-head .name { font-weight: 600; }
+  .pat-head .grow { flex: 1; }
+  .pat-acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 22px; }
+  @media (max-width: 720px) { .pat-acct-grid { grid-template-columns: 1fr; } }
+  .pat-acct { display: flex; gap: 8px; align-items: center; padding: 3px 0;
+              border-bottom: 1px solid rgba(38,47,60,.4); }
+  .pat-keeper { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .pat-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
+  @media (max-width: 720px) { .pat-cols { grid-template-columns: 1fr; } }
+  .pat-col-head { display: flex; align-items: center; gap: 8px; font-size: 12px;
+                  color: var(--muted); margin-bottom: 8px; }
+  .pat-col-head .grow { flex: 1; }
   /* 弹窗 */
   .overlay { position: fixed; inset: 0; background: rgba(5,8,12,.62); display: none;
              align-items: center; justify-content: center; z-index: 50; }
@@ -181,14 +211,23 @@
     </header>
     <nav class="tabs">
       <button class="tab active" data-tab="overview">📊 总览</button>
+      <button class="tab" data-tab="log">📜 请求日志</button>
       <button class="tab" data-tab="models">🧩 模型<span class="cnt" id="cnt-models"></span></button>
       <button class="tab" data-tab="benefits">✅ 打卡 &amp; 额度<span class="cnt" id="cnt-benefits"></span></button>
     </nav>
   </div>
 </div>
 
+<!-- 日期范围选择器：单一组件，切页签时移动到当前页的挂载点（总览 / 请求日志共用） -->
+<div class="rangebar" id="rangebar">
+  <span class="rb-quick" id="rb-quick"></span>
+  <span class="rb-sep"></span>
+  <input type="date" id="rb-start"><span class="rb-dash">→</span><input type="date" id="rb-end">
+</div>
+
 <div class="wrap">
   <section class="page active" id="page-overview">
+    <div class="range-slot"></div>
     <div class="cards" id="cards"></div>
 
     <h2>请求趋势 <span class="sub" id="trend-sub">近 14 天 · 按通道堆叠（点下方图例可只看某通道）</span></h2>
@@ -199,8 +238,11 @@
 
     <h2>模型平均耗时 <span class="sub" id="latency-sub">各通道下模型并列对比（点下方图例可只看某模型）</span></h2>
     <div class="chart-card"><div id="chart-latency"></div><div class="legend" id="legend-latency"></div></div>
+  </section>
 
-    <h2>最近请求 <span class="sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
+  <section class="page" id="page-log">
+    <div class="range-slot"></div>
+    <h2>最近请求 <span class="sub" id="recent-sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>
         <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>客户端</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 粗估（trae：(输入+输出)/1M × 100 × 模型倍率，非实扣）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
@@ -236,6 +278,7 @@
       </div>
       <div id="quota-list"><div class="chart-card"><div class="empty">加载中…</div></div></div>
     </div>
+    <div id="traepat-panel"></div>
   </section>
 </div>
 
@@ -294,6 +337,96 @@ async function api(path, opts) {
 
 let OVERVIEW = null, MODELS = null, STATS = null, BENEFITS = null;
 
+// ---- 日期范围选择器 ----
+// RANGE.q 记录当前快捷键（如 'd14'）；手改起止日期后 q 置空、退化为自定义区间。
+// 数据保留 30 天，故起止限制在 [今天-29, 今天]。
+function ymd(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function dayOffsetStr(off) {
+  const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() + off);
+  return ymd(d);
+}
+const QUICK_RANGES = [
+  { key: 'today', label: '今天', from: 0, to: 0 },
+  { key: 'yest', label: '昨天', from: -1, to: -1 },
+  { key: 'd3', label: '3 天', from: -2, to: 0 },
+  { key: 'd7', label: '7 天', from: -6, to: 0 },
+  { key: 'd14', label: '14 天', from: -13, to: 0 },
+  { key: 'd30', label: '30 天', from: -29, to: 0 },
+];
+function rangeFromQuick(q) {
+  const r = QUICK_RANGES.find(x => x.key === q);
+  return r ? { start: dayOffsetStr(r.from), end: dayOffsetStr(r.to), q } : null;
+}
+let RANGE = rangeFromQuick('d14');
+try {
+  const s = JSON.parse(localStorage.getItem('bp-range') || 'null');
+  if (s && s.q) { const r = rangeFromQuick(s.q); if (r) RANGE = r; }
+  else if (s && s.start && s.end) RANGE = { start: s.start, end: s.end };
+} catch (e) {}
+function persistRange() {
+  try {
+    localStorage.setItem('bp-range',
+      JSON.stringify(RANGE.q ? { q: RANGE.q } : { start: RANGE.start, end: RANGE.end }));
+  } catch (e) {}
+}
+function inRange(dateStr) { return dateStr >= RANGE.start && dateStr <= RANGE.end; }
+function tsInRange(ts) { const d = ymd(new Date(ts * 1000)); return d >= RANGE.start && d <= RANGE.end; }
+function rangeLabel() {
+  const q = QUICK_RANGES.find(x => x.key === RANGE.q);
+  return q ? q.label : `${RANGE.start} → ${RANGE.end}`;
+}
+function renderRangeQuick() {
+  document.getElementById('rb-quick').innerHTML = QUICK_RANGES.map(r =>
+    `<button class="rb-btn${RANGE.q === r.key ? ' active' : ''}" data-q="${r.key}">${r.label}</button>`).join('');
+  const s = document.getElementById('rb-start'), e = document.getElementById('rb-end');
+  s.min = e.min = dayOffsetStr(-29); s.max = e.max = dayOffsetStr(0);
+  s.value = RANGE.start; e.value = RANGE.end;
+}
+function rerenderRange() { if (STATS) render(); }
+document.getElementById('rb-quick').addEventListener('click', ev => {
+  const b = ev.target.closest('.rb-btn'); if (!b) return;
+  RANGE = rangeFromQuick(b.dataset.q); persistRange(); RECENT_PAGE = 1; renderRangeQuick(); rerenderRange();
+});
+function onDateInput() {
+  let s = document.getElementById('rb-start').value, e = document.getElementById('rb-end').value;
+  if (!s || !e) return;
+  if (s > e) { const t = s; s = e; e = t; }
+  RANGE = { start: s, end: e }; // 手改起止 → 脱离快捷选项
+  persistRange(); RECENT_PAGE = 1; renderRangeQuick(); rerenderRange();
+}
+document.getElementById('rb-start').addEventListener('change', onDateInput);
+document.getElementById('rb-end').addEventListener('change', onDateInput);
+
+// 由 STATS.model_daily 按所选范围过滤 + 按（通道/模型）聚合，
+// 结构与后端 STATS.models 一致（供 Top10、平均耗时图、悬停共用）。
+let RANGE_MODELS = [];
+function modelsInRange() {
+  const md = STATS.model_daily || [];
+  const per = new Map();
+  for (const b of md) {
+    if (!inRange(b.date)) continue;
+    const k = b.provider + '/' + b.model;
+    let e = per.get(k);
+    if (!e) {
+      e = { provider: b.provider, model: b.model, count: 0, errors: 0, _sum: 0,
+            duration_ms_max: 0, prompt_tokens: 0, completion_tokens: 0, last_ts: 0 };
+      per.set(k, e);
+    }
+    e.count += b.count; e.errors += b.errors; e._sum += b.duration_ms_sum;
+    e.duration_ms_max = Math.max(e.duration_ms_max, b.duration_ms_max);
+    e.prompt_tokens += b.prompt_tokens; e.completion_tokens += b.completion_tokens;
+    e.last_ts = Math.max(e.last_ts, b.last_ts || 0);
+  }
+  const out = [...per.values()].map(e => {
+    e.avg_ms = e.count ? Math.round(e._sum / e.count) : 0; delete e._sum; return e;
+  });
+  out.sort((a, b) => b.count - a.count);
+  return out;
+}
+
 async function loadAll(manual) {
   try {
     const [ov, md, st, bn] = await Promise.all([
@@ -304,6 +437,10 @@ async function loadAll(manual) {
 }
 
 function render() {
+  // 范围选择器 + 当前范围下的模型聚合（Top10/耗时图/悬停共用）
+  renderRangeQuick();
+  RANGE_MODELS = modelsInRange();
+
   // 状态条
   const dot = document.getElementById('status-dot');
   const ok = OVERVIEW.authenticated !== false;
@@ -313,16 +450,21 @@ function render() {
   document.getElementById('listen-hint').textContent =
     '默认模型: ' + (OVERVIEW.default_model.raw ? OVERVIEW.default_model.raw : '(未设置，按请求原样路由)');
 
-  // 概览卡片
-  const s = STATS.summary || {};
+  // 概览卡片：请求量/平均耗时按所选范围合计（从 daily 过滤累加）
   const dm = OVERVIEW.default_model;
+  const rl = rangeLabel();
+  const dRange = (STATS.daily || []).filter(d => inRange(d.date));
+  const rTotal = dRange.reduce((n, d) => n + (d.total || 0), 0);
+  const rErr = dRange.reduce((n, d) => n + (d.errors || 0), 0);
+  const rDurSum = dRange.reduce((n, d) => n + (d.duration_ms_sum || 0), 0);
+  const rAvg = rTotal ? Math.round(rDurSum / rTotal) : 0;
   document.getElementById('cards').innerHTML = `
     <div class="card" style="cursor:pointer" title="点击去模型页修改。仅在客户端请求未带 model 字段时生效；不影响已指定 model 的请求" onclick="switchTab('models')"><div class="k">默认启用模型 ↗</div>
       <div class="v">${dm.raw ? `<span class="chip">${esc(dm.provider || 'codebuddy')}</span>${esc(dm.model)}` :
         '<small>未设置（不影响正常使用）</small>'}</div></div>
-    <div class="card"><div class="k">24h 请求</div><div class="v">${s.total_24h ?? 0}
-      <small>错误 ${s.errors_24h ?? 0}</small></div></div>
-    <div class="card"><div class="k">24h 平均耗时</div><div class="v">${s.avg_ms_24h ? fmtMs(s.avg_ms_24h) : '—'}</div></div>
+    <div class="card"><div class="k">${esc(rl)} 请求</div><div class="v">${rTotal}
+      <small>错误 ${rErr}</small></div></div>
+    <div class="card"><div class="k">${esc(rl)} 平均耗时</div><div class="v">${rAvg ? fmtMs(rAvg) : '—'}</div></div>
     <div class="card"><div class="k">兜底通道</div><div class="v"><span class="chip">${esc(OVERVIEW.default_provider)}</span><small>未命中模型时</small></div></div>`;
 
   // 页签角标：模型总数 / 打卡状态
@@ -351,13 +493,21 @@ function refreshStickyVars() {
 window.addEventListener('resize', refreshStickyVars);
 
 // ---- 页签 ----
-const TABS = ['overview', 'models', 'benefits'];
+const TABS = ['overview', 'log', 'models', 'benefits'];
+// 范围选择器仅在总览/请求日志页有意义
+const RANGE_TABS = new Set(['overview', 'log']);
 function switchTab(name) {
   if (!TABS.includes(name)) name = 'overview';
   for (const b of document.querySelectorAll('.tab'))
     b.classList.toggle('active', b.dataset.tab === name);
   for (const s of document.querySelectorAll('.page'))
     s.classList.toggle('active', s.id === 'page-' + name);
+  // 单一范围组件：移动到当前页顶部的挂载点；非范围页则隐藏
+  const rb = document.getElementById('rangebar');
+  const slot = RANGE_TABS.has(name)
+    && document.querySelector('#page-' + name + ' .range-slot');
+  if (slot) { slot.appendChild(rb); rb.classList.add('show'); }
+  else { rb.classList.remove('show'); }
   history.replaceState(null, '', '#' + name);
   try { localStorage.setItem('bp-tab', name); } catch (e) {}
   refreshStickyVars();
@@ -446,53 +596,100 @@ function renderBenefits() {
     }).join('');
     // 标题行汇总：剩余/总额（取第一个可合计的条目；CodeBuddy 是积分合计，
     // zcode 取最紧的窗口。各明细条目仍完整列在下方。traepat 不展示：包是
-    // 多个独立额度，头部合计无意义，账号状态面板已自带操作按钮）
+    // 多个独立额度，头部合计无意义，账号状态/负载单独放底部面板）
     const head = (q.items || []).find(it => it.remaining != null && it.total != null);
     const headSum = (head && p.id !== 'traepat') ? `<span class="mono" style="margin-left:auto">
       <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(head.remaining)}</span>
       <span class="muted">/ ${fmtNum(head.total)}</span></span>` : '';
-    const statusBtn = p.id === 'traepat'
-      ? `<span style="margin-left:auto;display:flex;gap:6px">
-          <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
-          <button class="primary" onclick="loadTraepatStatus(this)">查询模型负载</button>
-        </span>` : '';
-    const statusBox = p.id === 'traepat'
-      ? `<div id="traepat-accounts" class="muted" style="font-size:12px;margin-top:6px">账号状态加载中…</div><div id="traepat-status"></div>` : '';
     return `<div class="chart-card" style="margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="font-weight:600">${esc(p.name)}</span>
         ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}
-        ${headSum}${statusBtn}
-      </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}${statusBox}</div>`;
+        ${headSum}
+      </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
+  renderTraepatPanel();
+}
+
+// ---- TRAE PAT 面板（底部整宽卡片）----
+// 结构：账号奇偶两栏 → 下方 Token 状态 / 模型负载 左右两栏。
+// 模型负载默认读缓存（GET，不触网），点「更新」再强制查询（POST）。
+function renderTraepatPanel() {
+  const panel = document.getElementById('traepat-panel');
+  if (!panel) return;
+  const has = (BENEFITS.providers || []).some(p => p.id === 'traepat' && p.quota && p.quota.supported);
+  if (!has) { panel.innerHTML = ''; return; }
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head">
+        <span class="name">Trae PAT</span>
+        <span class="tag">多账号 · 自愈</span>
+        <span class="grow"></span>
+        <span class="pat-keeper" id="pat-keeper"></span>
+      </div>
+      <div id="traepat-accounts" class="muted" style="font-size:12px">账号状态加载中…</div>
+      <div class="pat-cols">
+        <div>
+          <div class="pat-col-head">
+            <span>Token 状态</span><span class="grow"></span>
+            <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
+          </div>
+          <div id="traepat-token"><div class="empty" style="padding:8px 0">加载中…</div></div>
+        </div>
+        <div>
+          <div class="pat-col-head">
+            <span>模型负载</span><span class="grow"></span>
+            <button class="primary" onclick="loadTraepatStatus(this, true)">更新</button>
+          </div>
+          <div id="traepat-status"><div class="empty" style="padding:8px 0">加载中…</div></div>
+        </div>
+      </div>
+    </div>`;
   loadTraepatAccounts();
+  loadTraepatStatus(null, false);
 }
 
 async function loadTraepatAccounts() {
   const box = document.getElementById('traepat-accounts');
+  const tokBox = document.getElementById('traepat-token');
+  const keeperBox = document.getElementById('pat-keeper');
   if (!box) return;
   try {
     const r = await api('/ui/api/traepat/accounts');
-    if (!r.enabled) { box.textContent = ''; return; }
+    if (!r.enabled) { document.getElementById('traepat-panel').innerHTML = ''; return; }
     const tag = (t) => t === 'ok' ? '<span class="tag ok">token 正常</span>'
       : t === 'expiring' ? '<span class="tag" style="color:var(--warn)">临期</span>'
       : '<span class="tag bad">无 token</span>';
+    // 账号奇偶两栏排列（grid 逐个填充：a1|a2 / a3|a4 …）
     const rows = (r.accounts || []).map(a => {
       const cool = (a.cooling || []).map(c => `${c.kind} 冷却 ${c.minutes_left}min`).join(' · ');
       const left = a.hours_left != null ? `剩 ${a.hours_left}h` : '';
-      return `<div style="display:flex;gap:8px;align-items:center;padding:1px 0">
+      return `<div class="pat-acct">
         <span class="mono">${esc(a.id)}</span>
         <span class="muted">P${a.priority}</span>
         ${tag(a.token)}${left ? `<span class="muted">${left}</span>` : ''}
         ${cool ? `<span class="muted" style="color:var(--warn)">${cool}</span>` : ''}</div>`;
     }).join('');
+    box.innerHTML = `<div class="pat-acct-grid">${rows}</div>`;
+    // keeper 自愈状态 → 头部；Token 状态列展示同一份说明
     const k = r.keeper || {};
     const kAt = k.at ? new Date(k.at * 1000).toLocaleTimeString('zh-CN') : '—';
     const kState = k.env_ready === false ? '<span style="color:var(--warn)">换 token 端点不可达，等网络恢复</span>'
       : k.env_ready === true ? `上轮补签 ${((k.refreshed || []).length)} 个${(k.waiting || []).length ? `，待补 ${(k.waiting).length} 个` : ''}`
       : '尚未运行';
-    box.innerHTML = `<div style="margin-top:4px">每 ${Math.round((r.keepalive_s || 0) / 60)} 分钟自愈 · ${kState}（${kAt}）</div>${rows}`;
-  } catch (e) { box.textContent = `账号状态加载失败：${e.message}`; }
+    const keeperTxt = `每 ${Math.round((r.keepalive_s || 0) / 60)} 分钟自愈 · ${kState}（${kAt}）`;
+    if (keeperBox) keeperBox.innerHTML = keeperTxt;
+    if (tokBox) {
+      const bad = (r.accounts || []).filter(a => a.token !== 'ok');
+      tokBox.innerHTML = `<div class="muted" style="font-size:12px">${keeperTxt}</div>` +
+        (bad.length
+          ? `<div class="muted" style="font-size:12px;margin-top:6px">${bad.length} 个账号需补签：${bad.map(a => esc(a.id)).join('、')}</div>`
+          : '<div class="tag ok" style="margin-top:8px">全部账号 token 正常</div>');
+    }
+  } catch (e) {
+    box.textContent = `账号状态加载失败：${e.message}`;
+    if (tokBox) tokBox.innerHTML = `<div class="empty" style="padding:8px 0">加载失败：${esc(e.message)}</div>`;
+  }
 }
 
 async function refreshTraepatTokens(btn) {
@@ -514,14 +711,17 @@ async function refreshTraepatTokens(btn) {
   if (btn) { btn.disabled = false; btn.textContent = old || '补签 Token'; }
 }
 
-async function loadTraepatStatus(btn) {
+// force=false：读缓存（GET，不触网），页面默认展示；force=true：点「更新」强制查询（POST）
+async function loadTraepatStatus(btn, force) {
   const box = document.getElementById('traepat-status');
   if (!box) return;
-  if (btn) { btn.disabled = true; btn.textContent = '查询中…'; }
-  box.innerHTML = '<div class="empty" style="padding:8px 0">正在查询模型负载…</div>';
-  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '查询模型负载'; } };
+  if (btn) { btn.disabled = true; btn.textContent = '更新中…'; }
+  if (force) box.innerHTML = '<div class="empty" style="padding:8px 0">正在查询模型负载…</div>';
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '更新'; } };
   try {
-    const r = await api('/ui/api/traepat/model-status', {method: 'POST'});
+    const r = force
+      ? await api('/ui/api/traepat/model-status', {method: 'POST'})
+      : await api('/ui/api/traepat/model-status');
     const rows = (r.models || []).map(m => {
       const w = m.workload;
       const hasW = w != null;
@@ -533,9 +733,11 @@ async function loadTraepatStatus(btn) {
       return `<div class="qitem"><div class="qhead"><span>${esc(m.name || m.id)}${extra ? ` <span class="muted">${extra}</span>` : ''}</span><span class="mono">${label}</span></div>${bar}</div>`;
     }).join('');
     const ts = r.fetched_at ? new Date(r.fetched_at * 1000).toLocaleTimeString('zh-CN') : '';
-    box.innerHTML = `<div style="margin-top:8px;border-top:1px solid var(--border,#333);padding-top:8px">
-      <div class="muted" style="font-size:12px;margin-bottom:6px">模型负载（数值越高越繁忙）${ts ? ` · ${ts} 更新` : ''}</div>
-      ${rows || '<div class="empty" style="padding:8px 0">无负载数据</div>'}</div>`;
+    const hint = !r.fetched_at
+      ? '尚无缓存，点「更新」查询'
+      : `数值越高越繁忙 · ${ts} ${r.cached ? '缓存' : '更新'}`;
+    box.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px">${hint}</div>` +
+      (rows || '<div class="empty" style="padding:8px 0">无负载数据</div>');
   } catch (e) {
     box.innerHTML = `<div class="empty" style="padding:8px 0">查询失败：${esc(e.message)}</div>`;
   }
@@ -564,15 +766,18 @@ async function saveCheckinSettings() {
   } catch (e) { toast('保存失败: ' + e.message, true); }
 }
 
-// ---- 近14天柱状图（纯 SVG）。图例可点选：只显示某通道，或“全部”堆叠 ----
+// ---- 请求趋势柱状图（纯 SVG）。图例可点选：只显示某通道，或“全部”堆叠 ----
 // DAILY_PROV = null → 堆叠展示全部通道；否则只展示该通道单色柱
 let DAILY_PROV = null;
+// 当前范围过滤后的 daily（供柱状图悬停 tooltip 读取，索引与图内一致）
+let DAILY_VIEW = [];
 function renderDaily() {
-  const daily = STATS.daily || [];
+  const daily = (STATS.daily || []).filter(d => inRange(d.date));
+  DAILY_VIEW = daily;
   const W = 520, H = 190, padL = 34, padB = 24, padT = 15;
   const providers = [...new Set(daily.flatMap(d => Object.keys(d.by_provider)))];
   const filt0 = DAILY_PROV;
-  // 若所选通道已不在近 14 天窗口内（数据刷新后），自动退回“全部”
+  // 若所选通道已不在当前范围窗口内（数据/范围刷新后），自动退回“全部”
   if (filt0 && !providers.includes(filt0)) DAILY_PROV = null;
   const filt = DAILY_PROV; // null = 全部(堆叠)
   // 当前口径下每天的值：堆叠取 total，过滤取该通道数
@@ -633,8 +838,8 @@ function renderDaily() {
 
   // 副标题随过滤态更新
   document.getElementById('trend-sub').textContent = filt
-    ? `近 14 天 · 仅 ${filt}`
-    : '近 14 天 · 按通道堆叠（点下方图例可只看某通道）';
+    ? `${rangeLabel()} · 仅 ${filt}`
+    : `${rangeLabel()} · 按通道堆叠（点下方图例可只看某通道）`;
 }
 // 图例点选：选中某通道只展示其消耗；再点一次或点「全部」回到堆叠视图
 document.getElementById('legend-daily').addEventListener('click', e => {
@@ -648,9 +853,9 @@ document.getElementById('legend-daily').addEventListener('click', e => {
 
 // ---- 模型请求 Top10 横向条 ----
 function renderModelBars() {
-  const models = (STATS.models || []).slice(0, 10);
+  const models = RANGE_MODELS.slice(0, 10);
   const el = document.getElementById('chart-models');
-  if (!models.length) { el.innerHTML = '<div class="empty">暂无请求数据</div>'; return; }
+  if (!models.length) { el.innerHTML = '<div class="empty">范围内暂无请求数据</div>'; return; }
   const max = Math.max(1, ...models.map(m => m.count));
   el.innerHTML = models.map((m, mi) => `
     <div data-mi="${mi}" style="display:flex;align-items:center;gap:10px;margin:7px 0;cursor:crosshair">
@@ -668,10 +873,10 @@ let LATENCY_MODEL = null;
 // renderLatency 产出的视图数据（供 mousemove tooltip 读取）
 let LATENCY_DATA = null;
 function renderLatency() {
-  const models = STATS.models || [];
+  const models = RANGE_MODELS;
   const el = document.getElementById('chart-latency');
   if (!models.length) {
-    el.innerHTML = '<div class="empty">暂无请求数据</div>';
+    el.innerHTML = '<div class="empty">范围内暂无请求数据</div>';
     document.getElementById('legend-latency').innerHTML = '';
     LATENCY_DATA = null;
     return;
@@ -744,8 +949,8 @@ function renderLatency() {
          <i style="background:${mcolor.get(n)}"></i>${esc(n)}</span>`));
   document.getElementById('legend-latency').innerHTML = items.join('');
   document.getElementById('latency-sub').textContent = filt
-    ? `仅 ${filt} · 全窗口平均耗时`
-    : '各通道下模型并列对比（点下方图例可只看某模型）';
+    ? `仅 ${filt} · ${rangeLabel()} 平均耗时`
+    : `${rangeLabel()} · 各通道下模型并列对比（点下方图例可只看某模型）`;
 }
 // 图例点选：点某模型只看它；再点一次或点「全部」回到并列视图
  document.getElementById('legend-latency').addEventListener('click', e => {
@@ -822,7 +1027,7 @@ function hideChartTip() { chartTip.style.display = 'none'; }
 
 document.getElementById('chart-daily').addEventListener('mousemove', e => {
   const hz = e.target.closest('rect.hitzone');
-  const d = hz && (STATS.daily || [])[+hz.dataset.i];
+  const d = hz && DAILY_VIEW[+hz.dataset.i];
   if (!d) { hideChartTip(); return; }
   const lines = Object.entries(d.by_provider).sort((a, b) => b[1] - a[1])
     .map(([p, n]) => `<div class="t-p"><i style="background:${pcolor(p)}"></i>${esc(p)}<b style="margin-left:auto;padding-left:12px">${n}</b></div>`).join('');
@@ -835,7 +1040,7 @@ document.getElementById('chart-daily').addEventListener('mouseleave', hideChartT
 
 document.getElementById('chart-models').addEventListener('mousemove', e => {
   const row = e.target.closest('[data-mi]');
-  const m = row && (STATS.models || [])[+row.dataset.mi];
+  const m = row && RANGE_MODELS[+row.dataset.mi];
   if (!m) { hideChartTip(); return; }
   showChartTip(
     `<div class="t-date"><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(m.provider)};margin-right:6px"></i>${esc(m.provider)} / ${esc(m.model)}</div>` +
@@ -918,6 +1123,7 @@ function renderGroups() {
 }
 
 let RECENT_PAGE = 1, RECENT_SIZE = 20;
+let RECENT_SEQ = 0;  // 并发防抖：仅最后一次请求的结果生效（范围/翻页快速切换时）
 
 function recentGo(p) { RECENT_PAGE = p; renderRecent(); }
 function recentSize(v) { RECENT_SIZE = +v; RECENT_PAGE = 1; renderRecent(); }
@@ -936,22 +1142,36 @@ function recentPages(cur, total) {
   return out;
 }
 
-function renderRecent() {
-  const rows = STATS.recent || [];
+// 服务端分页：直接读 logs/metrics.jsonl + 30 天归档，突破进程内 200 条上限。
+async function renderRecent() {
   const el = document.getElementById('recent');
   const pager = document.getElementById('recent-pager');
-  if (!rows.length) {
-    el.innerHTML = '<tr><td colspan="9" class="empty">还没有请求记录</td></tr>';
+  document.getElementById('recent-sub').textContent =
+    `${rangeLabel()} · 读磁盘日志（最多 30 天归档），服务端分页；TTFT 为首 token 延迟（流式）`;
+  const seq = ++RECENT_SEQ;
+  let resp;
+  try {
+    const qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}` +
+               `&page=${RECENT_PAGE}&page_size=${RECENT_SIZE}`;
+    resp = await api('/ui/api/logs?' + qs);
+  } catch (e) {
+    if (seq !== RECENT_SEQ) return;  // 已被更晚的请求取代
+    el.innerHTML = `<tr><td colspan="9" class="empty">加载失败：${esc(e.message)}</td></tr>`;
     pager.innerHTML = '';
     return;
   }
-  const pages = Math.max(1, Math.ceil(rows.length / RECENT_SIZE));
-  // 数据刷新后总页数可能收缩（如清空后重启），收敛当前页到合法区间
-  if (RECENT_PAGE > pages) RECENT_PAGE = pages;
-  if (RECENT_PAGE < 1) RECENT_PAGE = 1;
-  const start = (RECENT_PAGE - 1) * RECENT_SIZE;
+  if (seq !== RECENT_SEQ) return;  // 已被更晚的请求取代
+  const rows = resp.rows || [];
+  const total = resp.total || 0;
+  const pages = resp.pages || 1;
+  RECENT_PAGE = resp.page || 1;  // 后端已收敛到合法区间
+  if (!rows.length) {
+    el.innerHTML = `<tr><td colspan="9" class="empty">${total ? '所选范围内没有请求记录' : '还没有请求记录'}</td></tr>`;
+    pager.innerHTML = '';
+    return;
+  }
   const cmap = STATS.credits_map || {};
-  el.innerHTML = rows.slice(start, start + RECENT_SIZE).map(r => {
+  el.innerHTML = rows.map(r => {
     const bad = (r.status >= 400 || r.error);
     const ttft = r.ttft_ms != null ? fmtMs(r.ttft_ms) : '—';
     const hasTok = (r.prompt_tokens || r.completion_tokens || r.cached_tokens);
@@ -985,7 +1205,7 @@ function renderRecent() {
   const nav = (label, page, disabled) =>
     `<button class="ghost" ${disabled ? 'disabled' : ''} onclick="recentGo(${page})">${label}</button>`;
   pager.innerHTML =
-    `<span class="muted">共 ${rows.length} 条</span>` +
+    `<span class="muted">共 ${total} 条</span>` +
     `<select title="每页条数" onchange="recentSize(this.value)">` +
       [20, 50, 100].map(n => `<option value="${n}" ${n === RECENT_SIZE ? 'selected' : ''}>${n} 条/页</option>`).join('') +
     `</select>` +

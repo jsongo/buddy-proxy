@@ -144,7 +144,8 @@ def test_models_grouped_by_provider(env):
 def test_stats_empty(env):
     body = env.client.get("/ui/api/stats").json()
     assert body["models"] == []
-    assert len(body["daily"]) == 14
+    assert body["model_daily"] == []
+    assert len(body["daily"]) == 30
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +463,47 @@ def test_metrics_daily_series_zero_filled(tmp_path):
     assert snap["daily"][-1]["total"] == 1
     assert snap["daily"][0]["total"] == 0
     assert snap["daily"][-1]["by_provider"] == {"zcode": 1}
+
+
+def test_query_logs_pagination_reads_disk(tmp_path):
+    """服务端分页直接读磁盘日志，突破进程内 recent 200 条上限。"""
+    m = MetricsCollector(tmp_path / "metrics.jsonl")
+    for i in range(250):
+        m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=i)
+    # 磁盘上有全部 250 条（进程内 recent 只留 200）
+    r1 = m.query_logs(page=1, page_size=20)
+    assert r1["total"] == 250          # 全量，非 200 上限
+    assert r1["pages"] == 13           # ceil(250/20)
+    assert len(r1["rows"]) == 20
+    assert r1["from_disk"] is True
+    # 第 13 页可达（旧客户端分页最多 10 页）
+    r13 = m.query_logs(page=13, page_size=20)
+    assert len(r13["rows"]) == 10
+    # 越界页收敛到末页
+    assert m.query_logs(page=999, page_size=20)["page"] == 13
+    # 倒序：第 1 页首条 ts 最大
+    assert r1["rows"][0]["ts"] >= r1["rows"][-1]["ts"]
+
+
+def test_query_logs_date_range_filter(tmp_path):
+    """按 YYYY-MM-DD 范围过滤（含端点）。"""
+    m = MetricsCollector(tmp_path / "metrics.jsonl")
+    m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=1)
+    today = time.strftime("%Y-%m-%d", time.localtime())
+    # 未来日期起点：范围内应无记录
+    future = time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400))
+    assert m.query_logs(start=future)["total"] == 0
+    # 含今天：命中
+    assert m.query_logs(start=today, end=today)["total"] == 1
+
+
+def test_query_logs_memory_fallback():
+    """无落盘（log_path=None）时退回内存 recent。"""
+    m = MetricsCollector(None)
+    m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=1)
+    r = m.query_logs(page=1, page_size=20)
+    assert r["total"] == 1
+    assert r["from_disk"] is False
 
 
 # ---------------------------------------------------------------------------

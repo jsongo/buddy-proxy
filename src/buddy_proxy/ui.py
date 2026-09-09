@@ -205,8 +205,8 @@ async def ui_stats(request: Request):
     state = get_state()
     metrics = getattr(state, "metrics", None)
     if metrics is None:
-        return {"models": [], "daily": [], "recent": [], "summary": {}, "credits_map": {}}
-    snap = metrics.snapshot(days=14)
+        return {"models": [], "daily": [], "model_daily": [], "recent": [], "summary": {}, "credits_map": {}}
+    snap = metrics.snapshot(days=30)
     # 模型积分倍率，按「通道/模型」为键——同一模型跨通道倍率不同
     # （如 glm-5.3 在 codebuddy 是 x0.79、trae 是 x0.40）。CodeBuddy 走
     # models_config，其余通道取各自 models() 声明的 credits。
@@ -219,6 +219,20 @@ async def ui_stats(request: Request):
             if m.get("credits"):
                 snap["credits_map"].setdefault(f"{p.id}/{m['id']}", m.get("credits"))
     return snap
+
+
+@app.get("/ui/api/logs")
+async def ui_logs(request: Request, start: str = "", end: str = "",
+                  page: int = 1, page_size: int = 20):
+    """请求日志分页查询：按日期范围直接读 metrics.jsonl + 30 天归档（服务端分页）。"""
+    _ensure_local(request)
+    state = get_state()
+    metrics = getattr(state, "metrics", None)
+    if metrics is None:
+        return {"rows": [], "total": 0, "page": 1, "page_size": page_size,
+                "pages": 1, "from_disk": False}
+    return await asyncio.to_thread(
+        metrics.query_logs, start or None, end or None, page, page_size)
 
 
 @app.get("/ui/api/benefits")
@@ -246,6 +260,17 @@ async def ui_checkin(request: Request):
     if not provider_id:
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 provider"}})
     return await manager.claim_now(provider_id)
+
+
+@app.get("/ui/api/traepat/model-status")
+async def ui_traepat_model_status_cached(request: Request):
+    """读取 traepat 模型负载缓存（纯本地，不触网）；无缓存返回空壳供页面默认展示。"""
+    _ensure_local(request)
+    try:
+        from .trae.pat import fetch_pat_model_status
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
+    return await asyncio.to_thread(fetch_pat_model_status, False, True)
 
 
 @app.post("/ui/api/traepat/model-status")
