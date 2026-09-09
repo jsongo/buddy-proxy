@@ -1109,7 +1109,8 @@ def test_channel_exhausted_only_for_4031(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 4031 extra 被动采集（standard 租户池唯一信号源）
+# 4031 extra 被动采集（standard 池唯一信号源；2026-09-10 实测为账号级分桶，
+# daily/weekly 双池并存，成功流不带账单——只有撞码才回 extra）
 # ---------------------------------------------------------------------------
 _EXTRA_4031 = {
     "code": 4031, "message": "",
@@ -1119,8 +1120,8 @@ _EXTRA_4031 = {
 
 
 def test_4031_extra_captured_to_standard_pool(monkeypatch):
-    """非流式 4031：extra（used/quota/next_flash）被动采集写入首账号缓存，
-    fetch_pat_ent_usage 末尾带出供 UI 展示；extra 缺失/畸形不影响 failover。"""
+    """非流式 4031：extra（used/quota/next_flash）被动采集写入**撞码账号自己**的
+    quota["standard"]（账号级分桶），fetch_pat_ent_usage 汇总带出供 UI 按账号展示。"""
     _configure_two(monkeypatch)
     _install_credentials(monkeypatch)
 
@@ -1133,12 +1134,14 @@ def test_4031_extra_captured_to_standard_pool(monkeypatch):
     monkeypatch.setattr(pat, "_post_chat", post)
     assert pat.send_pat_native([], "standard-model", False) == _OK
     items = pat._standard_pool_items()
-    assert items is not None and len(items) == 1
+    assert len(items) == 1
     item = items[0]
+    # 多账号时 label 带 PAT #N 前缀，UI 按账号分组
+    assert item["label"] == "PAT #1 · standard daily 池"
     assert item["used"] == 58 and item["total"] == 58
     assert item["percent"] == 100
     assert item["reset_ts"] is not None and item["reset_ts"] > time.time()
-    # 只写首账号（租户共享池，任意撞码账号看到的是同一份数据）
+    # 写在撞码账号（primary）自己名下；backup 没撞码、无记录
     profiles = pat.ensure_pat_config()
     state = pat._account_state(profiles[0].cache_key)
     assert isinstance(state.get("quota", {}).get("standard"), dict)
@@ -1163,8 +1166,48 @@ def test_4031_extra_capture_stream(monkeypatch):
     events = list(pat.stream_pat_native([], "standard-model"))
     assert events == [("output", {"response": "backup"}), ("done", {})]
     items = pat._standard_pool_items()
-    assert items is not None
+    assert len(items) == 1
     assert items[0]["used"] == 58 and items[0]["total"] == 58
+
+
+def test_4031_extra_daily_and_weekly_coexist(monkeypatch):
+    """daily/weekly 双池并存：同账号先撞 daily 再撞 weekly，两条记录共存；
+    同维度再次撞码时覆盖更新而不是追加。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def _clear_cooldowns():
+        for p in pat.ensure_pat_config():
+            pat._mutate_account(p.cache_key,
+                                 lambda s: s.get("cooldowns", {}).clear())
+
+    def post_daily(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            payload = json.dumps(_EXTRA_4031)
+            return f"event: error\ndata: {payload}\n\n"
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post_daily)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    assert len(pat._standard_pool_items()) == 1
+
+    _clear_cooldowns()
+    weekly = dict(_EXTRA_4031)
+    weekly["extra"] = {"used": 160, "quota": 160, "dimension": "weekly",
+                       "next_flash": int((time.time() + 86400 * 4) * 1000)}
+
+    def post_weekly(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            return f"event: error\ndata: {json.dumps(weekly)}\n\n"
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post_weekly)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    items = pat._standard_pool_items()
+    labels = [i["label"] for i in items]
+    assert labels == ["PAT #1 · standard daily 池", "PAT #1 · standard weekly 池"]
+    by_dim = {i["label"]: i for i in items}
+    assert by_dim["PAT #1 · standard weekly 池"]["total"] == 160
 
 
 def test_4031_extra_missing_or_malformed_is_tolerated(monkeypatch):
@@ -1181,7 +1224,7 @@ def test_4031_extra_missing_or_malformed_is_tolerated(monkeypatch):
 
     def _clear_standard_quota():
         # 畸形数据子用例要验证「不写入」而不是「不清空旧值」：先把上一子
-        # 用例的合法记录抹掉再验 None。
+        # 用例的合法记录抹掉再验空。
         for p in pat.ensure_pat_config():
             def drop(s):
                 (s.get("quota") or {}).pop("standard", None)
@@ -1195,7 +1238,7 @@ def test_4031_extra_missing_or_malformed_is_tolerated(monkeypatch):
 
     monkeypatch.setattr(pat, "_post_chat", post)
     assert pat.send_pat_native([], "standard-model", False) == _OK
-    assert pat._standard_pool_items() is None
+    assert pat._standard_pool_items() == []
 
     # extra 为字符串 JSON（真实上游出现过）：应解析成功
     def post2(_url, _payload, credentials, _stream):
@@ -1209,7 +1252,7 @@ def test_4031_extra_missing_or_malformed_is_tolerated(monkeypatch):
     monkeypatch.setattr(pat, "_post_chat", post2)
     assert pat.send_pat_native([], "standard-model", False) == _OK
     items = pat._standard_pool_items()
-    assert items is not None and items[0]["used"] == 58
+    assert len(items) == 1 and items[0]["used"] == 58
 
     # 畸形数据：非数字 used 静默丢弃
     def post3(_url, _payload, credentials, _stream):
@@ -1221,7 +1264,7 @@ def test_4031_extra_missing_or_malformed_is_tolerated(monkeypatch):
     _clear_standard_quota()
     monkeypatch.setattr(pat, "_post_chat", post3)
     assert pat.send_pat_native([], "standard-model", False) == _OK
-    assert pat._standard_pool_items() is None
+    assert pat._standard_pool_items() == []
 
 
 def test_4031_extra_json_error_body_captured(monkeypatch):
@@ -1237,7 +1280,7 @@ def test_4031_extra_json_error_body_captured(monkeypatch):
     monkeypatch.setattr(pat, "_post_chat", post)
     assert pat.send_pat_native([], "standard-model", False) == _OK
     items = pat._standard_pool_items()
-    assert items is not None and items[0]["total"] == 58
+    assert len(items) == 1 and items[0]["total"] == 58
 
 
 def test_standard_pool_not_returned_when_never_4031(monkeypatch):
@@ -1249,7 +1292,7 @@ def test_standard_pool_not_returned_when_never_4031(monkeypatch):
     monkeypatch.setattr(
         pat, "_post_chat", lambda _u, _p, _c, _s: _OK)
     assert pat.send_pat_native([], "standard-model", False) == _OK
-    assert pat._standard_pool_items() is None
+    assert pat._standard_pool_items() == []
 
 
 def test_clear_standard_cooldowns_idempotent(monkeypatch):
@@ -1344,3 +1387,40 @@ def test_stream_read_timeout_exceeds_semantic_timeout(monkeypatch):
     assert ("output", {"response": "late but valid"}) in events
     assert captured["timeout"].read == 95.0
     assert captured["timeout"].read > pat.chat.TRAE_SEMANTIC_TIMEOUT
+
+
+# ───────────────────── 非流式总时长插断（防上游滴字拖死） ─────────────────────
+
+def test_nonstream_read_bounded_cuts_off_dribble():
+    """上游滴字（read1 永远有数据）时，总时长到点必须主动插断而非无限等。
+
+    背景：urlopen 的 timeout 只管单次 socket 阻塞，实测挂过 17min 才 502。
+    """
+    from buddy_proxy.trae.pat import chat as pat_chat
+
+    class Dribble:
+        def read1(self, n):
+            time.sleep(0.005)
+            return b"x"  # 永远有下一个字节
+
+    t0 = time.monotonic()
+    with pytest.raises(pat_chat._NonStreamTimeout):
+        pat_chat._read_all_bounded(Dribble(), max_s=0.05)
+    assert time.monotonic() - t0 < 2
+
+
+def test_nonstream_read_bounded_completes_normally():
+    """正常响应（读到 EOF）原样返回且 utf-8 解码。"""
+    from buddy_proxy.trae.pat import chat as pat_chat
+
+    class Once:
+        def __init__(self):
+            self.done = False
+
+        def read1(self, n):
+            if self.done:
+                return b""
+            self.done = True
+            return "中文ok".encode("utf-8")
+
+    assert pat_chat._read_all_bounded(Once(), max_s=5) == "中文ok"

@@ -25,7 +25,7 @@ from fastapi import HTTPException
 # 名字，见包 __init__ 兼容约定）及包内共享状态经 _ns 调用期解析。
 import buddy_proxy.trae.pat as _ns
 
-from buddy_proxy.trae.config import BASE_URL_CN, TRAE_SEMANTIC_TIMEOUT
+from buddy_proxy.trae.config import BASE_URL_CN, TRAE_NONSTREAM_MAX_S, TRAE_SEMANTIC_TIMEOUT
 from buddy_proxy.trae.native_tools import _content_blocks, _native_tools_payload
 from buddy_proxy.trae.sse import _parse_sse, _SSEDecoder
 
@@ -188,7 +188,7 @@ def _post_chat(url: str, payload: bytes, credentials: PatCredentials, stream: bo
         request = urllib.request.Request(url, data=payload, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=_CHAT_TIMEOUT_S) as response:
-                return response.read().decode("utf-8", errors="replace")
+                return _read_all_bounded(response)
         except Exception as exc:
             if attempt >= len(delays) or not _is_retryable_connect_error(exc):
                 raise
@@ -198,6 +198,29 @@ def _post_chat(url: str, payload: bytes, credentials: PatCredentials, stream: bo
                 delays[attempt], attempt, len(_CONNECT_RETRY_DELAYS_S),
             )
     raise AssertionError("unreachable")
+
+
+class _NonStreamTimeout(TimeoutError):
+    """非流式整读超过总时长上限（上游滴字拖死），由调用方转 504，不重试不换号。"""
+
+
+def _read_all_bounded(response, max_s: float = TRAE_NONSTREAM_MAX_S) -> str:
+    """整读响应体，超过 ``max_s`` 总时长即中断。
+
+    urlopen 的 timeout 只约束单次 socket 阻塞；上游按 keepalive/分块慢速滴字时
+    read() 可以无限拖延（实测挂 17min 才 502、零输出）。逐块读 + 检查墙钟，
+    到点抛 _NonStreamTimeout。
+    """
+    deadline = time.monotonic() + max_s
+    parts: list[bytes] = []
+    while True:
+        if time.monotonic() > deadline:
+            raise _NonStreamTimeout(f"非流式响应超过 {max_s}s 未完成")
+        part = response.read1(65536)
+        if not part:
+            break
+        parts.append(part)
+    return b"".join(parts).decode("utf-8", errors="replace")
 
 
 def _stream_profile_events(
@@ -494,6 +517,13 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                     raise HTTPException(status_code=401, detail="trae PAT authentication failed") from None
                 raise HTTPException(status_code=502,
                                     detail=f"trae PAT chat failed: HTTP {status}") from None
+            except _NonStreamTimeout:
+                # 总时长到点主动插断：与传输失败同路径（不重试不换号，防重复计费），
+                # 但 504 + 明确文案，让客户端知道是上游卡死被代理掐掉。
+                log.warning("PAT chat 非流式超时插断，账号序号=%d", profile.index)
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"trae PAT 上游非流式响应超过 {TRAE_NONSTREAM_MAX_S}s 未完成，已主动断开") from None
             except Exception as exc:
                 log.warning("PAT chat 传输失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
                 raise HTTPException(status_code=502, detail="trae PAT chat transport failed") from None
