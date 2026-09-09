@@ -52,3 +52,10 @@ def normalize_default_model(raw: str) -> str:
         prefix = {"workbuddy": "codebuddy"}.get(prefix, prefix)
         value = f"{prefix}/{model}"
     return value
+
+
+def model_key(provider: str, model: str) -> str:
+    """停用集合的规范键：``<provider>/<model>``，provider 缺省视为 codebuddy。"""
+    provider = (provider or "codebuddy").strip()
+    provider = {"workbuddy": "codebuddy"}.get(provider, provider)
+    return f"{provider}/{(model or '').strip()}"

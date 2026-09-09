@@ -18,6 +18,26 @@ from buddy_proxy.state import (
 from .observability import _instrument
 from .provider import _default_codebuddy
 
+
+def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
+    """命中管理页停用的 (provider, model) 组合时，直接返回 403 拒绝转发。"""
+    disabled = getattr(state, "disabled_models", None)
+    if not disabled or not isinstance(model_id, str):
+        return
+    key = f"{provider_id}/{model_id}"
+    if key in disabled:
+        diagnostic("model_disabled_reject", provider=provider_id, model=model_id)
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": {
+                    "message": f"模型 {key} 已被停用，请在管理页 /ui 重新启用后再调用",
+                    "type": "model_disabled",
+                }
+            },
+        )
+
+
 async def forward_chat(
     body: dict[str, Any],
     protocol: str,
@@ -73,6 +93,7 @@ async def forward_chat(
         elif prefix == "codebuddy":
             # 显式强制走默认 CodeBuddy 通道，跳过 provider 自动匹配与兜底
             body = {**body, "model": real_model}
+            _reject_if_disabled(state, "codebuddy", real_model)
             diagnostic("provider_route", provider="codebuddy", model=real_model,
                        protocol=protocol, via="prefix")
             return await _instrument(
@@ -92,6 +113,7 @@ async def forward_chat(
         # 非默认 provider（Trae/豆包等）：由各自 forward 决定协议支持范围。
         # Trae 已支持 anthropic 协议（/v1/messages 客户端如 Claude Code 可直连）；
         # 豆包等仅 openai 协议透传（doubao2api 只支持 OpenAI chat completions）。
+        _reject_if_disabled(state, provider.id, requested_model)
         diagnostic("provider_route", provider=provider.id, model=requested_model, protocol=protocol)
         provider.ensure_auth()
         return await _instrument(
@@ -104,6 +126,7 @@ async def forward_chat(
     default_provider_id = getattr(state, "default_provider", "codebuddy")
     if default_provider_id in providers:
         default_provider = providers[default_provider_id]
+        _reject_if_disabled(state, default_provider.id, requested_model)
         diagnostic("provider_route", provider=default_provider.id,
                    model=requested_model, protocol=protocol, via="default")
         default_provider.ensure_auth()
@@ -114,6 +137,7 @@ async def forward_chat(
         )
 
     # 默认 CodeBuddy 路径（对称封装，与其它 provider 一致）
+    _reject_if_disabled(state, "codebuddy", requested_model)
     return await _instrument(
         state, _default_codebuddy.forward(body, protocol, original),
         provider_id="codebuddy", model_id=requested_model, protocol=protocol,

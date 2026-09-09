@@ -184,6 +184,7 @@ async def ui_models(request: Request):
             stat_map[(m["provider"], m["model"])] = m
 
     default_model = getattr(state, "default_model", None) or ""
+    disabled = getattr(state, "disabled_models", set()) or set()
     for group in groups:
         for m in group["models"]:
             st = stat_map.get((group["id"], m["id"])) or {}
@@ -194,6 +195,7 @@ async def ui_models(request: Request):
                 "last_ts": st.get("last_ts", 0),
             }
             m["is_default"] = default_model in (f"{group['id']}/{m['id']}", m["id"])
+            m["disabled"] = f"{group['id']}/{m['id']}" in disabled
     return {"groups": groups, "default_model": default_model}
 
 
@@ -403,6 +405,39 @@ async def ui_settings_post(request: Request):
     if "default_provider" in update:
         state.default_provider = update["default_provider"]
     return {"ok": True, "settings": {k: saved.get(k) for k in ("default_model", "default_provider")}}
+
+
+@app.post("/ui/api/model-toggle")
+async def ui_model_toggle(request: Request):
+    """停用/启用指定 (provider, model)：停用后该组合调用直接失败。
+
+    请求体：``{"provider": "codebuddy", "model": "glm-4.7", "disabled": true}``
+    未带 disabled 时按当前状态取反（切换）。持久化到 settings.json 并热更新运行态。
+    """
+    _ensure_local(request)
+    state = get_state()
+    body = await request.json()
+    provider = (body.get("provider") or "").strip()
+    model = (body.get("model") or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
+    # 校验组合真实存在，避免写入无效键
+    _validate_model(provider or "codebuddy", model, state)
+
+    key = settings_mod.model_key(provider, model)
+    current = getattr(state, "disabled_models", set()) or set()
+    if not isinstance(current, set):
+        current = set(current)
+    want_disabled = bool(body["disabled"]) if "disabled" in body else key not in current
+
+    if want_disabled:
+        current.add(key)
+    else:
+        current.discard(key)
+
+    state.disabled_models = current
+    settings_mod.save_settings({"disabled_models": sorted(current)})
+    return {"ok": True, "model": key, "disabled": want_disabled}
 
 
 @app.post("/ui/api/test")

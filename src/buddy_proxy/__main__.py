@@ -253,6 +253,15 @@ def main():
     if default_model:
         print(f"[Default Model] {default_model} (settings: {settings_mod.settings_path()})")
 
+    # 已停用模型：settings.json 持久化的 "provider/model" 列表，命中即拒绝转发
+    disabled_models = {
+        settings_mod.model_key(*k.split("/", 1)) if "/" in k else settings_mod.model_key("codebuddy", k)
+        for k in (saved_settings.get("disabled_models") or [])
+        if isinstance(k, str) and k.strip()
+    }
+    if disabled_models:
+        print(f"[Disabled Models] {len(disabled_models)} 个已停用: {', '.join(sorted(disabled_models))}")
+
     metrics = MetricsCollector(args.log_file.parent / "metrics.jsonl")
 
     _state.proxy_state = ProxyState(
@@ -267,6 +276,7 @@ def main():
         providers=providers,
         default_provider=args.default_provider,
         default_model=default_model or None,
+        disabled_models=disabled_models,
         metrics=metrics,
     )
     # 打卡管理器要引用 state 本身，构造后挂上

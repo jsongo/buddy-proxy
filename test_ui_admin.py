@@ -85,6 +85,7 @@ def _make_state(providers, tmp_path):
         verbose_llm=False,
         default_provider="codebuddy",
         default_model=None,
+        disabled_models=set(),
         metrics=MetricsCollector(tmp_path / "metrics.jsonl"),
         write_log=mock.MagicMock(),
         ensure_auth=mock.MagicMock(),
@@ -180,6 +181,62 @@ def test_default_model_fills_missing_model_field(env):
     assert r.status_code == 200
     # 前缀被剥掉后转发给 provider
     assert env.fake.last_body["model"] == "fake-model"
+
+
+# ---------------------------------------------------------------------------
+# 模型停用/启用
+# ---------------------------------------------------------------------------
+def test_model_toggle_disable_and_enable(env):
+    # 停用
+    r = env.client.post("/ui/api/model-toggle",
+                        json={"provider": "fakeprov", "model": "fake-model", "disabled": True})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "model": "fakeprov/fake-model", "disabled": True}
+    assert "fakeprov/fake-model" in env.state.disabled_models
+    # 落盘
+    assert settings_mod.load_settings()["disabled_models"] == ["fakeprov/fake-model"]
+    # /ui/api/models 反映停用标记
+    models = env.client.get("/ui/api/models").json()["groups"]
+    fp = next(g for g in models if g["id"] == "fakeprov")
+    assert next(m for m in fp["models"] if m["id"] == "fake-model")["disabled"] is True
+
+    # 启用
+    r = env.client.post("/ui/api/model-toggle",
+                        json={"provider": "fakeprov", "model": "fake-model", "disabled": False})
+    assert r.status_code == 200 and r.json()["disabled"] is False
+    assert "fakeprov/fake-model" not in env.state.disabled_models
+
+
+def test_model_toggle_defaults_to_flip(env):
+    r1 = env.client.post("/ui/api/model-toggle",
+                         json={"provider": "fakeprov", "model": "fake-model"})
+    assert r1.json()["disabled"] is True
+    r2 = env.client.post("/ui/api/model-toggle",
+                         json={"provider": "fakeprov", "model": "fake-model"})
+    assert r2.json()["disabled"] is False
+
+
+def test_model_toggle_rejects_unknown(env):
+    r = env.client.post("/ui/api/model-toggle",
+                        json={"provider": "fakeprov", "model": "nope", "disabled": True})
+    assert r.status_code == 400
+
+
+def test_disabled_model_call_fails(env):
+    env.client.post("/ui/api/model-toggle",
+                    json={"provider": "fakeprov", "model": "fake-model", "disabled": True})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403
+    assert "停用" in json.dumps(r.json(), ensure_ascii=False)
+    # 启用后恢复正常
+    env.client.post("/ui/api/model-toggle",
+                    json={"provider": "fakeprov", "model": "fake-model", "disabled": False})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
 
 
 # ---------------------------------------------------------------------------

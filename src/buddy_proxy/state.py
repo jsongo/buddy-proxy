@@ -36,6 +36,7 @@ class ProxyState:
         providers: Optional[dict[str, BaseProvider]] = None,
         default_provider: str = "codebuddy",
         default_model: Optional[str] = None,
+        disabled_models: Optional[set[str]] = None,
         metrics: Optional[Any] = None,
         benefits: Optional[Any] = None,
     ):
@@ -48,6 +49,9 @@ class ProxyState:
         # 管理页设置的「默认启用模型」，形如 "zcode/glm-5.3" 或裸 "glm-5.3"。
         # 客户端请求未带 model 字段时用它补齐（settings.py 持久化，/ui 可改）
         self.default_model = default_model
+        # 已停用的模型键集合，形如 "codebuddy/glm-4.7"（provider/model）。
+        # 命中的 (provider, model) 组合在转发时直接失败（settings.py 持久化，/ui 可改）
+        self.disabled_models: set[str] = set(disabled_models or ())
         # 请求指标收集器（metrics.MetricsCollector，供 /ui 图表聚合）
         self.metrics = metrics
         # 打卡/额度管理器（benefits.BenefitsManager，供 /ui 打卡日历与额度展示）

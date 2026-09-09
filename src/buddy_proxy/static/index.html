@@ -884,16 +884,19 @@ function renderGroups() {
                     : h.base_url ? esc(h.base_url.replace(/^https?:\/\//, '')) : (okFlag ? '正常' : '未就绪');
     const rows = g.models.map(m => {
       const st = m.stats || {};
-      return `<tr>
+      const dis = !!m.disabled;
+      return `<tr${dis ? ' style="opacity:.5"' : ''}>
         <td><span class="mono">${esc(m.id)}</span>
-            ${m.is_default ? '<span class="badge-default">✦ 默认</span>' : ''}</td>
+            ${m.is_default ? '<span class="badge-default">✦ 默认</span>' : ''}
+            ${dis ? '<span class="tag bad">已停用</span>' : ''}</td>
         <td class="muted">${esc(m.name || '')}</td>
         <td>${m.credits ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted">${st.count || '—'}</td>
         <td class="num mono muted">${st.count ? fmtMs(st.avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
-            ${m.is_default ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick="setDefault('${esc(g.id)}','${esc(m.id)}')">设为默认</button>`}
+            ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick="setDefault('${esc(g.id)}','${esc(m.id)}')">设为默认</button>`}
             <button class="primary" onclick="runTest('${esc(g.id)}','${esc(m.id)}')">测试</button>
+            <button class="ghost" title="${dis ? '重新启用后可正常调用' : '停用后调用此模型的请求直接失败'}" onclick="toggleModel('${esc(g.id)}','${esc(m.id)}',${dis ? 'false' : 'true'})">${dis ? '启用' : '停用'}</button>
         </td></tr>`;
     }).join('');
     return `<div class="group${COLLAPSED.has(g.id) ? ' collapsed' : ''}" data-gid="${esc(g.id)}">
@@ -1005,6 +1008,16 @@ async function setDefault(provider, model) {
     toast(`默认模型已设为 ${provider}/${model}`);
     loadAll();
   } catch (e) { toast('设置失败: ' + e.message, true); }
+}
+
+async function toggleModel(provider, model, disabled) {
+  try {
+    await api('/ui/api/model-toggle', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ provider, model, disabled })});
+    toast(`${provider}/${model} 已${disabled ? '停用（调用将直接失败）' : '启用'}`);
+    loadAll();
+  } catch (e) { toast('操作失败: ' + e.message, true); }
 }
 
 async function runTest(provider, model) {
