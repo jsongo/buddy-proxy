@@ -1055,3 +1055,32 @@ def test_send_native_three_accounts_empty_never_returns_fake_200(monkeypatch):
 def test_bare_json_native_semantic_fields_are_not_empty(raw):
     """裸 JSON 的 Trae 原生字段也算语义内容，不应触发空响应换号。"""
     assert pat._sse_has_semantic_content(raw) is True
+
+
+def test_stream_read_timeout_exceeds_semantic_timeout(monkeypatch):
+    """流式 read timeout 必须晚于外层语义超时，避免 30~180s 排队首字被误报 502。"""
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def raise_for_status(self): pass
+        def iter_bytes(self):
+            yield b'event: output\ndata: {"response":"late but valid"}\n\n'
+            yield b'event: done\ndata: {}\n\n'
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def stream(self, *_args, **_kwargs): return FakeResponse()
+
+    monkeypatch.setattr(pat.chat.httpx, "Client", FakeClient)
+    monkeypatch.setattr(pat.chat, "TRAE_SEMANTIC_TIMEOUT", 90)
+    creds = pat.PatCredentials("token", "uid", "machine", "device")
+    events = list(pat.chat._stream_profile_events(
+        "https://offline.invalid/chat", b"{}", creds, __import__("threading").Event()))
+    assert ("output", {"response": "late but valid"}) in events
+    assert captured["timeout"].read == 95.0
+    assert captured["timeout"].read > pat.chat.TRAE_SEMANTIC_TIMEOUT

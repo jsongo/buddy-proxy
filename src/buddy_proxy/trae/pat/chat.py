@@ -25,7 +25,7 @@ from fastapi import HTTPException
 # 名字，见包 __init__ 兼容约定）及包内共享状态经 _ns 调用期解析。
 import buddy_proxy.trae.pat as _ns
 
-from buddy_proxy.trae.config import BASE_URL_CN
+from buddy_proxy.trae.config import BASE_URL_CN, TRAE_SEMANTIC_TIMEOUT
 from buddy_proxy.trae.native_tools import _content_blocks, _native_tools_payload
 from buddy_proxy.trae.sse import _parse_sse, _SSEDecoder
 
@@ -206,9 +206,13 @@ def _stream_profile_events(
     stop: threading.Event,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     """打开单账号响应并逐个产生完整 SSE 事件，不缓冲整轮响应。"""
+    # read 必须晚于 provider 外层语义超时：否则上游首字在 30~180s 才到时，
+    # httpx 会先抛 ReadTimeout → 客户端误拿 502，外层来不及按
+    # WB_TRAE_SEMANTIC_TIMEOUT 发心跳/504。保留 5s 保护窗，让外层先 set stop；
+    # 不设 None 是为了 stop 后读线程最终仍能自行释放 socket。
     timeout = httpx.Timeout(
         connect=min(20.0, float(_CHAT_TIMEOUT_S)),
-        read=min(30.0, float(_CHAT_TIMEOUT_S)),
+        read=float(TRAE_SEMANTIC_TIMEOUT) + 5.0,
         write=min(30.0, float(_CHAT_TIMEOUT_S)),
         pool=min(20.0, float(_CHAT_TIMEOUT_S)),
     )
