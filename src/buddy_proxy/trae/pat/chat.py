@@ -26,7 +26,12 @@ from fastapi import HTTPException
 import buddy_proxy.trae.pat as _ns
 
 from buddy_proxy.trae.config import BASE_URL_CN, TRAE_NONSTREAM_MAX_S, TRAE_SEMANTIC_TIMEOUT
-from buddy_proxy.trae.native_tools import _content_blocks, _native_tools_payload
+from buddy_proxy.trae.native_tools import (
+    _NonStreamTimeout,
+    _content_blocks,
+    _native_tools_payload,
+    _read_all_bounded,
+)
 from buddy_proxy.trae.sse import _parse_sse, _SSEDecoder
 
 from .config import (
@@ -200,29 +205,6 @@ def _post_chat(url: str, payload: bytes, credentials: PatCredentials, stream: bo
     raise AssertionError("unreachable")
 
 
-class _NonStreamTimeout(TimeoutError):
-    """非流式整读超过总时长上限（上游滴字拖死），由调用方转 504，不重试不换号。"""
-
-
-def _read_all_bounded(response, max_s: float = TRAE_NONSTREAM_MAX_S) -> str:
-    """整读响应体，超过 ``max_s`` 总时长即中断。
-
-    urlopen 的 timeout 只约束单次 socket 阻塞；上游按 keepalive/分块慢速滴字时
-    read() 可以无限拖延（实测挂 17min 才 502、零输出）。逐块读 + 检查墙钟，
-    到点抛 _NonStreamTimeout。
-    """
-    deadline = time.monotonic() + max_s
-    parts: list[bytes] = []
-    while True:
-        if time.monotonic() > deadline:
-            raise _NonStreamTimeout(f"非流式响应超过 {max_s}s 未完成")
-        part = response.read1(65536)
-        if not part:
-            break
-        parts.append(part)
-    return b"".join(parts).decode("utf-8", errors="replace")
-
-
 def _stream_profile_events(
     url: str,
     payload: bytes,
@@ -332,6 +314,10 @@ def stream_pat_native(
     stop = stop or threading.Event()
     last_status: int | None = None
     empty_retries = 0
+    # 空响应假成功每次都换到**不同**账号（同账号不重放），故预算至少覆盖所有
+    # 可用账号，否则 ≥3 账号时前几个账号偶发空响应就会把预算耗尽、健康的后续
+    # 账号根本没机会被尝试。下限仍保留 _EMPTY_SUCCESS_RETRIES 防单账号场景过严。
+    empty_budget = max(_EMPTY_SUCCESS_RETRIES, len(profiles))
     # 见 send_pat_native：仅当被尝试的账号全部撞 4031 才升级为通道级快速失败。
     attempted_accounts = 0
     accounts_4031 = 0
@@ -382,11 +368,11 @@ def stream_pat_native(
                             # 提交过任何事件，换号重放无副作用；不是额度
                             # 故障，不标冷却。达到重试上限后显式报 502。
                             empty_retries += 1
-                            if empty_retries <= _EMPTY_SUCCESS_RETRIES:
+                            if empty_retries <= empty_budget:
                                 log.warning(
                                     "PAT stream 空响应假成功（done 无内容），换号重试 "
                                     "%d/%d，账号序号=%d",
-                                    empty_retries, _EMPTY_SUCCESS_RETRIES, profile.index)
+                                    empty_retries, empty_budget, profile.index)
                                 break
                             raise HTTPException(
                                 status_code=502,
@@ -402,10 +388,10 @@ def stream_pat_native(
                     if not committed:
                         # 流自然耗尽也无语义内容：与 done 分支同处理。
                         empty_retries += 1
-                        if empty_retries <= _EMPTY_SUCCESS_RETRIES:
+                        if empty_retries <= empty_budget:
                             log.warning(
                                 "PAT stream 流耗尽零内容，换号重试 %d/%d，账号序号=%d",
-                                empty_retries, _EMPTY_SUCCESS_RETRIES, profile.index)
+                                empty_retries, empty_budget, profile.index)
                             break
                         raise HTTPException(
                             status_code=502, detail="trae PAT stream returned no content")
@@ -483,6 +469,9 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
     url = f"{_chat_base(model)}/api/agent/v3/llm_utils_chat"
     last_status: int | None = None
     empty_retries = 0
+    # 见 stream_pat_native：空响应每次换不同账号，预算须覆盖所有可用账号，
+    # 否则 ≥3 账号时前几个偶发空响应会耗尽预算、后续健康账号得不到尝试。
+    empty_budget = max(_EMPTY_SUCCESS_RETRIES, len(profiles))
     # 每个被尝试的账号是否都因 4031 日额度耗尽退出——只有全部如此才升级为
     # 通道级快速失败（任一账号是别的失败原因就不算通道级耗尽）。
     attempted_accounts = 0
@@ -578,10 +567,10 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
             # 换号重放无重复计费风险；不是额度故障，不标冷却。
             if not _sse_has_semantic_content(raw):
                 empty_retries += 1
-                if empty_retries <= _EMPTY_SUCCESS_RETRIES:
+                if empty_retries <= empty_budget:
                     log.warning(
                         "PAT chat 空响应假成功（零语义内容），换号重试 %d/%d，账号序号=%d",
-                        empty_retries, _EMPTY_SUCCESS_RETRIES, profile.index)
+                        empty_retries, empty_budget, profile.index)
                     break
                 # ≥3 个账号时重试次数可能在账号循环中途耗尽；必须在这里
                 # 显式报 502，不能落回 return raw 把空 SSE 伪装成 200。

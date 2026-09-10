@@ -527,22 +527,25 @@ class AnthropicStreamConverter:
                         "id": None,
                         "name": None,
                         "arguments": "",
+                        "started": False,
+                        "pending_args": "",
                     }
-                
+
                 slot = self.tool_blocks[chat_index]
                 anthropic_index = slot["anthropic_index"]
-                
+
                 call_id = call.get("id")
                 if call_id and not slot["id"]:
                     slot["id"] = call_id
-                
+
                 fn = call.get("function", {})
                 fn_name = fn.get("name")
                 fn_args = fn.get("arguments")
-                
+
                 # 首次见到工具名：打开tool_use块
                 if fn_name and not slot["name"]:
                     slot["name"] = fn_name
+                    slot["started"] = True
                     self.open_blocks.add(anthropic_index)
                     events.append(("content_block_start", {
                         "type": "content_block_start",
@@ -554,29 +557,54 @@ class AnthropicStreamConverter:
                             "input": {},
                         },
                     }))
-                
-                # arguments增量
+                    # 块打开前若已到过 arguments 分片，先冲刷缓冲，避免丢参数。
+                    if slot["pending_args"]:
+                        events.append(("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": anthropic_index,
+                            "delta": {"type": "input_json_delta",
+                                      "partial_json": slot["pending_args"]},
+                        }))
+                        slot["pending_args"] = ""
+
+                # arguments增量：块已打开才发 delta；否则先缓冲，等 content_block_start
+                # 之后再冲刷——绝不在未 start 的 index 上发 delta（会产出非法事件流）。
                 if fn_args:
                     slot["arguments"] += fn_args
-                    events.append(("content_block_delta", {
-                        "type": "content_block_delta",
-                        "index": anthropic_index,
-                        "delta": {"type": "input_json_delta", "partial_json": fn_args},
-                    }))
+                    if slot["started"]:
+                        events.append(("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": anthropic_index,
+                            "delta": {"type": "input_json_delta", "partial_json": fn_args},
+                        }))
+                    else:
+                        slot["pending_args"] += fn_args
         
         return events
     
-    def finish(self) -> list[tuple[str, dict]]:
-        """流结束，发出stop事件"""
+    def close_open_blocks(self) -> list[tuple[str, dict]]:
+        """关闭所有已打开但未收尾的 content block（供中途出错的调用方收尾用）。
+
+        流中途冒出错误事件时，已 content_block_start 的块必须补
+        content_block_stop，否则严格的 Anthropic 客户端会因为块悬空而卡死/报错。
+        幂等：关一次后 open_blocks 清空，finish() 不会重复关。
+        """
         events: list[tuple[str, dict]] = []
-        
-        # 关闭所有打开的块
         for index in sorted(self.open_blocks):
             events.append(("content_block_stop", {
                 "type": "content_block_stop",
                 "index": index,
             }))
-        
+        self.open_blocks.clear()
+        return events
+
+    def finish(self) -> list[tuple[str, dict]]:
+        """流结束，发出stop事件"""
+        events: list[tuple[str, dict]] = []
+
+        # 关闭所有打开的块
+        events.extend(self.close_open_blocks())
+
         # 映射finish_reason
         stop_reason_map = {
             "stop": "end_turn",

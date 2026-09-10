@@ -39,8 +39,9 @@ _keeper_lock = threading.Lock()
 _keeper_round_lock = threading.Lock()
 _keeper_last: dict[str, Any] = {"at": 0.0, "env_ready": None, "refreshed": [], "waiting": []}
 
-# 一次性迁移标记：清理旧 4031 逻辑误写的账号级 standard 冷却（见
-# cooldown._clear_standard_cooldowns）。每进程只跑一次，幂等。
+# 一次性迁移标记：清理旧 4031 逻辑误写的账号级 standard 次日级冷却（见
+# cooldown._clear_standard_cooldowns）。进程内只跑一次；跨进程用标记文件保证
+# 全生命周期只清一轮——不能每次启动都重放，否则会反复误删现行正常短冷却。
 _standard_cooldown_migrated = False
 
 
@@ -49,9 +50,16 @@ def _migrate_standard_cooldowns_once() -> None:
     if _standard_cooldown_migrated:
         return
     _standard_cooldown_migrated = True
+    from buddy_proxy.paths import state_file
+
+    marker = state_file("trae_pat_standard_cooldown_cleanup.done")
+    if marker.exists():
+        return
     try:
         _clear_standard_cooldowns()
-    except Exception as exc:  # 迁移失败不应阻断保活循环启动
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%S%z"), encoding="utf-8")
+    except Exception as exc:  # 迁移失败不应阻断保活循环启动（下次启动重试）
         log.warning("PAT standard 冷却清理失败（%s）", type(exc).__name__)
 
 
