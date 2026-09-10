@@ -86,6 +86,7 @@ def _make_state(providers, tmp_path):
         default_provider="codebuddy",
         default_model=None,
         disabled_models=set(),
+        model_schedules={},
         metrics=MetricsCollector(tmp_path / "metrics.jsonl"),
         write_log=mock.MagicMock(),
         ensure_auth=mock.MagicMock(),
@@ -238,6 +239,127 @@ def test_disabled_model_call_fails(env):
                         json={"model": "fakeprov/fake-model",
                               "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 限时可用时段
+# ---------------------------------------------------------------------------
+def test_model_schedule_open_same_day():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Shanghai")
+    at = lambda h, mi: datetime(2026, 9, 10, h, mi, tzinfo=tz).timestamp()
+    w = [["12:00", "14:00"]]
+    assert settings_mod.model_schedule_open(w, at(13, 0)) is True
+    assert settings_mod.model_schedule_open(w, at(11, 59)) is False
+    assert settings_mod.model_schedule_open(w, at(14, 0)) is False  # 上界开区间
+
+
+def test_model_schedule_open_cross_midnight():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Shanghai")
+    at = lambda h, mi: datetime(2026, 9, 10, h, mi, tzinfo=tz).timestamp()
+    w = [["22:00", "08:00"]]
+    assert settings_mod.model_schedule_open(w, at(23, 0)) is True
+    assert settings_mod.model_schedule_open(w, at(3, 0)) is True
+    assert settings_mod.model_schedule_open(w, at(8, 0)) is False
+    assert settings_mod.model_schedule_open(w, at(12, 0)) is False
+
+
+def test_model_schedule_open_empty_and_multi():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Shanghai")
+    at = lambda h, mi: datetime(2026, 9, 10, h, mi, tzinfo=tz).timestamp()
+    assert settings_mod.model_schedule_open([], at(12, 0)) is False
+    w = [["22:00", "08:00"], ["12:00", "14:00"]]
+    assert settings_mod.model_schedule_open(w, at(13, 0)) is True
+    assert settings_mod.model_schedule_open(w, at(16, 0)) is False
+
+
+def test_normalize_windows():
+    assert settings_mod.normalize_windows([["22:00", "08:00"], ["12:00", "14:00"]]) == \
+        [["22:00", "08:00"], ["12:00", "14:00"]]
+    # 非法 HH:MM / 零长度 / 结构错误一律丢弃
+    assert settings_mod.normalize_windows(
+        [["25:00", "08:00"], ["9:5", "10:00"], ["12:00", "12:00"], "x", ["a", "b"]]) == []
+    # 非 list 输入
+    assert settings_mod.normalize_windows(None) == []
+    # 超量截断到 8
+    assert len(settings_mod.normalize_windows(
+        [[f"0{i}:00", f"0{i}:30"] for i in range(1, 10)])) == 8
+
+
+def test_model_schedule_set_and_clear(env):
+    r = env.client.post("/ui/api/model-schedule",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "windows": [["22:00", "08:00"]]})
+    assert r.status_code == 200
+    assert r.json()["windows"] == [["22:00", "08:00"]]
+    assert env.state.model_schedules["fakeprov/fake-model"] == [["22:00", "08:00"]]
+    # 持久化格式：每键 {"windows": [...]}
+    saved = settings_mod.load_settings()["model_schedules"]
+    assert saved["fakeprov/fake-model"] == {"windows": [["22:00", "08:00"]]}
+    # models API 透出 schedule
+    fp = next(g for g in env.client.get("/ui/api/models").json()["groups"]
+              if g["id"] == "fakeprov")
+    assert next(m for m in fp["models"] if m["id"] == "fake-model")["schedule"]["windows"] \
+        == [["22:00", "08:00"]]
+    # 清空窗口 → 删除键
+    r = env.client.post("/ui/api/model-schedule",
+                        json={"provider": "fakeprov", "model": "fake-model", "windows": []})
+    assert r.status_code == 200
+    assert "fakeprov/fake-model" not in env.state.model_schedules
+
+
+def test_model_schedule_rejects_unknown(env):
+    r = env.client.post("/ui/api/model-schedule",
+                        json={"provider": "fakeprov", "model": "nope",
+                              "windows": [["22:00", "08:00"]]})
+    assert r.status_code == 400
+
+
+def test_scheduled_model_call_blocked_outside_window(env, monkeypatch):
+    # 设一个「此刻一定不在」的窗口：固定判定时刻为 12:00，窗口设 03:00~04:00
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    noon = datetime(2026, 9, 10, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    monkeypatch.setattr(settings_mod.time, "time", lambda: noon)
+    env.client.post("/ui/api/model-schedule",
+                    json={"provider": "fakeprov", "model": "fake-model",
+                          "windows": [["03:00", "04:00"]]})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"]["type"] == "model_scheduled"
+    # 改成覆盖此刻的窗口 → 放行
+    env.client.post("/ui/api/model-schedule",
+                    json={"provider": "fakeprov", "model": "fake-model",
+                          "windows": [["11:00", "13:00"]]})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+
+
+def test_disabled_takes_priority_over_schedule(env, monkeypatch):
+    # 同时停用 + 设一个覆盖此刻的开放窗口：停用优先，仍 403 model_disabled
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    noon = datetime(2026, 9, 10, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    monkeypatch.setattr(settings_mod.time, "time", lambda: noon)
+    env.client.post("/ui/api/model-schedule",
+                    json={"provider": "fakeprov", "model": "fake-model",
+                          "windows": [["11:00", "13:00"]]})
+    env.client.post("/ui/api/model-toggle",
+                    json={"provider": "fakeprov", "model": "fake-model", "disabled": True})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"]["type"] == "model_disabled"
 
 
 # ---------------------------------------------------------------------------

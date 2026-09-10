@@ -14,18 +14,23 @@ from buddy_proxy.state import (
     diagnostic,
     get_state,
 )
+from buddy_proxy import settings as settings_mod
 
 from .observability import _instrument
 from .provider import _default_codebuddy
 
 
 def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
-    """命中管理页停用的 (provider, model) 组合时，直接返回 403 拒绝转发。"""
-    disabled = getattr(state, "disabled_models", None)
-    if not disabled or not isinstance(model_id, str):
+    """命中管理页停用或「不在可用时段」的 (provider, model) 组合时返回 403 拒绝转发。
+
+    判定优先级：永久停用（disabled_models）> 限时窗口（model_schedules）。
+    两者都未命中才放行。
+    """
+    if not isinstance(model_id, str):
         return
     key = f"{provider_id}/{model_id}"
-    if key in disabled:
+    disabled = getattr(state, "disabled_models", None)
+    if disabled and key in disabled:
         diagnostic("model_disabled_reject", provider=provider_id, model=model_id)
         raise HTTPException(
             status_code=403,
@@ -33,6 +38,20 @@ def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
                 "error": {
                     "message": f"模型 {key} 已被停用，请在管理页 /ui 重新启用后再调用",
                     "type": "model_disabled",
+                }
+            },
+        )
+    schedules = getattr(state, "model_schedules", None)
+    windows = schedules.get(key) if isinstance(schedules, dict) else None
+    if windows is not None and not settings_mod.model_schedule_open(windows):
+        diagnostic("model_scheduled_reject", provider=provider_id, model=model_id)
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": {
+                    "message": (f"模型 {key} 当前不在可用时段（开放："
+                                f"{settings_mod.format_windows(windows)}），窗口外调用被拒绝"),
+                    "type": "model_scheduled",
                 }
             },
         )

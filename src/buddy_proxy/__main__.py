@@ -262,6 +262,24 @@ def main():
     if disabled_models:
         print(f"[Disabled Models] {len(disabled_models)} 个已停用: {', '.join(sorted(disabled_models))}")
 
+    # 限时可用模型：settings.json 的 {"provider/model": {"windows": [["HH:MM","HH:MM"],...]}}，
+    # 窗口外拒绝转发。键规范化 + 窗口校验，非法窗口丢弃、空窗口不入表。
+    model_schedules: dict[str, list] = {}
+    raw_schedules = saved_settings.get("model_schedules")
+    if isinstance(raw_schedules, dict):
+        for raw_key, value in raw_schedules.items():
+            if not (isinstance(raw_key, str) and raw_key.strip()):
+                continue
+            key = (settings_mod.model_key(*raw_key.split("/", 1)) if "/" in raw_key
+                   else settings_mod.model_key("codebuddy", raw_key))
+            windows = value.get("windows") if isinstance(value, dict) else value
+            normalized = settings_mod.normalize_windows(windows)
+            if normalized:
+                model_schedules[key] = normalized
+    if model_schedules:
+        print(f"[Model Schedules] {len(model_schedules)} 个限时模型: "
+              f"{', '.join(sorted(model_schedules))}")
+
     metrics = MetricsCollector(args.log_file.parent / "metrics.jsonl")
 
     _state.proxy_state = ProxyState(
@@ -277,6 +295,7 @@ def main():
         default_provider=args.default_provider,
         default_model=default_model or None,
         disabled_models=disabled_models,
+        model_schedules=model_schedules,
         metrics=metrics,
     )
     # 打卡管理器要引用 state 本身，构造后挂上

@@ -185,6 +185,7 @@ async def ui_models(request: Request):
 
     default_model = getattr(state, "default_model", None) or ""
     disabled = getattr(state, "disabled_models", set()) or set()
+    schedules = getattr(state, "model_schedules", {}) or {}
     for group in groups:
         for m in group["models"]:
             st = stat_map.get((group["id"], m["id"])) or {}
@@ -194,8 +195,16 @@ async def ui_models(request: Request):
                 "avg_ms": st.get("avg_ms", 0),
                 "last_ts": st.get("last_ts", 0),
             }
-            m["is_default"] = default_model in (f"{group['id']}/{m['id']}", m["id"])
-            m["disabled"] = f"{group['id']}/{m['id']}" in disabled
+            key = f"{group['id']}/{m['id']}"
+            m["is_default"] = default_model in (key, m["id"])
+            m["disabled"] = key in disabled
+            # 限时窗口：有配置则附窗口列表 + 当前是否在开放时段，供前端渲染徽标/编辑器
+            windows = schedules.get(key) if isinstance(schedules, dict) else None
+            if windows:
+                m["schedule"] = {
+                    "windows": windows,
+                    "open": settings_mod.model_schedule_open(windows),
+                }
     return {"groups": groups, "default_model": default_model}
 
 
@@ -469,6 +478,43 @@ async def ui_model_toggle(request: Request):
     state.disabled_models = current
     settings_mod.save_settings({"disabled_models": sorted(current)})
     return {"ok": True, "model": key, "disabled": want_disabled}
+
+
+@app.post("/ui/api/model-schedule")
+async def ui_model_schedule(request: Request):
+    """设置/清除模型的限时可用窗口。
+
+    请求体：``{"provider": "traepat", "model": "glm-5.3",
+              "windows": [["22:00","08:00"], ["12:00","14:00"]]}``
+    窗口经 ``normalize_windows`` 校验；``windows`` 为空列表或缺省 → 删除该键
+    （模型恢复完全放开，不受时段限制）。持久化到 settings.json 并热更新运行态。
+    """
+    _ensure_local(request)
+    state = get_state()
+    body = await request.json()
+    provider = (body.get("provider") or "").strip()
+    model = (body.get("model") or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
+    _validate_model(provider or "codebuddy", model, state)
+
+    key = settings_mod.model_key(provider, model)
+    windows = settings_mod.normalize_windows(body.get("windows"))
+    current = getattr(state, "model_schedules", {}) or {}
+    if not isinstance(current, dict):
+        current = dict(current)
+
+    if windows:
+        current[key] = windows
+    else:
+        current.pop(key, None)
+
+    state.model_schedules = current
+    # 持久化格式与 __main__ 加载对齐：每键存 {"windows": [...]}
+    settings_mod.save_settings(
+        {"model_schedules": {k: {"windows": v} for k, v in sorted(current.items())}})
+    return {"ok": True, "model": key, "windows": windows,
+            "open": settings_mod.model_schedule_open(windows) if windows else None}
 
 
 @app.post("/ui/api/test")
