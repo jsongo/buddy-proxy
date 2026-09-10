@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./proxy.sh start    [-p PORT] [-H HOST]     # 后台启动 (默认 0.0.0.0:8787，局域网可访问)
-#   ./proxy.sh stop                              # 停止
+#   ./proxy.sh stop     [-p PORT] [-H HOST]     # 停止（非默认端口/host 需带同样参数）
 #   ./proxy.sh restart  [-p PORT] [-H HOST]     # 重启
 #   ./proxy.sh status                            # 查看状态
 #   ./proxy.sh logs                              # 跟踪日志
@@ -147,6 +147,7 @@ cmd_start() {
 }
 
 cmd_stop() {
+    parse_common "$@"
     local pid
     pid="$(read_pid)"
     local port_pid
@@ -269,7 +270,7 @@ cmd_login() {
 
 case "${1:-}" in
     start)   shift; cmd_start "$@" ;;
-    stop)    cmd_stop ;;
+    stop)    shift; cmd_stop "$@" ;;
     restart) shift; cmd_restart "$@" ;;
     status)  cmd_status ;;
     logs)    cmd_logs ;;

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -758,3 +759,41 @@ def test_zcode_retries_transient_disconnect():
                                   "messages": [{"role": "user", "content": "hi"}]}, "openai"))
     assert calls["n"] == 2
     assert b"pong" in resp.body
+
+
+# ---------------------------------------------------------------------------
+# .env 多行 JSON 解析：串内括号不计深度（token 含 } 不能截断值）
+# ---------------------------------------------------------------------------
+def test_load_dotenv_multiline_json_with_brace_in_string(tmp_path, monkeypatch):
+    """TRAE_PAT_BEARER_PROFILES 值的 bearer 串里含 } 时，旧词法会提前判闭合
+    截断 JSON → json.loads 失败整个 PAT 通道 503。词法必须串感知。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# 注释行\n"
+        "PLAIN=value\n"
+        'TRAE_PAT_BEARER_PROFILES=[\n'
+        '  {"id": "a", "bearer": "head}tail{mix", "priority": 0},\n'
+        '  {"id": "b", "bearer": "plain", "priority": 1}\n'
+        ']\n'
+        "AFTER=still-parsed\n",
+        encoding="utf-8")
+
+    saved = {k: os.environ.get(k) for k in
+             ("TRAE_PAT_BEARER_PROFILES", "PLAIN", "AFTER")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        m._load_dotenv(env_file)
+        assert os.environ["PLAIN"] == "value"
+        assert os.environ["AFTER"] == "still-parsed"
+        profiles = json.loads(os.environ["TRAE_PAT_BEARER_PROFILES"])
+        # 串内的 } { 没有截断值：两个账号都完整解析
+        assert [p["id"] for p in profiles] == ["a", "b"]
+        assert profiles[0]["bearer"] == "head}tail{mix"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
