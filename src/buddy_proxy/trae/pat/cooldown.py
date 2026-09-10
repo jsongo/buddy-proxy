@@ -104,8 +104,9 @@ def _raise_channel_exhausted(quota_class: str) -> None:
     retry = max(0, int(until - time.time()))
     raise HTTPException(
         status_code=429,
-        detail=(f"PAT {quota_class} 租户级日额度已耗尽（4031，全部账号共享同一池、"
-                f"切号无效，次日 00:00 重置），{retry}s 后自动重探；期间可改用 trae/ 或 codebuddy/ 通道"))
+        detail=(f"PAT {quota_class} 本轮所有可用账号均返回 4031（额度耗尽），"
+                f"已暂停探测，{retry}s 后自动重试；"
+                f"期间可改用 trae/ 或 codebuddy/ 通道"))
 
 
 def _record_quota_code_hit(cache_key: str, quota_class: str) -> int:
@@ -263,19 +264,32 @@ def _ordered_available_profiles(quota_class: str) -> tuple[PatProfile, ...]:
 
 
 def _clear_standard_cooldowns() -> int:
-    """一次性清理被旧逻辑误写的账号级 ``standard`` 冷却。
+    """定向清理旧 4031 逻辑误写的账号级 ``standard`` 次日级冷却。
 
     历史上 4031（通道/租户级日额度耗尽）会同时触发账号级 ``_mark_cooldown``，
     短窗口内一次 failover 扫描就把多个账号的 ``standard`` 冷却升级到次日。改为
     仅通道级快速失败后，这些残留冷却需要清掉，否则用户要等到次日或手改状态文件。
 
-    幂等：账号无 ``standard`` 冷却时不写盘。返回被清理的账号数。
+    只清 ``until`` 距今超过 1 小时的条目：旧误写全是「冷却到次日」形态，而现行
+    ``_mark_quota_exhausted``/``_mark_cooldown`` 首档只写 5 分钟短冷却——不能把
+    刚生效的正常限流冷却一并清空（否则 keeper 启动即把仍被限流的账号放出去）。
+    难以与现行升级冷却（同为次日级、罕见且撞码会重新冷却）区分，接受极小误伤。
+
+    幂等：无可清条目时不写盘。返回被清理的账号数。跨进程一次性由 keeper 的
+    迁移标记文件控制（见 ``keeper._migrate_standard_cooldowns_once``）。
     """
+    now = time.time()
     cleared = 0
     for profile in ensure_pat_config():
         state = _account_state(profile.cache_key)
         cooldowns = state.get("cooldowns")
-        if not (isinstance(cooldowns, dict) and cooldowns.get("standard")):
+        if not isinstance(cooldowns, dict):
+            continue
+        try:
+            until = float(cooldowns.get("standard") or 0)
+        except (TypeError, ValueError):
+            continue
+        if until - now <= 3600:  # 短冷却（≤5min 档）是现行正常状态，不清
             continue
 
         def store(current: dict[str, Any]) -> None:
@@ -286,6 +300,6 @@ def _clear_standard_cooldowns() -> int:
         _mutate_account(profile.cache_key, store)
         cleared += 1
     if cleared:
-        log.info("PAT 清理误写的账号级 standard 冷却：%d 个账号", cleared)
+        log.info("PAT 清理误写的账号级 standard 次日级冷却：%d 个账号", cleared)
     return cleared
 

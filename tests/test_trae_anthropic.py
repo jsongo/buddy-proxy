@@ -258,6 +258,87 @@ def test_stream_converter_thinking_blocks():
     assert names[-1] == "message_stop"
 
 
+# ---------------------------------------------------------------------------
+# _wrap_anthropic_stream：SSE 注释透传 / 中途错误收尾 / tool 分片次序
+# ---------------------------------------------------------------------------
+def _openai_sse_stream(chunks: list[str]):
+    """模拟 TraeProvider._stream 的 OpenAI chunk SSE 输出（含注释行）。"""
+    for piece in chunks:
+        yield piece
+
+
+def test_anthropic_wrapper_passes_heartbeat_comments_through():
+    """: heartbeat 注释必须透传，否则 Claude Code 在长思考期收不到任何字节，
+    会按自己的 per-chunk 读超时误判断流（正是心跳机制要防的失败）。"""
+    from buddy_proxy.trae.sse import _wrap_anthropic_stream
+
+    stream = _openai_sse_stream([
+        ': heartbeat\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {"content": "答"}}]}) + '\n\n',
+        ': heartbeat\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}) + '\n\n',
+        'data: [DONE]\n\n',
+    ])
+    out = "".join(_wrap_anthropic_stream(stream, "glm-5.2"))
+    # 心跳注释原样出现在最终 SSE 流里
+    assert ": heartbeat" in out
+    # 且不影响正常事件序列
+    assert "message_start" in out
+    assert '"text_delta"' in out and "答" in out
+    assert "message_stop" in out
+
+
+def test_anthropic_wrapper_midstream_error_closes_open_blocks():
+    """内容已开始后才冒错误 chunk：先补 content_block_stop 再发 error，
+    不留悬空块、不发 message_stop（流已失败，不能伪装正常结束）。"""
+    from buddy_proxy.trae.sse import _wrap_anthropic_stream
+
+    stream = _openai_sse_stream([
+        'data: ' + json.dumps({"choices": [{"delta": {"content": "先给一半"}}]}) + '\n\n',
+        'data: ' + json.dumps({"error": {"message": "upstream boom", "code": 500}}) + '\n\n',
+    ])
+    out = "".join(_wrap_anthropic_stream(stream, "glm-5.2"))
+    events = [line[7:] for line in out.splitlines() if line.startswith("event: ")]
+    assert events == [
+        "message_start",
+        "content_block_start",   # text 块
+        "content_block_delta",
+        "content_block_stop",    # 错误前收尾，不留悬空块
+        "error",
+    ]
+    assert "upstream boom" in out
+
+
+def test_anthropic_wrapper_tool_args_before_name_buffered():
+    """tool_calls 分片 id+arguments 先到、name 后到：args 必须缓冲到
+    content_block_start 之后才发 input_json_delta，不能产出无 start 的 delta。"""
+    from buddy_proxy.trae.sse import _wrap_anthropic_stream
+
+    stream = _openai_sse_stream([
+        'data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1",
+             "function": {"arguments": "{\"city\""}}]}}]}) + '\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"name": "get_weather"}}]}}]}) + '\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": ": \"北京\"}"}}]}}]}) + '\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}) + '\n\n',
+        'data: [DONE]\n\n',
+    ])
+    out = "".join(_wrap_anthropic_stream(stream, "glm-5.2"))
+    events = [line[7:] for line in out.splitlines() if line.startswith("event: ")]
+    # start 必须先于任何 delta
+    assert events.index("content_block_start") < events.index("content_block_delta")
+    # 参数完整：先缓冲的后到的分片按序拼接
+    deltas = [json.loads(line[6:])["delta"]["partial_json"]
+              for line in out.splitlines()
+              if line.startswith("data: ") and "partial_json" in line]
+    assert "".join(deltas) == '{"city": "北京"}'
+    # 工具块收尾 + tool_use 结束原因
+    assert "content_block_stop" in events
+    assert '"stop_reason": "tool_use"' in out or "'stop_reason': 'tool_use'" in repr(out)
+
+
 def test_stream_converter_usage_includes_input_tokens():
     """finish() 的 message_delta usage 应同时带 input_tokens 与 output_tokens。"""
     conv = AnthropicStreamConverter("glm-5.2")

@@ -467,8 +467,7 @@ class TraeProvider(BaseProvider):
                     except (TypeError, ValueError):
                         usage = None
                 elif event == "done":
-                    if incremental:
-                        break
+                    done_seen = True
                     break
             if not semantic_seen:
                 raise HTTPException(status_code=502, detail="trae stream returned no content")

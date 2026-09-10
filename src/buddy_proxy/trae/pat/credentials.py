@@ -66,6 +66,12 @@ def _exchange(bearer: str) -> tuple[str, str, float]:
     result = payload.get("Result") or payload.get("result") or {}
     token = result.get("Token") or ""
     uid = result.get("UserID") or result.get("userid") or ""
+    # 收尾空白必须清掉：带尾随换行/空格的 token 直接进 Authorization: Bearer
+    # 会构成非法头被上游拒（历史上一直 strip，重构时漏掉了）。
+    if isinstance(token, str):
+        token = token.strip()
+    if isinstance(uid, str):
+        uid = uid.strip()
     if not isinstance(token, str) or not token:
         raise HTTPException(status_code=502, detail="PAT 第二步交换未返回 token")
     if not isinstance(uid, str):

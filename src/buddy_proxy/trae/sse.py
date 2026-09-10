@@ -144,6 +144,13 @@ def _wrap_anthropic_stream(
     for piece in openai_stream:
         for line in piece.splitlines():
             line = line.strip()
+            if line.startswith(":"):
+                # SSE 注释行（上游用 ": heartbeat" 续命）：原样透传，喂饱
+                # 下游 Anthropic 客户端（Claude Code）的 per-chunk 读超时计时器。
+                # 不透传的话长时思考期（首字可迟至 TRAE_SEMANTIC_TIMEOUT）下游
+                # 收不到任何字节会误判断流而中止——正是心跳要防的失败。
+                yield line + "\n\n"
+                continue
             if not line.startswith("data:"):
                 continue
             data = line[5:].strip()
@@ -160,6 +167,10 @@ def _wrap_anthropic_stream(
                 code = err.get("code")
                 if code is not None and str(code) not in msg:
                     msg = f"{msg} (code: {code})"
+                # 若已产出内容（有块处于打开态），先补 content_block_stop 收尾，
+                # 否则严格客户端会因块悬空而卡死；再发 error 并结束。
+                for event_name, payload in converter.close_open_blocks():
+                    yield _anthropic_sse(event_name, payload)
                 yield _anthropic_sse("error", {
                     "type": "error",
                     "error": {

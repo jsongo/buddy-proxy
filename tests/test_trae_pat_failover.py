@@ -851,6 +851,31 @@ def test_stream_empty_success_all_accounts_raises_502(monkeypatch):
     assert "no content" in str(caught.value.detail)
 
 
+def test_stream_empty_success_budget_covers_every_account(monkeypatch):
+    """≥3 账号时前几个账号各撞一次空响应假成功，预算必须覆盖全部账号——
+    健康的后续账号要能被尝试，不能被全局计数提前 502 掐死。"""
+    monkeypatch.setenv(
+        "TRAE_PAT_BEARER_PROFILES",
+        _profiles(
+            {"id": "a", "bearer": "bearer-a", "priority": 0},
+            {"id": "b", "bearer": "bearer-b", "priority": 1},
+            {"id": "c", "bearer": "bearer-c", "priority": 2},
+        ),
+    )
+    _install_credentials(monkeypatch)
+    calls: list[str] = []
+
+    def source(_url, _payload, credentials, _stop):
+        calls.append(credentials.uid)
+        # a、b 各回一次空响应假成功；c 正常。
+        return iter(_GOOD_STREAM if credentials.uid == "uid-c" else _EMPTY_OK_STREAM)
+
+    monkeypatch.setattr(pat, "_stream_profile_events", source)
+    events = list(pat.stream_pat_native([], "standard-model"))
+    assert ("output", {"response": "hello"}) in events
+    assert calls == ["uid-a", "uid-b", "uid-c"]
+
+
 def test_stream_semantic_event_prevents_retry(monkeypatch):
     """已产出语义内容后收到空 done：绝不重放（防重复计费），正常收尾。"""
     _configure_two(monkeypatch)
@@ -1296,10 +1321,11 @@ def test_standard_pool_not_returned_when_never_4031(monkeypatch):
 
 
 def test_clear_standard_cooldowns_idempotent(monkeypatch):
-    """迁移清理：删除旧逻辑误写的账号级 standard 冷却，advanced 保留；二次调用无副作用。"""
+    """迁移清理：只删旧逻辑误写的次日级 standard 冷却；现行 5 分钟短冷却与
+    advanced 池都保留；二次调用无副作用。"""
     _configure_two(monkeypatch)
     profiles = pat.ensure_pat_config()
-    # 手动写入一个次日级 standard 冷却 + 一个 advanced 冷却
+    # 账号0：次日级 standard 冷却（旧误写形态）+ advanced 冷却
     future = time.time() + 20 * 3600
 
     def store(state):
@@ -1308,12 +1334,21 @@ def test_clear_standard_cooldowns_idempotent(monkeypatch):
         cds["advanced"] = future
 
     pat._mutate_account(profiles[0].cache_key, store)
+    # 账号1：现行 5 分钟短冷却（_mark_quota_exhausted 形态），不得被误清
+    short = time.time() + 300
+
+    def store_short(state):
+        state.setdefault("cooldowns", {})["standard"] = short
+
+    pat._mutate_account(profiles[1].cache_key, store_short)
     cleared = pat._clear_standard_cooldowns()
     assert cleared == 1
     state = pat._account_state(profiles[0].cache_key)
     assert "standard" not in state["cooldowns"]
     assert "advanced" in state["cooldowns"]  # 只清 standard
-    # 幂等：已无 standard，二次调用清理 0 个
+    # 现行短冷却保留（刚生效的正常限流不能被迁移清空）
+    assert pat._account_state(profiles[1].cache_key)["cooldowns"]["standard"] == short
+    # 幂等：已无可清条目，二次调用清理 0 个
     assert pat._clear_standard_cooldowns() == 0
 
 
