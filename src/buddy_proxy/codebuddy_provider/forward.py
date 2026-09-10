@@ -28,7 +28,10 @@ def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
     """
     if not isinstance(model_id, str):
         return
-    key = f"{provider_id}/{model_id}"
+    # 键必须与配置加载/UI 保存同口径（settings.model_key）：legacy 的
+    # workbuddy/* 归一成 codebuddy/*，否则 workbuddy 进来的请求查不到已保存
+    # 的停用/时段配置，窗口外照样放行。
+    key = settings_mod.model_key(provider_id, model_id)
     disabled = getattr(state, "disabled_models", None)
     if disabled and key in disabled:
         diagnostic("model_disabled_reject", provider=provider_id, model=model_id)

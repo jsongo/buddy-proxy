@@ -919,3 +919,22 @@ def test_load_dotenv_multiline_json_with_brace_in_string(tmp_path, monkeypatch):
             else:
                 os.environ[k] = v
 
+def test_reject_if_disabled_uses_model_key_alias(env, monkeypatch):
+    """停用/时段键经 settings.model_key 归一：legacy workbuddy/* 进来的请求
+    也要命中以 codebuddy/* 保存的配置，不能因别名拼键而漏拦。"""
+    from buddy_proxy.codebuddy_provider.forward import _reject_if_disabled
+
+    state = env.state
+    # 窗口全闭 → workbuddy 别名请求必须被拦
+    state.model_schedules = {"codebuddy/some-model": []}
+    state.disabled_models = set()
+    with pytest.raises(HTTPException) as caught:
+        _reject_if_disabled(state, "workbuddy", "some-model")
+    assert caught.value.status_code == 403
+
+    # 同样适用于停用集合
+    state.model_schedules = {}
+    state.disabled_models = {"codebuddy/other-model"}
+    with pytest.raises(HTTPException) as caught:
+        _reject_if_disabled(state, "workbuddy", "other-model")
+    assert caught.value.status_code == 403
