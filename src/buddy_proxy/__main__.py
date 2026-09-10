@@ -71,20 +71,46 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
     pending_value: list[str] = []
     openers, closers = "[{", "]}"
     depth = 0
+    in_string = False  # 是否处于 JSON 双引号字符串内（跨行保持）
+    escaped = False     # 上一个字符是否为字符串内的反斜杠转义
+
+    def scan_depth(text: str, depth: int) -> int:
+        """按 JSON 词法累计括号深度：只数字符串**外**的 []{}，忽略串内的括号。
+
+        token（如 bearer）值里含 } / { 时不再误判闭合；转义 \\" 不当作串结束。
+        """
+        nonlocal in_string, escaped
+        for ch in text:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch in openers:
+                depth += 1
+            elif ch in closers:
+                depth -= 1
+        return depth
 
     def flush() -> None:
-        nonlocal pending_key, pending_value, depth
+        nonlocal pending_key, pending_value, depth, in_string, escaped
         if pending_key is not None:
             pairs.append((pending_key, "\n".join(pending_value)))
         pending_key, pending_value, depth = None, [], 0
+        in_string, escaped = False, False
 
     for line in f.read_text("utf-8").splitlines():
         line = line.strip()
         if pending_key is not None:
+            # 续行原样收集（串内可能含 #，不能按注释跳过）；深度按词法累计。
             pending_value.append(line)
-            depth += sum(line.count(ch) for ch in openers)
-            depth -= sum(line.count(ch) for ch in closers)
-            if depth <= 0:
+            depth = scan_depth(line, depth)
+            if depth <= 0 and not in_string:
                 flush()
             continue
         if not line or line.startswith("#") or "=" not in line:
@@ -95,8 +121,8 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
             value = value[1:-1]
         if value and value[0] in openers:
             pending_key, pending_value = key, [value]
-            depth = sum(value.count(ch) for ch in openers) - sum(value.count(ch) for ch in closers)
-            if depth <= 0:
+            depth = scan_depth(value, 0)
+            if depth <= 0 and not in_string:
                 flush()
             continue
         if key:
