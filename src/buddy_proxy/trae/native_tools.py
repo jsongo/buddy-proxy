@@ -23,6 +23,7 @@ from .config import (
     _NATIVE_FUNCTION,
     _WORK_CHAT_MAX_ATTEMPTS,
     _map_model,
+    TRAE_NONSTREAM_MAX_S,
 )
 from .credentials import _auth, _build_headers, _load_work_cred, _work_headers
 from .sse import _parse_sse
@@ -156,6 +157,28 @@ def _build_native_body(
     return body
 
 
+class _NonStreamTimeout(TimeoutError):
+    """非流式整读超过总时长上限（上游滴字拖死），调用方转 504、不重试。"""
+
+
+def _read_all_bounded(response, max_s: float = TRAE_NONSTREAM_MAX_S) -> str:
+    """整读响应体，超过 ``max_s`` 总时长即中断。
+
+    urlopen 的 timeout 只约束单次 socket 阻塞；上游慢速滴字时可被无限拖延。
+    逐块读 + 检查墙钟，到点抛 _NonStreamTimeout（与 PAT 通道同款防护）。
+    """
+    deadline = time.monotonic() + max_s
+    parts: list[bytes] = []
+    while True:
+        if time.monotonic() > deadline:
+            raise _NonStreamTimeout(f"非流式响应超过 {max_s}s 未完成")
+        part = response.read1(65536)
+        if not part:
+            break
+        parts.append(part)
+    return b"".join(parts).decode("utf-8", errors="replace")
+
+
 def _send_native_chat(
     native_msgs: list[dict[str, Any]], model: str, stream: bool,
     tools: list[dict[str, Any]] | None,
@@ -166,14 +189,8 @@ def _send_native_chat(
     _native_rejected 判定回落，不在这里抛——文本协议兜底是对 4001 的
     正确响应，抛异常会跳过兜底。
     """
-    # PAT 扩展目录模型（配置了 TRAE_PAT_BEARER 时启用）：目录与默认网关不重叠，
-    # 直接走独立网关，不走下方 Work/IDE 凭证路径，也不参与 4001 回落。
-    from .pat import is_pat_model, pat_enabled, send_pat_native
-    if is_pat_model(model):
-        if not pat_enabled():
-            raise HTTPException(status_code=503, detail=(
-                f"模型 {model} 需要启用 PAT 通道：在 .env 配置 TRAE_PAT_BEARER（见 .token.md）"))
-        return send_pat_native(native_msgs, model, stream, tools)
+    # PAT provider 在 TraePatProvider._send_native_request 中显式分流；这里始终是
+    # 个人 Work/IDE 通道。不能只按模型名判断，否则两套目录重叠时会串账号。
     trae_model = _map_model(model)
     body = _build_native_body(native_msgs, trae_model, stream, tools)
     work = _load_work_cred()
@@ -193,7 +210,7 @@ def _send_native_chat(
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
-                return resp.read().decode("utf-8", errors="replace")
+                return _read_all_bounded(resp)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")[:2000]
             if e.code == 400:
@@ -201,6 +218,11 @@ def _send_native_chat(
                 # 判定回落（文本协议兜底是对 4001 的正确响应）
                 return detail or '{"code":4001}'
             raise HTTPException(status_code=502, detail=f"trae native chat failed: {e.code} {detail}")
+        except _NonStreamTimeout:
+            # 总时长到点主动插断：不进下面的瞬态重试（3 × 上限会把挂死放大三倍）。
+            raise HTTPException(
+                status_code=504,
+                detail=f"trae 上游非流式响应超过 {TRAE_NONSTREAM_MAX_S}s 未完成，已主动断开") from None
         except Exception as e:
             # 与 Work 通道同款：HTTPError 之外视为瞬态（IncompleteRead/断连/超时），
             # 同端点退避重试；4xx 参数拒绝不走这里（上面已返回/抛出）

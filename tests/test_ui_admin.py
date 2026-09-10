@@ -6,12 +6,13 @@
 - MetricsCollector：聚合、按模型统计、JSONL 落盘重启恢复、流式 chunk 计数
 
 运行：
-    .venv/bin/python -m pytest test_ui_admin.py -v
+    .venv/bin/python -m pytest tests/test_ui_admin.py -v
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -85,6 +86,8 @@ def _make_state(providers, tmp_path):
         verbose_llm=False,
         default_provider="codebuddy",
         default_model=None,
+        disabled_models=set(),
+        model_schedules={},
         metrics=MetricsCollector(tmp_path / "metrics.jsonl"),
         write_log=mock.MagicMock(),
         ensure_auth=mock.MagicMock(),
@@ -143,7 +146,8 @@ def test_models_grouped_by_provider(env):
 def test_stats_empty(env):
     body = env.client.get("/ui/api/stats").json()
     assert body["models"] == []
-    assert len(body["daily"]) == 14
+    assert body["model_daily"] == []
+    assert len(body["daily"]) == 30
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +184,183 @@ def test_default_model_fills_missing_model_field(env):
     assert r.status_code == 200
     # 前缀被剥掉后转发给 provider
     assert env.fake.last_body["model"] == "fake-model"
+
+
+# ---------------------------------------------------------------------------
+# 模型停用/启用
+# ---------------------------------------------------------------------------
+def test_model_toggle_disable_and_enable(env):
+    # 停用
+    r = env.client.post("/ui/api/model-toggle",
+                        json={"provider": "fakeprov", "model": "fake-model", "disabled": True})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "model": "fakeprov/fake-model", "disabled": True}
+    assert "fakeprov/fake-model" in env.state.disabled_models
+    # 落盘
+    assert settings_mod.load_settings()["disabled_models"] == ["fakeprov/fake-model"]
+    # /ui/api/models 反映停用标记
+    models = env.client.get("/ui/api/models").json()["groups"]
+    fp = next(g for g in models if g["id"] == "fakeprov")
+    assert next(m for m in fp["models"] if m["id"] == "fake-model")["disabled"] is True
+
+    # 启用
+    r = env.client.post("/ui/api/model-toggle",
+                        json={"provider": "fakeprov", "model": "fake-model", "disabled": False})
+    assert r.status_code == 200 and r.json()["disabled"] is False
+    assert "fakeprov/fake-model" not in env.state.disabled_models
+
+
+def test_model_toggle_defaults_to_flip(env):
+    r1 = env.client.post("/ui/api/model-toggle",
+                         json={"provider": "fakeprov", "model": "fake-model"})
+    assert r1.json()["disabled"] is True
+    r2 = env.client.post("/ui/api/model-toggle",
+                         json={"provider": "fakeprov", "model": "fake-model"})
+    assert r2.json()["disabled"] is False
+
+
+def test_model_toggle_rejects_unknown(env):
+    r = env.client.post("/ui/api/model-toggle",
+                        json={"provider": "fakeprov", "model": "nope", "disabled": True})
+    assert r.status_code == 400
+
+
+def test_disabled_model_call_fails(env):
+    env.client.post("/ui/api/model-toggle",
+                    json={"provider": "fakeprov", "model": "fake-model", "disabled": True})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403
+    assert "停用" in json.dumps(r.json(), ensure_ascii=False)
+    # 启用后恢复正常
+    env.client.post("/ui/api/model-toggle",
+                    json={"provider": "fakeprov", "model": "fake-model", "disabled": False})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 限时可用时段
+# ---------------------------------------------------------------------------
+def test_model_schedule_open_same_day():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Shanghai")
+    at = lambda h, mi: datetime(2026, 9, 10, h, mi, tzinfo=tz).timestamp()
+    w = [["12:00", "14:00"]]
+    assert settings_mod.model_schedule_open(w, at(13, 0)) is True
+    assert settings_mod.model_schedule_open(w, at(11, 59)) is False
+    assert settings_mod.model_schedule_open(w, at(14, 0)) is False  # 上界开区间
+
+
+def test_model_schedule_open_cross_midnight():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Shanghai")
+    at = lambda h, mi: datetime(2026, 9, 10, h, mi, tzinfo=tz).timestamp()
+    w = [["22:00", "08:00"]]
+    assert settings_mod.model_schedule_open(w, at(23, 0)) is True
+    assert settings_mod.model_schedule_open(w, at(3, 0)) is True
+    assert settings_mod.model_schedule_open(w, at(8, 0)) is False
+    assert settings_mod.model_schedule_open(w, at(12, 0)) is False
+
+
+def test_model_schedule_open_empty_and_multi():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Shanghai")
+    at = lambda h, mi: datetime(2026, 9, 10, h, mi, tzinfo=tz).timestamp()
+    assert settings_mod.model_schedule_open([], at(12, 0)) is False
+    w = [["22:00", "08:00"], ["12:00", "14:00"]]
+    assert settings_mod.model_schedule_open(w, at(13, 0)) is True
+    assert settings_mod.model_schedule_open(w, at(16, 0)) is False
+
+
+def test_normalize_windows():
+    assert settings_mod.normalize_windows([["22:00", "08:00"], ["12:00", "14:00"]]) == \
+        [["22:00", "08:00"], ["12:00", "14:00"]]
+    # 非法 HH:MM / 零长度 / 结构错误一律丢弃
+    assert settings_mod.normalize_windows(
+        [["25:00", "08:00"], ["9:5", "10:00"], ["12:00", "12:00"], "x", ["a", "b"]]) == []
+    # 非 list 输入
+    assert settings_mod.normalize_windows(None) == []
+    # 超量截断到 8
+    assert len(settings_mod.normalize_windows(
+        [[f"0{i}:00", f"0{i}:30"] for i in range(1, 10)])) == 8
+
+
+def test_model_schedule_set_and_clear(env):
+    r = env.client.post("/ui/api/model-schedule",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "windows": [["22:00", "08:00"]]})
+    assert r.status_code == 200
+    assert r.json()["windows"] == [["22:00", "08:00"]]
+    assert env.state.model_schedules["fakeprov/fake-model"] == [["22:00", "08:00"]]
+    # 持久化格式：每键 {"windows": [...]}
+    saved = settings_mod.load_settings()["model_schedules"]
+    assert saved["fakeprov/fake-model"] == {"windows": [["22:00", "08:00"]]}
+    # models API 透出 schedule
+    fp = next(g for g in env.client.get("/ui/api/models").json()["groups"]
+              if g["id"] == "fakeprov")
+    assert next(m for m in fp["models"] if m["id"] == "fake-model")["schedule"]["windows"] \
+        == [["22:00", "08:00"]]
+    # 清空窗口 → 删除键
+    r = env.client.post("/ui/api/model-schedule",
+                        json={"provider": "fakeprov", "model": "fake-model", "windows": []})
+    assert r.status_code == 200
+    assert "fakeprov/fake-model" not in env.state.model_schedules
+
+
+def test_model_schedule_rejects_unknown(env):
+    r = env.client.post("/ui/api/model-schedule",
+                        json={"provider": "fakeprov", "model": "nope",
+                              "windows": [["22:00", "08:00"]]})
+    assert r.status_code == 400
+
+
+def test_scheduled_model_call_blocked_outside_window(env, monkeypatch):
+    # 设一个「此刻一定不在」的窗口：固定判定时刻为 12:00，窗口设 03:00~04:00
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    noon = datetime(2026, 9, 10, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    monkeypatch.setattr(settings_mod.time, "time", lambda: noon)
+    env.client.post("/ui/api/model-schedule",
+                    json={"provider": "fakeprov", "model": "fake-model",
+                          "windows": [["03:00", "04:00"]]})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"]["type"] == "model_scheduled"
+    # 改成覆盖此刻的窗口 → 放行
+    env.client.post("/ui/api/model-schedule",
+                    json={"provider": "fakeprov", "model": "fake-model",
+                          "windows": [["11:00", "13:00"]]})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+
+
+def test_disabled_takes_priority_over_schedule(env, monkeypatch):
+    # 同时停用 + 设一个覆盖此刻的开放窗口：停用优先，仍 403 model_disabled
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    noon = datetime(2026, 9, 10, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    monkeypatch.setattr(settings_mod.time, "time", lambda: noon)
+    env.client.post("/ui/api/model-schedule",
+                    json={"provider": "fakeprov", "model": "fake-model",
+                          "windows": [["11:00", "13:00"]]})
+    env.client.post("/ui/api/model-toggle",
+                    json={"provider": "fakeprov", "model": "fake-model", "disabled": True})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"]["type"] == "model_disabled"
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +447,18 @@ def test_metrics_persist_and_reload(tmp_path):
     # TTFT / 缓存 / 积分 在最近请求明细里
     rec = next(r for r in snap["recent"] if r["model"] == "glm-5.3")
     assert rec["ttft_ms"] == 45 and rec["cached_tokens"] == 3 and rec["credit"] == 0.5
+
+
+def test_metrics_record_account_and_default_empty(env):
+    # traepat 多账号：record 带 account，最近请求里可见；其它通道缺省为空串
+    env.state.metrics.record(provider="traepat", model="gpt-6", protocol="openai",
+                             status=200, duration_ms=10, account="primary")
+    env.state.metrics.record(provider="codebuddy", model="glm-5.3",
+                             status=200, duration_ms=10)
+    recent = env.state.metrics.snapshot()["recent"]
+    by_provider = {r["provider"]: r for r in recent}
+    assert by_provider["traepat"]["account"] == "primary"
+    assert by_provider["codebuddy"]["account"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +586,66 @@ def test_metrics_daily_series_zero_filled(tmp_path):
     assert snap["daily"][-1]["total"] == 1
     assert snap["daily"][0]["total"] == 0
     assert snap["daily"][-1]["by_provider"] == {"zcode": 1}
+
+
+def test_query_logs_pagination_reads_disk(tmp_path):
+    """服务端分页直接读磁盘日志，突破进程内 recent 200 条上限。"""
+    m = MetricsCollector(tmp_path / "metrics.jsonl")
+    for i in range(250):
+        m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=i)
+    # 磁盘上有全部 250 条（进程内 recent 只留 200）
+    r1 = m.query_logs(page=1, page_size=20)
+    assert r1["total"] == 250          # 全量，非 200 上限
+    assert r1["pages"] == 13           # ceil(250/20)
+    assert len(r1["rows"]) == 20
+    assert r1["from_disk"] is True
+    # 第 13 页可达（旧客户端分页最多 10 页）
+    r13 = m.query_logs(page=13, page_size=20)
+    assert len(r13["rows"]) == 10
+    # 越界页收敛到末页
+    assert m.query_logs(page=999, page_size=20)["page"] == 13
+    # 倒序：第 1 页首条 ts 最大
+    assert r1["rows"][0]["ts"] >= r1["rows"][-1]["ts"]
+
+
+def test_query_logs_date_range_filter(tmp_path):
+    """按 YYYY-MM-DD 范围过滤（含端点）。"""
+    m = MetricsCollector(tmp_path / "metrics.jsonl")
+    m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=1)
+    today = time.strftime("%Y-%m-%d", time.localtime())
+    # 未来日期起点：范围内应无记录
+    future = time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400))
+    assert m.query_logs(start=future)["total"] == 0
+    # 含今天：命中
+    assert m.query_logs(start=today, end=today)["total"] == 1
+
+
+def test_query_logs_memory_fallback():
+    """无落盘（log_path=None）时退回内存 recent。"""
+    m = MetricsCollector(None)
+    m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=1)
+    r = m.query_logs(page=1, page_size=20)
+    assert r["total"] == 1
+    assert r["from_disk"] is False
+
+
+def test_query_logs_provider_model_filter(tmp_path):
+    """通道/模型白名单过滤：组内 OR、组间 AND；空 = 不筛。"""
+    m = MetricsCollector(tmp_path / "metrics.jsonl")
+    m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=1)
+    m.record(provider="traepat", model="openrouter-3o-max", status=200, duration_ms=1)
+    m.record(provider="traepat", model="glm-4.7", status=200, duration_ms=1)
+
+    assert m.query_logs()["total"] == 3                          # 不筛
+    assert m.query_logs(providers=["traepat"])["total"] == 2     # 单通道
+    assert m.query_logs(providers=["zcode", "traepat"])["total"] == 3  # 通道 OR
+    assert m.query_logs(models=["glm-5.3", "glm-4.7"])["total"] == 2   # 模型 OR
+    assert m.query_logs(providers=["traepat"], models=["glm-4.7"])["total"] == 1  # AND
+    assert m.query_logs(providers=["traepat"], models=["glm-5.3"])["total"] == 0  # AND 无交集
+    assert m.query_logs(providers=["不存在的通道"])["total"] == 0
+    # 过滤结果内容正确（只含 traepat/glm-4.7）
+    rows = m.query_logs(providers=["traepat"], models=["glm-4.7"])["rows"]
+    assert all(r["provider"] == "traepat" and r["model"] == "glm-4.7" for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -628,3 +881,60 @@ def test_zcode_retries_transient_disconnect():
                                   "messages": [{"role": "user", "content": "hi"}]}, "openai"))
     assert calls["n"] == 2
     assert b"pong" in resp.body
+
+
+# ---------------------------------------------------------------------------
+# .env 多行 JSON 解析：串内括号不计深度（token 含 } 不能截断值）
+# ---------------------------------------------------------------------------
+def test_load_dotenv_multiline_json_with_brace_in_string(tmp_path, monkeypatch):
+    """TRAE_PAT_BEARER_PROFILES 值的 bearer 串里含 } 时，旧词法会提前判闭合
+    截断 JSON → json.loads 失败整个 PAT 通道 503。词法必须串感知。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# 注释行\n"
+        "PLAIN=value\n"
+        'TRAE_PAT_BEARER_PROFILES=[\n'
+        '  {"id": "a", "bearer": "head}tail{mix", "priority": 0},\n'
+        '  {"id": "b", "bearer": "plain", "priority": 1}\n'
+        ']\n'
+        "AFTER=still-parsed\n",
+        encoding="utf-8")
+
+    saved = {k: os.environ.get(k) for k in
+             ("TRAE_PAT_BEARER_PROFILES", "PLAIN", "AFTER")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        m._load_dotenv(env_file)
+        assert os.environ["PLAIN"] == "value"
+        assert os.environ["AFTER"] == "still-parsed"
+        profiles = json.loads(os.environ["TRAE_PAT_BEARER_PROFILES"])
+        # 串内的 } { 没有截断值：两个账号都完整解析
+        assert [p["id"] for p in profiles] == ["a", "b"]
+        assert profiles[0]["bearer"] == "head}tail{mix"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+def test_reject_if_disabled_uses_model_key_alias(env, monkeypatch):
+    """停用/时段键经 settings.model_key 归一：legacy workbuddy/* 进来的请求
+    也要命中以 codebuddy/* 保存的配置，不能因别名拼键而漏拦。"""
+    from buddy_proxy.codebuddy_provider.forward import _reject_if_disabled
+
+    state = env.state
+    # 窗口全闭 → workbuddy 别名请求必须被拦
+    state.model_schedules = {"codebuddy/some-model": []}
+    state.disabled_models = set()
+    with pytest.raises(HTTPException) as caught:
+        _reject_if_disabled(state, "workbuddy", "some-model")
+    assert caught.value.status_code == 403
+
+    # 同样适用于停用集合
+    state.model_schedules = {}
+    state.disabled_models = {"codebuddy/other-model"}
+    with pytest.raises(HTTPException) as caught:
+        _reject_if_disabled(state, "workbuddy", "other-model")
+    assert caught.value.status_code == 403

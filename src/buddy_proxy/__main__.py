@@ -57,21 +57,78 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
 
     默认路径锚定在仓库根（由模块位置推导，与启动时 CWD 无关）；
     也可用参数显式指定。用于 PAT 通道等本地私有配置（密钥/端点不入库，
-    见 .token.md）。格式：KEY=VALUE，支持 # 注释与引号包裹值。
+    见 .token.md）。格式：KEY=VALUE，支持 # 注释与引号包裹值；
+    VALUE 以 ``[``/``{`` 开头时连续收集后续行直到括号闭合，可写多行 JSON
+    （如 TRAE_PAT_BEARER_PROFILES）。
     注意：仅在 main() 里、所有模块 import 完成后调用——仅 import 期读取的
     环境变量不受本函数影响。
     """
     f = pathlib.Path(path) if path else _DEFAULT_ENV
     if not f.exists():
         return
+    pairs: list[tuple[str, str]] = []
+    pending_key: str | None = None
+    pending_value: list[str] = []
+    openers, closers = "[{", "]}"
+    depth = 0
+    in_string = False  # 是否处于 JSON 双引号字符串内（跨行保持）
+    escaped = False     # 上一个字符是否为字符串内的反斜杠转义
+
+    def scan_depth(text: str, depth: int) -> int:
+        """按 JSON 词法累计括号深度：只数字符串**外**的 []{}，忽略串内的括号。
+
+        token（如 bearer）值里含 } / { 时不再误判闭合；转义 \\" 不当作串结束。
+        """
+        nonlocal in_string, escaped
+        for ch in text:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch in openers:
+                depth += 1
+            elif ch in closers:
+                depth -= 1
+        return depth
+
+    def flush() -> None:
+        nonlocal pending_key, pending_value, depth, in_string, escaped
+        if pending_key is not None:
+            pairs.append((pending_key, "\n".join(pending_value)))
+        pending_key, pending_value, depth = None, [], 0
+        in_string, escaped = False, False
+
     for line in f.read_text("utf-8").splitlines():
         line = line.strip()
+        if pending_key is not None:
+            # 续行原样收集（串内可能含 #，不能按注释跳过）；深度按词法累计。
+            pending_value.append(line)
+            depth = scan_depth(line, depth)
+            if depth <= 0 and not in_string:
+                flush()
+            continue
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key, value = key.strip(), value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        if value and value[0] in openers:
+            pending_key, pending_value = key, [value]
+            depth = scan_depth(value, 0)
+            if depth <= 0 and not in_string:
+                flush()
+            continue
+        if key:
+            pairs.append((key, value))
+    flush()
+    for key, value in pairs:
         if key and key not in os.environ:
             os.environ[key] = value
 
@@ -188,6 +245,10 @@ def main():
             from buddy_proxy.trae.pat_provider import TraePatProvider
 
             trae_pat = TraePatProvider()
+            try:
+                trae_pat.ensure_auth()  # 本地配置校验 + 拉起后台凭证自愈循环
+            except HTTPException as exc:
+                logger.warning("trae PAT provider 认证未就绪: %s", exc.detail)
             providers[trae_pat.id] = trae_pat
             logger.info("Trae PAT provider enabled")
             print("[Trae PAT] Enabled (traepat/*)")
@@ -218,6 +279,33 @@ def main():
     if default_model:
         print(f"[Default Model] {default_model} (settings: {settings_mod.settings_path()})")
 
+    # 已停用模型：settings.json 持久化的 "provider/model" 列表，命中即拒绝转发
+    disabled_models = {
+        settings_mod.model_key(*k.split("/", 1)) if "/" in k else settings_mod.model_key("codebuddy", k)
+        for k in (saved_settings.get("disabled_models") or [])
+        if isinstance(k, str) and k.strip()
+    }
+    if disabled_models:
+        print(f"[Disabled Models] {len(disabled_models)} 个已停用: {', '.join(sorted(disabled_models))}")
+
+    # 限时可用模型：settings.json 的 {"provider/model": {"windows": [["HH:MM","HH:MM"],...]}}，
+    # 窗口外拒绝转发。键规范化 + 窗口校验，非法窗口丢弃、空窗口不入表。
+    model_schedules: dict[str, list] = {}
+    raw_schedules = saved_settings.get("model_schedules")
+    if isinstance(raw_schedules, dict):
+        for raw_key, value in raw_schedules.items():
+            if not (isinstance(raw_key, str) and raw_key.strip()):
+                continue
+            key = (settings_mod.model_key(*raw_key.split("/", 1)) if "/" in raw_key
+                   else settings_mod.model_key("codebuddy", raw_key))
+            windows = value.get("windows") if isinstance(value, dict) else value
+            normalized = settings_mod.normalize_windows(windows)
+            if normalized:
+                model_schedules[key] = normalized
+    if model_schedules:
+        print(f"[Model Schedules] {len(model_schedules)} 个限时模型: "
+              f"{', '.join(sorted(model_schedules))}")
+
     metrics = MetricsCollector(args.log_file.parent / "metrics.jsonl")
 
     _state.proxy_state = ProxyState(
@@ -232,6 +320,8 @@ def main():
         providers=providers,
         default_provider=args.default_provider,
         default_model=default_model or None,
+        disabled_models=disabled_models,
+        model_schedules=model_schedules,
         metrics=metrics,
     )
     # 打卡管理器要引用 state 本身，构造后挂上

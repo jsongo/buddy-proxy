@@ -8,7 +8,7 @@
 - 请求侧回归：system / tools / tool_result 经 anthropic_to_chat 正确转成 chat 请求
 
 运行：
-    .venv/bin/python -m pytest test_trae_anthropic.py -v
+    .venv/bin/python -m pytest tests/test_trae_anthropic.py -v
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from buddy_proxy import state as st
 from buddy_proxy import trae_provider as tp
 from buddy_proxy.anthropic_adapter import (
     AnthropicStreamConverter,
+    anthropic_request_to_chat,
     chat_completion_to_anthropic_message,
 )
 
@@ -257,6 +258,87 @@ def test_stream_converter_thinking_blocks():
     assert names[-1] == "message_stop"
 
 
+# ---------------------------------------------------------------------------
+# _wrap_anthropic_stream：SSE 注释透传 / 中途错误收尾 / tool 分片次序
+# ---------------------------------------------------------------------------
+def _openai_sse_stream(chunks: list[str]):
+    """模拟 TraeProvider._stream 的 OpenAI chunk SSE 输出（含注释行）。"""
+    for piece in chunks:
+        yield piece
+
+
+def test_anthropic_wrapper_passes_heartbeat_comments_through():
+    """: heartbeat 注释必须透传，否则 Claude Code 在长思考期收不到任何字节，
+    会按自己的 per-chunk 读超时误判断流（正是心跳机制要防的失败）。"""
+    from buddy_proxy.trae.sse import _wrap_anthropic_stream
+
+    stream = _openai_sse_stream([
+        ': heartbeat\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {"content": "答"}}]}) + '\n\n',
+        ': heartbeat\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}) + '\n\n',
+        'data: [DONE]\n\n',
+    ])
+    out = "".join(_wrap_anthropic_stream(stream, "glm-5.2"))
+    # 心跳注释原样出现在最终 SSE 流里
+    assert ": heartbeat" in out
+    # 且不影响正常事件序列
+    assert "message_start" in out
+    assert '"text_delta"' in out and "答" in out
+    assert "message_stop" in out
+
+
+def test_anthropic_wrapper_midstream_error_closes_open_blocks():
+    """内容已开始后才冒错误 chunk：先补 content_block_stop 再发 error，
+    不留悬空块、不发 message_stop（流已失败，不能伪装正常结束）。"""
+    from buddy_proxy.trae.sse import _wrap_anthropic_stream
+
+    stream = _openai_sse_stream([
+        'data: ' + json.dumps({"choices": [{"delta": {"content": "先给一半"}}]}) + '\n\n',
+        'data: ' + json.dumps({"error": {"message": "upstream boom", "code": 500}}) + '\n\n',
+    ])
+    out = "".join(_wrap_anthropic_stream(stream, "glm-5.2"))
+    events = [line[7:] for line in out.splitlines() if line.startswith("event: ")]
+    assert events == [
+        "message_start",
+        "content_block_start",   # text 块
+        "content_block_delta",
+        "content_block_stop",    # 错误前收尾，不留悬空块
+        "error",
+    ]
+    assert "upstream boom" in out
+
+
+def test_anthropic_wrapper_tool_args_before_name_buffered():
+    """tool_calls 分片 id+arguments 先到、name 后到：args 必须缓冲到
+    content_block_start 之后才发 input_json_delta，不能产出无 start 的 delta。"""
+    from buddy_proxy.trae.sse import _wrap_anthropic_stream
+
+    stream = _openai_sse_stream([
+        'data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1",
+             "function": {"arguments": "{\"city\""}}]}}]}) + '\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"name": "get_weather"}}]}}]}) + '\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": ": \"北京\"}"}}]}}]}) + '\n\n',
+        'data: ' + json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}) + '\n\n',
+        'data: [DONE]\n\n',
+    ])
+    out = "".join(_wrap_anthropic_stream(stream, "glm-5.2"))
+    events = [line[7:] for line in out.splitlines() if line.startswith("event: ")]
+    # start 必须先于任何 delta
+    assert events.index("content_block_start") < events.index("content_block_delta")
+    # 参数完整：先缓冲的后到的分片按序拼接
+    deltas = [json.loads(line[6:])["delta"]["partial_json"]
+              for line in out.splitlines()
+              if line.startswith("data: ") and "partial_json" in line]
+    assert "".join(deltas) == '{"city": "北京"}'
+    # 工具块收尾 + tool_use 结束原因
+    assert "content_block_stop" in events
+    assert '"stop_reason": "tool_use"' in out or "'stop_reason': 'tool_use'" in repr(out)
+
+
 def test_stream_converter_usage_includes_input_tokens():
     """finish() 的 message_delta usage 应同时带 input_tokens 与 output_tokens。"""
     conv = AnthropicStreamConverter("glm-5.2")
@@ -349,6 +431,79 @@ def _anthropic_body(stream: bool, tools: bool = False) -> dict:
     return body
 
 
+def test_anthropic_base64_image_converts_to_trae_image_url():
+    """Claude Code base64 图片必须保留为 Trae 原生通道接受的 data URL。"""
+    body = {
+        "model": "trae/glm-5.3-flash",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "描述这张图"},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+            ],
+        }],
+    }
+    chat = anthropic_request_to_chat(body)
+    assert chat["messages"] == [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "描述这张图"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64,aGVsbG8="}},
+        ],
+    }]
+
+
+def test_anthropic_image_only_message_is_not_dropped():
+    """只有图片、没有文字的消息也必须生成 user message。"""
+    chat = anthropic_request_to_chat({
+        "messages": [{"role": "user", "content": [{
+            "type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg", "data": "/9j/"},
+        }]}],
+    })
+    assert chat["messages"] == [{
+        "role": "user",
+        "content": [{"type": "image_url", "image_url": {
+            "url": "data:image/jpeg;base64,/9j/"}}],
+    }]
+
+
+def test_anthropic_tool_result_keeps_embedded_image():
+    """Claude Code 工具截图常在 tool_result.content 内，转换后仍保留图片。"""
+    chat = anthropic_request_to_chat({
+        "messages": [
+            {"role": "assistant", "content": [{
+                "type": "tool_use", "id": "toolu_img", "name": "screenshot", "input": {}}]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_img", "content": [
+                    {"type": "text", "text": "截图如下"},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/webp", "data": "UklGRg=="}},
+                ],
+            }]},
+        ],
+    })
+    tool = next(m for m in chat["messages"] if m["role"] == "tool")
+    assert tool["content"] == [
+        {"type": "text", "text": "截图如下"},
+        {"type": "image_url", "image_url": {
+            "url": "data:image/webp;base64,UklGRg=="}},
+    ]
+
+
+def test_anthropic_invalid_image_block_is_dropped_without_invalid_upstream_payload():
+    """缺 media_type/data 的半成品图片不得继续发上游触发 4001。"""
+    chat = anthropic_request_to_chat({
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "data": "abc"}},
+            {"type": "text", "text": "仍保留文字"},
+        ]}],
+    })
+    assert chat["messages"] == [{"role": "user", "content": "仍保留文字"}]
+
+
 def test_messages_nonstream_via_trae(client, trae_env):
     state, calls = trae_env
     r = client.post("/v1/messages", json=_anthropic_body(stream=False))
@@ -373,6 +528,28 @@ def test_messages_nonstream_via_trae(client, trae_env):
         for m in upstream_msgs if m["role"] == "user"
         for p in m["content"]
     )
+
+
+def test_messages_image_reaches_trae_upstream(client, trae_env):
+    """端到端：/v1/messages 的 Anthropic 图片最终以 image_url 到达 Trae。"""
+    _, calls = trae_env
+    body = _anthropic_body(stream=False)
+    body["messages"] = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "看图回答"},
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+        ],
+    }]
+    r = client.post("/v1/messages", json=body)
+    assert r.status_code == 200
+    user = next(m for m in calls[0]["messages"] if m["role"] == "user")
+    assert user["content"] == [
+        {"type": "text", "text": "看图回答"},
+        {"type": "image_url", "image_url": {
+            "url": "data:image/png;base64,aGVsbG8="}},
+    ]
 
 
 def test_messages_stream_via_trae(client, trae_env):

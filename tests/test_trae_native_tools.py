@@ -8,7 +8,7 @@
 - 工具载荷形状：parameters 序列化为 JSON 字符串（上游 Go schema 要求）
 
 运行：
-    PYTHONPATH=src python3 -m pytest test_trae_native_tools.py -v
+    PYTHONPATH=src python3 -m pytest tests/test_trae_native_tools.py -v
 """
 from __future__ import annotations
 
@@ -304,13 +304,20 @@ def test_native_transient_retry(monkeypatch):
     attempts = {"n": 0}
 
     class _Resp:
+        def __init__(self):
+            self._read = False
+
         def __enter__(self):
             return self
 
         def __exit__(self, *a):
             return False
 
-        def read(self):
+        def read1(self, n):
+            # 生产路径走 read1（总时长插断需要分块读）；EOF 返回 b""
+            if self._read:
+                return b""
+            self._read = True
             return b"event: done\ndata: {}\n\n"
 
     def flaky_urlopen(req, timeout):
@@ -379,3 +386,19 @@ def test_native_pure_chat_4001_falls_back_with_guard(client, native_env):
     # 回落路径注入 guard 压制指令（solo_work_lite 服务端预设会漏 Command 语法）
     assert any("Command" in json.dumps(msg, ensure_ascii=False)
                for msg in legacy_calls[0]["messages"])
+
+
+# ───────────────────── 非流式总时长插断（与 PAT 通道同款防护） ─────────────────────
+
+def test_native_nonstream_read_bounded_cuts_off_dribble():
+    import time as _time
+
+    from buddy_proxy.trae import native_tools as nt
+
+    class Dribble:
+        def read1(self, n):
+            return b"x"  # 永远有数据 → 无 deadline 就会无限读
+
+    with pytest.raises(nt._NonStreamTimeout):
+        nt._read_all_bounded(Dribble(), max_s=0.05)
+    assert _time.monotonic() > 0  # 占位：确保异常路径先于断言失败

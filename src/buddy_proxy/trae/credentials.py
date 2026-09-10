@@ -28,14 +28,20 @@ log = logging.getLogger(__name__)
 
 # ───────────────────────── Trae API 调用 ─────────────────────────
 
-def _build_headers(token: str, user_id: str) -> dict[str, str]:
+def _build_headers(
+    token: str,
+    user_id: str,
+    *,
+    machine_id: str | None = None,
+    device_id: str | None = None,
+) -> dict[str, str]:
     """构建 SOLO 完整请求头（traework2api headers.go 实测值）。
 
-    关键：必须带 User-Agent: Trae/<ver> + X-Ide-Token 等 SOLO 专属头，
-    缺 UA 会被服务端当异常客户端限流（4011）。
+    PAT 多账号调用方会传入账号级稳定设备指纹；个人账号的旧调用未传时仍保持
+    原来的逐请求随机行为。设备指纹不从 bearer/token 推导，避免凭据侧信道。
     """
-    machine_id = uuid.uuid4().hex
-    device_id = hashlib.sha256(machine_id.encode()).hexdigest()[:32]
+    machine_id = machine_id or uuid.uuid4().hex
+    device_id = device_id or hashlib.sha256(machine_id.encode()).hexdigest()[:32]
     return {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
@@ -91,12 +97,24 @@ def _work_headers(work: dict[str, Any]) -> dict[str, str]:
 
 # 全局认证缓存（惰性加载）
 _auth_cache: tuple[str, str] | None = None
-# 凭证路径可用 TRAE_WORK_CRED_PATH 覆盖（默认寄存在 ~/.ethan，兼容 ethan 生态）
-_WORK_CRED_PATH = Path(os.environ.get("TRAE_WORK_CRED_PATH", str(Path.home() / ".ethan" / "trae_work.json")))
+# 凭证路径可用 TRAE_WORK_CRED_PATH 覆盖；默认统一存 ~/.buddy-proxy/，
+# 首次访问自动从遗留位置 ~/.ethan/trae_work.json 迁移（copy，原文件保留）。
+from ..paths import state_file
+
+
+def _work_cred_path() -> Path:
+    configured = os.environ.get("TRAE_WORK_CRED_PATH", "")
+    if configured:
+        return Path(configured)
+    return state_file("trae_work.json", legacy="trae_work.json")
+
+
+WORK_CRED_PATH = _work_cred_path()
+_WORK_CRED_PATH = WORK_CRED_PATH  # 兼容旧名
 
 
 def _load_work_cred() -> dict[str, Any] | None:
-    """从 ~/.ethan/trae_work.json 读 Work 凭证（trae_work_login.py 生成）。"""
+    """读 Work 凭证（trae_work_login.py 生成）。"""
     if not _WORK_CRED_PATH.exists():
         return None
     try:

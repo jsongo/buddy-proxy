@@ -6,7 +6,7 @@
 该已知偏差，不参与稳态精度断言。
 
 运行：
-    .venv/bin/python -m pytest test_credit_estimate.py -v
+    .venv/bin/python -m pytest tests/test_credit_estimate.py -v
 """
 from __future__ import annotations
 

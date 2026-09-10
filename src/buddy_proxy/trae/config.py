@@ -147,6 +147,14 @@ def _debug_dump(event: str, **kwargs: Any) -> None:
 # 超时计时器（续命），又让下游 UI 知道中转还在等。45s 意味着 120s 超时窗口
 # 内至少有 2 次心跳，单次 SSE 分包延迟也不会误杀；每条 ~30 字节，开销可忽略。
 TRAE_HEARTBEAT_INTERVAL = max(0, int(os.environ.get("WB_TRAE_HEARTBEAT_INTERVAL", "45")))
+# 首个或相邻两个真实语义事件之间的最长等待；协议注释/保活不算模型进展。
+TRAE_SEMANTIC_TIMEOUT = max(1, int(os.environ.get("WB_TRAE_SEMANTIC_TIMEOUT", "180")))
+# 非流式请求整读的总时长上限。urllib 的 timeout 只约束单次 socket 阻塞，
+# 上游慢速滴字（keepalive/分块）时 read() 会被无限拖延（实测 PAT 挂过 17min
+# 才 502、零输出）。到点主动断开回 504。取值权衡：traepat 非流式健康请求
+# p99≈310s、max≈622s（thinking 模型长生成），默认 300s 会牺牲极少数超长
+# 成功换取挂死下界；批量场景可调大。
+TRAE_NONSTREAM_MAX_S = max(60, int(os.environ.get("WB_TRAE_NONSTREAM_MAX_S", "300")))
 
 
 def _heartbeat_text(waited: int) -> str:

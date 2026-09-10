@@ -7,7 +7,7 @@
 - 上游 4xx（HTTPError，非瞬态）→ 不重试直接 502，只调用 1 次
 
 运行：
-    .venv/bin/python -m pytest test_trae_work_retry.py -v
+    .venv/bin/python -m pytest tests/test_trae_work_retry.py -v
 """
 from __future__ import annotations
 

@@ -26,7 +26,7 @@ CLIENT_ID = "en1oxy7wnw8j9n"  # SOLO stable
 APP_VERSION = "0.1.43"
 API_HOST = "https://api.trae.com.cn"
 AUTH_HOST = "https://www.trae.cn/authorization"
-OUT_PATH = Path.home() / ".ethan" / "trae_work.json"
+OUT_PATH = Path.home() / ".buddy-proxy" / "trae_work.json"
 # 供 trae_work_login_server.py 读取的本次登录状态（随机 id，非机密）
 STATE_PATH = Path("/tmp/trae_work_login_state.json")
 # 登录状态有效期（秒）：超时后 server 拒绝回调

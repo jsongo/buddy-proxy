@@ -4,7 +4,7 @@
 所有依赖远程 / 全局状态的调用都被 monkeypatch 掉，保证测试可离线、可重复运行。
 
 运行：
-    .venv/bin/python -m pytest test_endpoints_smoke.py -v
+    .venv/bin/python -m pytest tests/test_endpoints_smoke.py -v
 """
 from __future__ import annotations
 

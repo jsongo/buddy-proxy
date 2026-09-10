@@ -1,0 +1,1439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buddy Proxy 控制台</title>
+<style>
+  :root {
+    --bg: #0e1116; --card: #161b23; --card2: #1c232e; --line: #262f3c;
+    --text: #e6e9ee; --muted: #8b96a5; --accent: #4f8cff; --ok: #3ecf8e;
+    --warn: #f0b429; --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.55 -apple-system, "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 18px 24px 60px; }
+  .topbar { position: sticky; top: 0; z-index: 30; background: rgba(14,17,22,.94);
+            backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .topbar-inner { max-width: 1180px; margin: 0 auto; padding: 12px 24px 0; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 0 0 2px; }
+  .tabs { display: flex; gap: 2px; margin-top: 8px; overflow-x: auto; }
+  .tab { border: none; background: transparent; color: var(--muted); padding: 8px 14px 9px;
+         font-size: 13.5px; border-radius: 8px 8px 0 0; border-bottom: 2px solid transparent;
+         white-space: nowrap; }
+  .tab:hover { color: var(--text); border-color: transparent; }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent);
+                background: rgba(79,140,255,.07); }
+  .tab .cnt { font-size: 11px; background: var(--card2); border: 1px solid var(--line);
+              border-radius: 999px; padding: 0 7px; margin-left: 5px; color: var(--muted); }
+  .tab .cnt.ok { color: var(--ok); border-color: rgba(62,207,142,.4); }
+  .tab .cnt.warn { color: var(--warn); border-color: rgba(240,180,41,.4); }
+  /* 日期范围组件：默认隐藏，随页签移动到当前页挂载点后显示为卡片行 */
+  .rangebar { display: none; align-items: center; gap: 8px; flex-wrap: wrap;
+              background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+              padding: 10px 14px; margin-bottom: 14px; }
+  .rangebar.show { display: flex; }
+  .rb-quick { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  .rb-btn { border: 1px solid var(--line); background: var(--bg); color: var(--muted);
+            border-radius: 999px; padding: 3px 12px; font-size: 12.5px; }
+  .rb-btn:hover { color: var(--text); border-color: var(--accent); }
+  .rb-btn.active { color: var(--text); border-color: var(--accent);
+                   background: rgba(79,140,255,.13); font-weight: 600; }
+  /* 请求日志快速筛选（通道/模型，复用 .rb-btn 按钮态） */
+  .log-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 2px 0 10px; }
+  .log-filters .lf-label { font-size: 12px; color: var(--muted); }
+  .log-filters .rb-btn { display: inline-flex; align-items: center; }
+  .log-filters .lf-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+  .rb-sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
+  .rb-dash { color: var(--muted); font-size: 12px; }
+  .rangebar input[type="date"] { background: var(--card2); border: 1px solid var(--line);
+    color: var(--text); border-radius: 8px; padding: 3px 8px; font-size: 12.5px;
+    color-scheme: dark; }
+  .page { display: none; }
+  .page.active { display: block; animation: fade .18s ease; }
+  .page h2:first-child { margin-top: 0; }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  header h1 { font-size: 19px; margin: 0; letter-spacing: .3px; }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 11px;
+          border-radius: 999px; background: var(--card2); border: 1px solid var(--line);
+          font-size: 12.5px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+  .dot.off { background: var(--err); }
+  .spacer { flex: 1; }
+  button { cursor: pointer; border: 1px solid var(--line); background: var(--card2);
+           color: var(--text); border-radius: 8px; padding: 5px 12px; font-size: 12.5px; }
+  button:hover { border-color: var(--accent); color: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.1); }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card .k { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .card .v { font-size: 19px; font-weight: 600; }
+  .card .v small { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .card .v .chip { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 6px;
+                   background: rgba(79,140,255,.15); color: var(--accent); margin-right: 6px;
+                   vertical-align: 2px; }
+  h2 { font-size: 14.5px; margin: 26px 0 10px; color: var(--text); }
+  h2 .sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .chart-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+                 padding: 3px 11px 3px 8px; border-radius: 999px; border: 1px solid var(--line);
+                 background: var(--bg); color: var(--muted); transition: .15s; user-select: none; }
+  .legend-item i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+  .legend-item:hover { color: var(--text); border-color: var(--accent); }
+  .legend-item.active { color: var(--text); border-color: var(--accent);
+                        background: rgba(79,140,255,.13); font-weight: 600; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; }
+  th { text-align: left; font-weight: 600; font-size: 12px; letter-spacing: .02em;
+       padding: 9px 10px; white-space: nowrap; }
+  td { padding: 8px 10px; border-bottom: 1px solid rgba(38,47,60,.55); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(79,140,255,.04); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .muted { color: var(--muted); }
+  /* 模型分组：注意不能用 overflow:hidden（会禁掉内部 position:sticky 吸顶） */
+  .group { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+           margin-bottom: 14px; }
+  .group-head { position: sticky; top: var(--top-h, 0px); z-index: 12;
+                display: flex; align-items: center; gap: 10px; padding: 11px 16px;
+                background: var(--card2); border-bottom: 1px solid var(--line);
+                border-radius: 12px 12px 0 0; cursor: pointer; user-select: none; }
+  .group-head:hover { background: #1d2531; }
+  .group-head .name { font-weight: 600; }
+  .chev { display: inline-block; transition: transform .15s ease; color: var(--muted);
+          font-size: 11px; margin-left: 2px; }
+  .group.collapsed .chev { transform: rotate(-90deg); }
+  .group.collapsed table { display: none; }
+  /* 分组表头（列头）：吸在应用顶栏下方，本表滚完即让位给下一组 */
+  .group thead th { position: sticky; top: calc(var(--top-h, 0px) + var(--grp-h, 47px));
+                    z-index: 11; cursor: pointer; background: #12161d; color: #d3dae3;
+                    border-bottom: 1px solid #2d3846; }
+  .group thead th:hover { color: var(--accent); }
+  .sec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 22px; }
+  .sec-head:first-child { margin-top: 0; }
+  .sec-head h2 { margin: 0; }
+  .sec-head .sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }
+  .tag { font-size: 11px; padding: 1px 8px; border-radius: 6px; background: var(--bg);
+         color: var(--muted); border: 1px solid var(--line); }
+  .tag.ok { color: var(--ok); border-color: rgba(62,207,142,.35); }
+  .tag.bad { color: var(--err); border-color: rgba(255,107,107,.35); }
+  .pager { display: flex; align-items: center; gap: 6px; margin: 10px 4px 4px;
+           font-size: 12px; flex-wrap: wrap; }
+  .pager button { padding: 2px 9px; min-width: 28px; }
+  .pager select { background: var(--card2); border: 1px solid var(--line); color: var(--text);
+                  border-radius: 8px; padding: 3px 6px; font-size: 12px; cursor: pointer; }
+  .badge-default { font-size: 11px; color: var(--ok); border: 1px solid rgba(62,207,142,.4);
+                   padding: 1px 8px; border-radius: 6px; white-space: nowrap; }
+  .bar-wrap { background: var(--bg); border-radius: 4px; height: 8px; overflow: hidden; min-width: 70px; }
+  .bar { height: 100%; background: var(--accent); border-radius: 4px; }
+  .num { text-align: right; white-space: nowrap; }
+  .empty { color: var(--muted); text-align: center; padding: 26px 0; font-size: 13px; }
+  /* 打卡 & 额度 */
+  .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin: 12px 0 4px; }
+  .cal .dow { display: flex; align-items: center; justify-content: center;
+              font-size: 10.5px; color: var(--muted); }
+  .cal .day { aspect-ratio: 1; border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
+              display: flex; align-items: center; justify-content: center; font-size: 10.5px; color: var(--muted); }
+  .cal .day.blank { visibility: hidden; }
+  .cal .day.hit { background: rgba(62,207,142,.16); border-color: rgba(62,207,142,.55); color: var(--ok); }
+  .cal .day.today { box-shadow: 0 0 0 1.5px var(--accent); }
+  .cal-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .cal-head label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+  .cal-head input[type="time"] { background: var(--card2); border: 1px solid var(--line); color: var(--text);
+                                 border-radius: 6px; padding: 3px 8px; font-size: 12.5px; }
+  .benefit-row { display: flex; align-items: center; gap: 10px; padding: 9px 0;
+                 border-bottom: 1px solid rgba(38,47,60,.55); }
+  .benefit-row:last-child { border-bottom: none; }
+  .grow { flex: 1; }
+  .qitem { margin: 9px 0; }
+  .qitem .qhead { display: flex; justify-content: space-between; gap: 8px; font-size: 12px;
+                  color: var(--muted); margin-bottom: 4px; }
+  .qbar { background: var(--bg); height: 8px; border-radius: 4px; overflow: hidden; }
+  .qbar > div { height: 100%; border-radius: 4px; }
+  /* TRAE PAT 面板：日包/周包按 PAT 单双数两栏；下方 账号状态 / 模型负载 左右两栏 */
+  .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .pat-head .name { font-weight: 600; }
+  .pat-head .grow { flex: 1; }
+  .pat-quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px; }
+  @media (max-width: 720px) { .pat-quota-grid { grid-template-columns: 1fr; } }
+  .pat-pkg { padding: 8px 0; border-bottom: 1px solid rgba(38,47,60,.4); }
+  .pat-pkg-name { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+  .pat-acct { display: flex; gap: 8px; align-items: center; padding: 3px 0;
+              border-bottom: 1px solid rgba(38,47,60,.4); font-size: 12px; }
+  .pat-keeper { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .pat-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
+  @media (max-width: 720px) { .pat-cols { grid-template-columns: 1fr; } }
+  .pat-col-head { display: flex; align-items: center; gap: 8px; font-size: 12px;
+                  color: var(--muted); margin-bottom: 8px; }
+  .pat-col-head .grow { flex: 1; }
+  /* 弹窗 */
+  .overlay { position: fixed; inset: 0; background: rgba(5,8,12,.62); display: none;
+             align-items: center; justify-content: center; z-index: 50; }
+  .overlay.show { display: flex; }
+  .modal { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+           width: min(620px, calc(100vw - 40px)); max-height: 80vh; overflow: auto; padding: 20px 22px; }
+  .modal h3 { margin: 0 0 12px; font-size: 15px; }
+  .kv { display: grid; grid-template-columns: 96px 1fr; gap: 5px 12px; font-size: 13px; margin-bottom: 10px; }
+  .kv .k { color: var(--muted); }
+  pre.view { background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+             padding: 12px; white-space: pre-wrap; word-break: break-word; max-height: 300px;
+             overflow: auto; font-size: 12.5px; margin: 0; }
+  .spin { width: 18px; height: 18px; border: 2px solid var(--line); border-top-color: var(--accent);
+          border-radius: 50%; animation: r 0.8s linear infinite; display: inline-block;
+          vertical-align: -4px; margin-right: 8px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  #toast { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+           background: var(--card2); border: 1px solid var(--line); color: var(--text);
+           padding: 9px 18px; border-radius: 10px; font-size: 13px; display: none; z-index: 99; }
+  #toast.err { border-color: rgba(255,107,107,.5); color: #ffb3b3; }
+  #cal-tip, #chart-tip { position: fixed; z-index: 60; display: none; pointer-events: none;
+             background: #0b0e13; border: 1px solid #2d3846; color: var(--text);
+             padding: 8px 11px; border-radius: 8px; font-size: 12px;
+             box-shadow: 0 6px 18px rgba(0,0,0,.45); min-width: 130px; }
+  #cal-tip .t-date, #chart-tip .t-date { color: var(--muted); margin-bottom: 4px; }
+  #cal-tip .t-p, #chart-tip .t-p { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #cal-tip .t-p i, #chart-tip .t-p i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
+  #chart-tip .t-p b { font-weight: 600; }
+  .hitzone { cursor: crosshair; }
+  .hitzone:hover { fill: rgba(255,255,255,.05); }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="topbar-inner">
+    <header>
+      <h1>🤝 Buddy Proxy 控制台</h1>
+      <span class="pill"><span class="dot" id="status-dot"></span><span id="status-text">加载中…</span></span>
+      <span class="sub" id="listen-hint"></span>
+      <span class="spacer"></span>
+      <button class="ghost" onclick="loadAll(true)">↻ 刷新</button>
+    </header>
+    <nav class="tabs">
+      <button class="tab active" data-tab="overview">📊 总览</button>
+      <button class="tab" data-tab="log">📜 请求日志</button>
+      <button class="tab" data-tab="models">🧩 模型<span class="cnt" id="cnt-models"></span></button>
+      <button class="tab" data-tab="benefits">✅ 打卡 &amp; 额度<span class="cnt" id="cnt-benefits"></span></button>
+    </nav>
+  </div>
+</div>
+
+<!-- 日期范围选择器：单一组件，切页签时移动到当前页的挂载点（总览 / 请求日志共用） -->
+<div class="rangebar" id="rangebar">
+  <span class="rb-quick" id="rb-quick"></span>
+  <span class="rb-sep"></span>
+  <input type="date" id="rb-start"><span class="rb-dash">→</span><input type="date" id="rb-end">
+</div>
+
+<div class="wrap">
+  <section class="page active" id="page-overview">
+    <div class="range-slot"></div>
+    <div class="cards" id="cards"></div>
+
+    <h2>请求趋势 <span class="sub" id="trend-sub">近 14 天 · 按通道堆叠（点下方图例可只看某通道）</span></h2>
+    <div class="grid2">
+      <div class="chart-card"><div id="chart-daily"></div><div class="legend" id="legend-daily"></div></div>
+      <div class="chart-card"><div id="chart-models"></div></div>
+    </div>
+
+    <h2>模型平均耗时 <span class="sub" id="latency-sub">各通道下模型并列对比（点下方图例可只看某模型）</span></h2>
+    <div class="chart-card"><div id="chart-latency"></div><div class="legend" id="legend-latency"></div></div>
+  </section>
+
+  <section class="page" id="page-log">
+    <div class="range-slot"></div>
+    <h2>最近请求 <span class="sub" id="recent-sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
+    <div class="log-filters" id="log-filters"></div>
+    <div class="chart-card" style="padding: 4px 8px;">
+      <table>
+        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>客户端</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 粗估（trae：(输入+输出)/1M × 100 × 模型倍率，非实扣）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
+        <tbody id="recent"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
+      </table>
+      <div class="pager" id="recent-pager"></div>
+    </div>
+  </section>
+
+  <section class="page" id="page-models">
+    <div class="sec-head">
+      <h2>模型 <span class="sub">点击通道条/表头可折叠分组 · 「测试」发送一条 hi</span></h2>
+      <span class="spacer"></span>
+      <span class="muted" style="font-size:12px" id="model-summary"></span>
+      <button class="ghost" onclick="setAllGroups(false)">全部展开</button>
+      <button class="ghost" onclick="setAllGroups(true)">全部折叠</button>
+    </div>
+    <div id="groups"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section class="page" id="page-benefits">
+    <h2>打卡 &amp; 额度 <span class="sub">自动打卡 · 最近 35 天 · 按通道额度</span></h2>
+    <div class="grid2">
+      <div class="chart-card">
+        <div class="cal-head">
+          <label><input type="checkbox" id="auto-checkin"> 自动打卡</label>
+          <input type="time" id="checkin-time" value="09:30">
+          <button onclick="saveCheckinSettings()">保存</button>
+          <span class="muted" style="font-size:12px" id="checkin-hint"></span>
+        </div>
+        <div class="cal" id="cal"><div class="empty" style="grid-column:1/-1">加载中…</div></div>
+        <div id="checkin-rows"></div>
+      </div>
+      <div id="quota-list"><div class="chart-card"><div class="empty">加载中…</div></div></div>
+    </div>
+    <div id="traepat-panel"></div>
+  </section>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3 id="modal-title">测试</h3>
+    <div id="modal-body"><span class="spin"></span>调用上游中…</div>
+    <div style="margin-top: 14px; text-align: right;">
+      <button onclick="closeModal()">关闭</button>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+<div id="cal-tip"></div>
+<div id="chart-tip"></div>
+
+<script>
+const PCOLORS = { codebuddy: '#4f8cff', trae: '#a78bfa', zcode: '#3ecf8e', doubao: '#f0b429' };
+function pcolor(p) {
+  if (PCOLORS[p]) return PCOLORS[p];
+  let h = 0; for (const c of p) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return `hsl(${h}, 62%, 62%)`;
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtMs(ms) { return ms >= 1000 ? (ms/1000).toFixed(ms >= 10000 ? 0 : 1) + ' s' : ms + ' ms'; }
+function fmtUptime(s) {
+  if (s < 90) return s + ' 秒';
+  if (s < 5400) return Math.round(s/60) + ' 分钟';
+  if (s < 172800) return (s/3600).toFixed(1) + ' 小时';
+  return Math.round(s/86400) + ' 天';
+}
+function fmtNum(n) {
+  if (n == null) return '—';
+  const x = Number(n);
+  if (!isFinite(x)) return String(n);
+  return x >= 100 ? Math.round(x).toLocaleString() : String(Math.round(x * 10) / 10);
+}
+function fmtTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function toast(msg, isErr) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.className = isErr ? 'err' : ''; el.style.display = 'block';
+  clearTimeout(el._t); el._t = setTimeout(() => el.style.display = 'none', 2600);
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((body.error && body.error.message) || body.detail || (r.status + ' error'));
+  return body;
+}
+
+let OVERVIEW = null, MODELS = null, STATS = null, BENEFITS = null;
+
+// ---- 日期范围选择器 ----
+// RANGE.q 记录当前快捷键（如 'd14'）；手改起止日期后 q 置空、退化为自定义区间。
+// 数据保留 30 天，故起止限制在 [今天-29, 今天]。
+function ymd(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function dayOffsetStr(off) {
+  const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() + off);
+  return ymd(d);
+}
+const QUICK_RANGES = [
+  { key: 'today', label: '今天', from: 0, to: 0 },
+  { key: 'yest', label: '昨天', from: -1, to: -1 },
+  { key: 'd3', label: '3 天', from: -2, to: 0 },
+  { key: 'd7', label: '7 天', from: -6, to: 0 },
+  { key: 'd14', label: '14 天', from: -13, to: 0 },
+  { key: 'd30', label: '30 天', from: -29, to: 0 },
+];
+function rangeFromQuick(q) {
+  const r = QUICK_RANGES.find(x => x.key === q);
+  return r ? { start: dayOffsetStr(r.from), end: dayOffsetStr(r.to), q } : null;
+}
+let RANGE = rangeFromQuick('d14');
+try {
+  const s = JSON.parse(localStorage.getItem('bp-range') || 'null');
+  if (s && s.q) { const r = rangeFromQuick(s.q); if (r) RANGE = r; }
+  else if (s && s.start && s.end) RANGE = { start: s.start, end: s.end };
+} catch (e) {}
+function persistRange() {
+  try {
+    localStorage.setItem('bp-range',
+      JSON.stringify(RANGE.q ? { q: RANGE.q } : { start: RANGE.start, end: RANGE.end }));
+  } catch (e) {}
+}
+function inRange(dateStr) { return dateStr >= RANGE.start && dateStr <= RANGE.end; }
+function tsInRange(ts) { const d = ymd(new Date(ts * 1000)); return d >= RANGE.start && d <= RANGE.end; }
+function rangeLabel() {
+  const q = QUICK_RANGES.find(x => x.key === RANGE.q);
+  return q ? q.label : `${RANGE.start} → ${RANGE.end}`;
+}
+function renderRangeQuick() {
+  document.getElementById('rb-quick').innerHTML = QUICK_RANGES.map(r =>
+    `<button class="rb-btn${RANGE.q === r.key ? ' active' : ''}" data-q="${r.key}">${r.label}</button>`).join('');
+  const s = document.getElementById('rb-start'), e = document.getElementById('rb-end');
+  s.min = e.min = dayOffsetStr(-29); s.max = e.max = dayOffsetStr(0);
+  s.value = RANGE.start; e.value = RANGE.end;
+}
+function rerenderRange() { if (STATS) render(); }
+document.getElementById('rb-quick').addEventListener('click', ev => {
+  const b = ev.target.closest('.rb-btn'); if (!b) return;
+  RANGE = rangeFromQuick(b.dataset.q); persistRange(); RECENT_PAGE = 1; renderRangeQuick(); rerenderRange();
+});
+function onDateInput() {
+  let s = document.getElementById('rb-start').value, e = document.getElementById('rb-end').value;
+  if (!s || !e) return;
+  if (s > e) { const t = s; s = e; e = t; }
+  RANGE = { start: s, end: e }; // 手改起止 → 脱离快捷选项
+  persistRange(); RECENT_PAGE = 1; renderRangeQuick(); rerenderRange();
+}
+document.getElementById('rb-start').addEventListener('change', onDateInput);
+document.getElementById('rb-end').addEventListener('change', onDateInput);
+
+// ---- 请求日志快速筛选（通道 / 模型）----
+// 点一次选中、再点取消；组内多选 = OR，通道与模型两组之间 = AND；全不选 = 不筛。
+// 候选按钮从当前日期范围有流量的数据动态生成（RANGE_MODELS）。
+const LOG_FILTERS = { provider: new Set(), model: new Set() };
+
+function renderLogFilters() {
+  const el = document.getElementById('log-filters');
+  if (!el) return;
+  const provs = [...new Set(RANGE_MODELS.map(m => m.provider))];
+  const models = [...new Set(RANGE_MODELS.map(m => m.model))];
+  const btn = (kind, val, inner) =>
+    `<button class="rb-btn${LOG_FILTERS[kind].has(val) ? ' active' : ''}" data-kind="${kind}" data-val="${esc(val)}">${inner}</button>`;
+  el.innerHTML =
+    (provs.length ? `<span class="lf-label">通道</span>` +
+      provs.map(p => btn('provider', p,
+        `<i class="lf-dot" style="background:${pcolor(p)}"></i>${esc(p)}`)).join('') : '') +
+    (models.length ? `<span class="rb-sep"></span><span class="lf-label">模型</span>` +
+      models.map(m => btn('model', m, esc(m))).join('') : '');
+}
+document.getElementById('log-filters').addEventListener('click', ev => {
+  const b = ev.target.closest('.rb-btn'); if (!b) return;
+  const set = LOG_FILTERS[b.dataset.kind];
+  const v = b.dataset.val;
+  if (set.has(v)) set.delete(v); else set.add(v);
+  RECENT_PAGE = 1;
+  renderLogFilters();
+  renderRecent();
+});
+
+// 由 STATS.model_daily 按所选范围过滤 + 按（通道/模型）聚合，
+// 结构与后端 STATS.models 一致（供 Top10、平均耗时图、悬停共用）。
+let RANGE_MODELS = [];
+function modelsInRange() {
+  const md = STATS.model_daily || [];
+  const per = new Map();
+  for (const b of md) {
+    if (!inRange(b.date)) continue;
+    const k = b.provider + '/' + b.model;
+    let e = per.get(k);
+    if (!e) {
+      e = { provider: b.provider, model: b.model, count: 0, errors: 0, _sum: 0,
+            duration_ms_max: 0, prompt_tokens: 0, completion_tokens: 0, last_ts: 0 };
+      per.set(k, e);
+    }
+    e.count += b.count; e.errors += b.errors; e._sum += b.duration_ms_sum;
+    e.duration_ms_max = Math.max(e.duration_ms_max, b.duration_ms_max);
+    e.prompt_tokens += b.prompt_tokens; e.completion_tokens += b.completion_tokens;
+    e.last_ts = Math.max(e.last_ts, b.last_ts || 0);
+  }
+  const out = [...per.values()].map(e => {
+    e.avg_ms = e.count ? Math.round(e._sum / e.count) : 0; delete e._sum; return e;
+  });
+  out.sort((a, b) => b.count - a.count);
+  return out;
+}
+
+async function loadAll(manual) {
+  try {
+    const [ov, md, st, bn] = await Promise.all([
+      api('/ui/api/overview'), api('/ui/api/models'), api('/ui/api/stats'), api('/ui/api/benefits')]);
+    OVERVIEW = ov; MODELS = md; STATS = st; BENEFITS = bn;
+    render(); if (manual) toast('已刷新');
+  } catch (e) { toast('加载失败: ' + e.message, true); }
+}
+
+function render() {
+  // 范围选择器 + 当前范围下的模型聚合（Top10/耗时图/悬停共用）
+  renderRangeQuick();
+  RANGE_MODELS = modelsInRange();
+  renderLogFilters();  // 筛选候选随范围数据刷新，选中态保留
+
+  // 状态条
+  const dot = document.getElementById('status-dot');
+  const ok = OVERVIEW.authenticated !== false;
+  dot.className = 'dot' + (ok ? '' : ' off');
+  document.getElementById('status-text').textContent =
+    `运行中 · 已运行 ${fmtUptime(OVERVIEW.uptime_seconds)}` + (ok ? '' : ' · codebuddy 未登录');
+  document.getElementById('listen-hint').textContent =
+    '默认模型: ' + (OVERVIEW.default_model.raw ? OVERVIEW.default_model.raw : '(未设置，按请求原样路由)');
+
+  // 概览卡片：请求量/平均耗时按所选范围合计（从 daily 过滤累加）
+  const dm = OVERVIEW.default_model;
+  const rl = rangeLabel();
+  const dRange = (STATS.daily || []).filter(d => inRange(d.date));
+  const rTotal = dRange.reduce((n, d) => n + (d.total || 0), 0);
+  const rErr = dRange.reduce((n, d) => n + (d.errors || 0), 0);
+  const rDurSum = dRange.reduce((n, d) => n + (d.duration_ms_sum || 0), 0);
+  const rAvg = rTotal ? Math.round(rDurSum / rTotal) : 0;
+  document.getElementById('cards').innerHTML = `
+    <div class="card" style="cursor:pointer" title="点击去模型页修改。仅在客户端请求未带 model 字段时生效；不影响已指定 model 的请求" onclick="switchTab('models')"><div class="k">默认启用模型 ↗</div>
+      <div class="v">${dm.raw ? `<span class="chip">${esc(dm.provider || 'codebuddy')}</span>${esc(dm.model)}` :
+        '<small>未设置（不影响正常使用）</small>'}</div></div>
+    <div class="card"><div class="k">${esc(rl)} 请求</div><div class="v">${rTotal}
+      <small>错误 ${rErr}</small></div></div>
+    <div class="card"><div class="k">${esc(rl)} 平均耗时</div><div class="v">${rAvg ? fmtMs(rAvg) : '—'}</div></div>
+    <div class="card"><div class="k">兜底通道</div><div class="v"><span class="chip">${esc(OVERVIEW.default_provider)}</span><small>未命中模型时</small></div></div>`;
+
+  // 页签角标：模型总数 / 打卡状态
+  const totalModels = (MODELS.groups || []).reduce((n, g) => n + g.models.length, 0);
+  document.getElementById('cnt-models').textContent = totalModels || '';
+  const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
+  const cb = document.getElementById('cnt-benefits');
+  if (ck.length) {
+    const pending = ck.filter(p => !p.checkin.done_today && !p.checkin.inactive && !p.checkin.error);
+    if (!pending.length) { cb.textContent = '✓ 已签'; cb.className = 'cnt ok'; }
+    else { cb.textContent = `未签 ${pending.length}`; cb.className = 'cnt warn'; }
+  } else { cb.textContent = ''; }
+
+  renderDaily(); renderModelBars(); renderLatency(); renderBenefits(); renderGroups(); renderRecent();
+}
+
+// 吸顶偏移：应用顶栏 + 通道条高度（动态测量，写进 CSS 变量供 sticky 使用）
+function refreshStickyVars() {
+  const tb = document.querySelector('.topbar');
+  if (tb) document.documentElement.style.setProperty('--top-h', tb.offsetHeight + 'px');
+  const gh = document.querySelector('#page-models .group-head');
+  // 模型页未激活时 display:none 测不出高度，保持上次值即可（切页签时会再刷新）
+  if (gh && gh.offsetHeight > 0)
+    document.documentElement.style.setProperty('--grp-h', gh.offsetHeight + 'px');
+}
+window.addEventListener('resize', refreshStickyVars);
+
+// ---- 页签 ----
+const TABS = ['overview', 'log', 'models', 'benefits'];
+// 范围选择器仅在总览/请求日志页有意义
+const RANGE_TABS = new Set(['overview', 'log']);
+function switchTab(name) {
+  if (!TABS.includes(name)) name = 'overview';
+  for (const b of document.querySelectorAll('.tab'))
+    b.classList.toggle('active', b.dataset.tab === name);
+  for (const s of document.querySelectorAll('.page'))
+    s.classList.toggle('active', s.id === 'page-' + name);
+  // 单一范围组件：移动到当前页顶部的挂载点；非范围页则隐藏
+  const rb = document.getElementById('rangebar');
+  const slot = RANGE_TABS.has(name)
+    && document.querySelector('#page-' + name + ' .range-slot');
+  if (slot) { slot.appendChild(rb); rb.classList.add('show'); }
+  else { rb.classList.remove('show'); }
+  history.replaceState(null, '', '#' + name);
+  try { localStorage.setItem('bp-tab', name); } catch (e) {}
+  refreshStickyVars();
+  if (typeof syncPatStatusAuto === 'function') syncPatStatusAuto();  // 进/离额度页 → 起停模型负载自动刷新
+}
+document.querySelectorAll('.tab').forEach(
+  b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+// ---- 打卡日历 + 自动打卡 + 各通道额度 ----
+function renderBenefits() {
+  if (!BENEFITS) return;
+  document.getElementById('auto-checkin').checked = !!BENEFITS.auto_checkin;
+  document.getElementById('checkin-time').value = BENEFITS.checkin_time || '09:30';
+  const enabled = BENEFITS.checkin_enabled_providers || [];
+  document.getElementById('checkin-hint').textContent =
+    enabled.length ? '每天自动为: ' + enabled.join(', ') : '暂无支持打卡的通道';
+
+  const cal = document.getElementById('cal');
+  const days = BENEFITS.calendar || [];
+  window._calTips = {};
+  const DOW = ['一', '二', '三', '四', '五', '六', '日'];
+  const DOW_FULL = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const now = new Date();
+  const pad2 = n => String(n).padStart(2, '0');
+  const todayStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  // 起点补齐到周一，让列与星期对齐
+  const first = new Date(now); first.setDate(now.getDate() - (days.length - 1 || 34));
+  const padN = (first.getDay() + 6) % 7;
+  const cellCount = Math.ceil((days.length + padN) / 7) * 7;
+  let html = DOW.map(w => `<div class="dow">${w}</div>`).join('');
+  for (let i = 0; i < cellCount; i++) {
+    if (i < padN) { html += '<div class="day blank"></div>'; continue; }
+    const d = days[i - padN];
+    if (!d) { html += '<div class="day blank"></div>'; continue; }
+    const hit = (d.providers || []).length > 0;
+    html += `<div class="day${hit ? ' hit' : ''}${d.date === todayStr ? ' today' : ''}" data-date="${d.date}">${Number(d.date.slice(8))}</div>`;
+  }
+  cal.innerHTML = html;
+  // 悬停 tooltip 数据：日期 + 星期 + 各通道当日领取
+  const dowOf = ds => DOW_FULL[(new Date(ds + 'T12:00:00').getDay() + 6) % 7];
+  days.forEach(d => {
+    const lines = (d.providers || []).map(pid => {
+      const credit = (d.credits || {})[pid];
+      return `<div class="t-p"><i style="background:${pcolor(pid)}"></i>${esc(pid)}${credit != null ? ` <b style="color:var(--ok)">+${esc(credit)}</b>` : ''}</div>`;
+    });
+    window._calTips[d.date] =
+      `<div class="t-date">${d.date} ${dowOf(d.date)}${d.date === todayStr ? ' · 今天' : ''}</div>` +
+      (lines.length ? lines.join('') : '<div class="t-p muted">当天未打卡</div>');
+  });
+
+  const rows = (BENEFITS.providers || []).filter(p => p.checkin.supported);
+  document.getElementById('checkin-rows').innerHTML = rows.length ? rows.map(p => {
+    const c = p.checkin;
+    const bits = [];
+    if (c.streak_days >= 2) bits.push(`连续 ${c.streak_days} 天`);
+    if (c.daily_credit > 0) bits.push(`每日 +${c.daily_credit}`);
+    const extra = bits.length ? ` · ${bits.join(' · ')}` : '';
+    const st = c.error ? `<span class="tag bad" title="${esc(c.error)}">状态未知</span>`
+      : c.inactive ? '<span class="tag">今日无签到活动</span>'
+      : c.done_today ? `<span class="tag ok">已签到${extra}</span>`
+      : `<span class="tag">未签到${extra}</span>`;
+    const act = c.activity_name ? `<span class="tag ok" title="签到活动档期">${esc(c.activity_name)}</span>` : '';
+    return `<div class="benefit-row">
+      <span class="mono">${esc(p.id)}</span>${act}${st}<span class="grow"></span>
+      <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
+    </div>`;
+  }).join('') : '<div class="empty" style="padding:14px 0">当前没有支持打卡的通道</div>';
+
+  // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
+  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat');
+  document.getElementById('quota-list').innerHTML = qps.length ? qps.map(p => {
+    const q = p.quota;
+    const items = (q.items || []).map(quotaItemHtml).join('');
+    // 标题行汇总：剩余/总额（取第一个可合计的条目；CodeBuddy 是积分合计，
+    // zcode 取最紧的窗口。各明细条目仍完整列在下方）
+    const head = (q.items || []).find(it => it.remaining != null && it.total != null);
+    const headSum = head ? `<span class="mono" style="margin-left:auto">
+      <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(head.remaining)}</span>
+      <span class="muted">/ ${fmtNum(head.total)}</span></span>` : '';
+    return `<div class="chart-card" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span style="font-weight:600">${esc(p.name)}</span>
+        ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}
+        ${headSum}
+      </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
+  }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
+  renderTraepatPanel();
+}
+
+// 单条额度条目 → HTML（周包/日包/积分窗口通用；PAT 面板与额度列表共用）
+function quotaItemHtml(it) {
+  let pct = it.percent;
+  if (pct == null && it.used != null && it.total) pct = Math.round(it.used / it.total * 100);
+  const hasBar = pct != null;
+  pct = Math.max(0, Math.min(100, Number(pct) || 0));
+  const color = pct >= 85 ? 'var(--err)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)';
+  let rem = it.remaining;
+  if (rem == null && it.used != null && it.total != null) rem = it.total - it.used;
+  const hasNums = rem != null || it.total != null;
+  const reset = it.reset_ts ? ` · ${new Date(it.reset_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'})} 重置` : '';
+  const nums = hasNums
+    ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
+    : '<span class="mono"></span>';
+  // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
+  // >0 时至少给 2% 让细条可见
+  const bar = hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
+  return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${reset}</span>${nums}</div>${bar}</div>`;
+}
+
+// ---- TRAE PAT 面板（底部整宽卡片）----
+// 结构：上方 日包/周包 按 PAT 单双数左右两栏；下方 账号状态（左）/ 模型负载（右）左右两栏。
+// 模型负载默认读缓存（GET，不触网），点「更新」再强制查询（POST）。
+function renderTraepatPanel() {
+  const panel = document.getElementById('traepat-panel');
+  if (!panel) return;
+  const pat = (BENEFITS.providers || []).find(p => p.id === 'traepat' && p.quota && p.quota.supported);
+  if (!pat) { panel.innerHTML = ''; return; }
+
+  // 日包/周包按「PAT #N」分组（label 形如「PAT #1 · 周包（通用额度）」）
+  const groups = new Map();
+  for (const it of pat.quota.items || []) {
+    const idx = it.label.indexOf(' · ');
+    const grp = idx >= 0 ? it.label.slice(0, idx) : (pat.name || 'PAT');
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => `
+    <div class="pat-pkg">
+      <div class="pat-pkg-name">${esc(grp)}</div>
+      ${its.map(quotaItemHtml).join('')}
+    </div>`).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
+
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head">
+        <span class="name">Trae PAT</span>
+        <span class="tag">多账号 · 自愈</span>
+        <span class="grow"></span>
+        <span class="pat-keeper" id="pat-keeper"></span>
+      </div>
+      <div class="pat-quota-grid">${quotaHtml}</div>
+      <div class="pat-cols">
+        <div>
+          <div class="pat-col-head">
+            <span>账号状态</span><span class="grow"></span>
+            <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
+          </div>
+          <div id="traepat-accounts"><div class="empty" style="padding:8px 0">账号状态加载中…</div></div>
+        </div>
+        <div>
+          <div class="pat-col-head">
+            <span>模型负载</span><span class="grow"></span>
+            <button class="primary" onclick="loadTraepatStatus(this, true)">更新</button>
+          </div>
+          <div id="traepat-status"><div class="empty" style="padding:8px 0">加载中…</div></div>
+        </div>
+      </div>
+    </div>`;
+  loadTraepatAccounts();
+  loadTraepatStatus(null, false);
+  syncPatStatusAuto();  // 面板每次重建（含 30s loadAll）后按当前页是否可见起停自动刷新
+}
+
+async function loadTraepatAccounts() {
+  const box = document.getElementById('traepat-accounts');
+  const keeperBox = document.getElementById('pat-keeper');
+  if (!box) return;
+  try {
+    const r = await api('/ui/api/traepat/accounts');
+    if (!r.enabled) { document.getElementById('traepat-panel').innerHTML = ''; return; }
+    const tag = (t) => t === 'ok' ? '<span class="tag ok">token 正常</span>'
+      : t === 'expiring' ? '<span class="tag" style="color:var(--warn)">临期</span>'
+      : '<span class="tag bad">无 token</span>';
+    // 每账号一行：#N sa_… Pxx token正常 剩Xh（+ 冷却），逐行竖排在左栏。
+    // #N 顺序与上方日包/周包的「PAT #N」分组一一对应，便于对照。
+    const rows = (r.accounts || []).map((a, i) => {
+      const cool = (a.cooling || []).map(c => `${c.kind} 冷却 ${c.minutes_left}min`).join(' · ');
+      const left = a.hours_left != null ? `剩 ${a.hours_left}h` : '';
+      return `<div class="pat-acct">
+        <span class="muted" style="min-width:26px">#${i + 1}</span>
+        <span class="mono">${esc(a.id)}</span>
+        <span class="muted">P${a.priority}</span>
+        ${tag(a.token)}${left ? `<span class="muted">${left}</span>` : ''}
+        ${cool ? `<span class="muted" style="color:var(--warn)">${cool}</span>` : ''}</div>`;
+    }).join('');
+    box.innerHTML = rows || '<div class="empty" style="padding:8px 0">无账号</div>';
+    // keeper 自愈状态 → 头部
+    const k = r.keeper || {};
+    const kAt = k.at ? new Date(k.at * 1000).toLocaleTimeString('zh-CN') : '—';
+    const kState = k.env_ready === false ? '<span style="color:var(--warn)">换 token 端点不可达，等网络恢复</span>'
+      : k.env_ready === true ? `上轮补签 ${((k.refreshed || []).length)} 个${(k.waiting || []).length ? `，待补 ${(k.waiting).length} 个` : ''}`
+      : '尚未运行';
+    if (keeperBox) keeperBox.innerHTML =
+      `每 ${Math.round((r.keepalive_s || 0) / 60)} 分钟自愈 · ${kState}（${kAt}）`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty" style="padding:8px 0">账号状态加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+async function refreshTraepatTokens(btn) {
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '补签中…'; }
+  try {
+    const r = await api('/ui/api/traepat/refresh-tokens', {method: 'POST'});
+    const n = (r.refreshed || []).length;
+    const waiting = r.waiting || [];
+    if (r.env_ready === false) {
+      toast(`补签端点暂不可达，${waiting.length} 个账号等待中`, true);
+    } else if (waiting.length) {
+      toast(`已补签 ${n} 个，仍有 ${waiting.length} 个待补`, true);
+    } else {
+      toast(`✓ Token 补签完成${n ? `（更新 ${n} 个）` : '（无需更新）'}`);
+    }
+    await loadTraepatAccounts();
+  } catch (e) { toast('Token 补签失败：' + e.message, true); }
+  if (btn) { btn.disabled = false; btn.textContent = old || '补签 Token'; }
+}
+
+// force=false：读缓存（GET，不触网），页面默认展示；force=true：强制查询（POST）。
+// silent=true：后台自动刷新用，不清空面板、不占用按钮（避免每轮闪烁）。
+async function loadTraepatStatus(btn, force, silent) {
+  const box = document.getElementById('traepat-status');
+  if (!box) return;
+  if (btn) { btn.disabled = true; btn.textContent = '更新中…'; }
+  if (force && !silent) box.innerHTML = '<div class="empty" style="padding:8px 0">正在查询模型负载…</div>';
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '更新'; } };
+  try {
+    const r = force
+      ? await api('/ui/api/traepat/model-status', {method: 'POST'})
+      : await api('/ui/api/traepat/model-status');
+    const rows = (r.models || []).map(m => {
+      const w = m.workload;
+      const hasW = w != null;
+      const pct = hasW ? Math.max(0, Math.min(100, Number(w))) : 0;
+      const color = pct >= 80 ? 'var(--err)' : pct >= 50 ? 'var(--warn)' : 'var(--ok)';
+      const label = hasW ? `${Math.round(pct)}%` : '—';
+      const bar = hasW ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
+      const extra = [m.credits ? `积分 ${esc(m.credits)}` : '', m.max_input ? `输入上限 ${fmtNum(m.max_input)}` : ''].filter(Boolean).join(' · ');
+      return `<div class="qitem"><div class="qhead"><span>${esc(m.name || m.id)}${extra ? ` <span class="muted">${extra}</span>` : ''}</span><span class="mono">${label}</span></div>${bar}</div>`;
+    }).join('');
+    const ts = r.fetched_at ? new Date(r.fetched_at * 1000).toLocaleTimeString('zh-CN') : '';
+    const auto = PAT_STATUS_TIMER ? ' · 自动每分钟' : '';
+    const hint = !r.fetched_at
+      ? '尚无缓存，点「更新」查询'
+      : `数值越高越繁忙 · ${ts} ${r.cached ? '缓存' : '更新'}${auto}`;
+    box.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px">${hint}</div>` +
+      (rows || '<div class="empty" style="padding:8px 0">无负载数据</div>');
+  } catch (e) {
+    // 后台静默刷新失败不覆盖已有数据，仅手动/首屏才提示
+    if (!silent) box.innerHTML = `<div class="empty" style="padding:8px 0">查询失败：${esc(e.message)}</div>`;
+  }
+  restore();
+}
+
+// 模型负载自动刷新：仅当「打卡 & 额度」页可见时每 60s 强制查一次；
+// 切走或标签页隐藏即停，避免后台持续打上游。
+let PAT_STATUS_TIMER = null;
+const PAT_STATUS_INTERVAL = 60000;
+function patStatusAutoActive() {
+  const page = document.getElementById('page-benefits');
+  return !!page && page.classList.contains('active')
+    && document.visibilityState === 'visible'
+    && !!document.getElementById('traepat-status');
+}
+function syncPatStatusAuto() {
+  if (patStatusAutoActive()) {
+    if (!PAT_STATUS_TIMER) {
+      PAT_STATUS_TIMER = setInterval(() => {
+        if (patStatusAutoActive()) loadTraepatStatus(null, true, true);
+        else syncPatStatusAuto();  // 定时器还在但已不该跑：清掉
+      }, PAT_STATUS_INTERVAL);
+    }
+  } else if (PAT_STATUS_TIMER) {
+    clearInterval(PAT_STATUS_TIMER);
+    PAT_STATUS_TIMER = null;
+  }
+}
+document.addEventListener('visibilitychange', syncPatStatusAuto);
+
+async function claimNow(pid) {
+  try {
+    const r = await api('/ui/api/checkin', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: pid})});
+    toast(r.ok ? `✓ ${pid} 打卡成功` : `打卡失败: ${r.message || r.error || '未知原因'}`, !r.ok);
+    loadAll();
+  } catch (e) { toast('打卡失败: ' + e.message, true); }
+}
+
+async function saveCheckinSettings() {
+  try {
+    await api('/ui/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        auto_checkin: document.getElementById('auto-checkin').checked,
+        checkin_time: document.getElementById('checkin-time').value})});
+    toast('自动打卡设置已保存');
+    loadAll();
+  } catch (e) { toast('保存失败: ' + e.message, true); }
+}
+
+// ---- 请求趋势柱状图（纯 SVG）。图例可点选：只显示某通道，或“全部”堆叠 ----
+// DAILY_PROV = null → 堆叠展示全部通道；否则只展示该通道单色柱
+let DAILY_PROV = null;
+// 当前范围过滤后的 daily（供柱状图悬停 tooltip 读取，索引与图内一致）
+let DAILY_VIEW = [];
+function renderDaily() {
+  const daily = (STATS.daily || []).filter(d => inRange(d.date));
+  DAILY_VIEW = daily;
+  const W = 520, H = 190, padL = 34, padB = 24, padT = 15;
+  const providers = [...new Set(daily.flatMap(d => Object.keys(d.by_provider)))];
+  const filt0 = DAILY_PROV;
+  // 若所选通道已不在当前范围窗口内（数据/范围刷新后），自动退回“全部”
+  if (filt0 && !providers.includes(filt0)) DAILY_PROV = null;
+  const filt = DAILY_PROV; // null = 全部(堆叠)
+  // 当前口径下每天的值：堆叠取 total，过滤取该通道数
+  const valOf = d => filt ? (d.by_provider[filt] || 0) : (d.total || 0);
+  const max = Math.max(1, ...daily.map(valOf));
+  const base = H - padB;
+  const slot = daily.length ? (W - padL - 8) / daily.length : 1;
+  const bw = Math.min(30, slot - 8);
+  const scale = (base - padT) / max; // 每单位像素高度
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
+  // 横格线
+  for (let i = 0; i <= 4; i++) {
+    const y = base - (base - padT) * i / 4;
+    const v = max * i / 4;
+    const lbl = (Number.isInteger(v) && v < 10) || v >= 10 ? Math.round(v) : v.toFixed(1);
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="#262f3c" stroke-width="1"/>` +
+           `<text x="${padL-6}" y="${y+4}" fill="#8b96a5" font-size="10" text-anchor="end">${lbl}</text>`;
+  }
+  daily.forEach((d, i) => {
+    const x = padL + i * slot + (slot - bw) / 2;
+    if (filt) {
+      const n = valOf(d);
+      if (n) {
+        const h = n * scale;
+        const y = base - h;
+        svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${pcolor(filt)}" rx="2"/>` +
+               `<text x="${x + bw/2}" y="${Math.max(padT + 7, y - 3)}" fill="#dbe4ee" font-size="9.5" text-anchor="middle">${n}</text>`;
+      }
+    } else {
+      // 堆叠：自下而上逐通道画段
+      let y = base;
+      for (const p of providers) {
+        const n = d.by_provider[p] || 0; if (!n) continue;
+        const h = n * scale;
+        y -= h;
+        svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${pcolor(p)}" rx="2"/>`;
+      }
+      if (d.total) {
+        svg += `<text x="${x + bw/2}" y="${Math.max(padT + 7, y - 3)}" fill="#dbe4ee" font-size="9.5" text-anchor="middle">${d.total}</text>`;
+      }
+    }
+    if (valOf(d)) svg += `<text x="${x + bw/2}" y="${H - 6}" fill="#8b96a5" font-size="9.5" text-anchor="middle">${d.date.slice(5)}</text>`;
+  });
+  // 整列悬停热区：移入即显示当日明细（CSS hover 加高亮底色）
+  daily.forEach((d, i) => {
+    svg += `<rect class="hitzone" data-i="${i}" x="${padL + i * slot}" y="${padT}" width="${slot}" height="${base - padT}" fill="transparent"/>`;
+  });
+  svg += '</svg>';
+  document.getElementById('chart-daily').innerHTML = svg;
+
+  // 图例（可点选）：全部 + 各通道
+  const items = [`<span class="legend-item${filt ? '' : ' active'}" data-prov="" title="点击回到堆叠视图">全部</span>`]
+    .concat(providers.map(p =>
+      `<span class="legend-item${filt === p ? ' active' : ''}" data-prov="${esc(p)}" title="只显示 ${esc(p)}">
+         <i style="background:${pcolor(p)}"></i>${esc(p)}</span>`));
+  document.getElementById('legend-daily').innerHTML = items.join('');
+
+  // 副标题随过滤态更新
+  document.getElementById('trend-sub').textContent = filt
+    ? `${rangeLabel()} · 仅 ${filt}`
+    : `${rangeLabel()} · 按通道堆叠（点下方图例可只看某通道）`;
+}
+// 图例点选：选中某通道只展示其消耗；再点一次或点「全部」回到堆叠视图
+document.getElementById('legend-daily').addEventListener('click', e => {
+  const item = e.target.closest('.legend-item');
+  if (!item) return;
+  const p = item.dataset.prov; // '' = 全部
+  const next = (p === '') ? null : p;
+  DAILY_PROV = (DAILY_PROV === next && next !== null) ? null : next; // 再点同通道 = 取消过滤
+  renderDaily();
+});
+
+// ---- 模型请求 Top10 横向条 ----
+function renderModelBars() {
+  const models = RANGE_MODELS.slice(0, 10);
+  const el = document.getElementById('chart-models');
+  if (!models.length) { el.innerHTML = '<div class="empty">范围内暂无请求数据</div>'; return; }
+  const max = Math.max(1, ...models.map(m => m.count));
+  el.innerHTML = models.map((m, mi) => `
+    <div data-mi="${mi}" style="display:flex;align-items:center;gap:10px;margin:7px 0;cursor:crosshair">
+      <div class="mono" style="width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.provider + '/' + m.model)}">
+        <i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(m.provider)};margin-right:6px"></i>${esc(m.model)}
+      </div>
+      <div class="bar-wrap" style="flex:1"><div class="bar" style="width:${Math.max(3, m.count/max*100)}%;background:${pcolor(m.provider)}"></div></div>
+      <div class="num muted" style="width:120px;font-size:12px">${m.count} 次 · ${m.avg_ms ? fmtMs(m.avg_ms) : '—'}</div>
+    </div>`).join('');
+}
+
+// ---- 模型平均耗时对比：同一模型在各通道的分组柱状图（纯 SVG）----
+// 模型平均耗时图：x 轴为通道，柱为各模型；LATENCY_MODEL = null → 各模型并列，否则只看该模型
+let LATENCY_MODEL = null;
+// renderLatency 产出的视图数据（供 mousemove tooltip 读取）
+let LATENCY_DATA = null;
+function renderLatency() {
+  const models = RANGE_MODELS;
+  const el = document.getElementById('chart-latency');
+  if (!models.length) {
+    el.innerHTML = '<div class="empty">范围内暂无请求数据</div>';
+    document.getElementById('legend-latency').innerHTML = '';
+    LATENCY_DATA = null;
+    return;
+  }
+  const providers = [...new Set(models.map(m => m.provider))];
+  // 按模型聚合跨通道数据，取请求量前 8（与模型 Top10 口径一致）
+  const byModel = new Map();
+  for (const m of models) {
+    const e = byModel.get(m.model) || { total: 0, provs: {} };
+    e.total += m.count;
+    e.provs[m.provider] = m;
+    byModel.set(m.model, e);
+  }
+  const top = [...byModel.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 8);
+  const topNames = top.map(([n]) => n);
+  // 数据刷新后所选模型可能已无请求，自动退回“全部”
+  if (LATENCY_MODEL && !topNames.includes(LATENCY_MODEL)) LATENCY_MODEL = null;
+  const filt = LATENCY_MODEL;
+  const shown = filt ? [filt] : topNames;
+  // 模型固定 8 色板（柱色区分模型；通道色仍用于请求趋势图）
+  const MCOLORS = ['#5b8def', '#e5a54b', '#4fc48f', '#e06c9f', '#9a7be0', '#4fb8d8', '#c9d05a', '#e07b5b'];
+  const mcolor = new Map(topNames.map((n, i) => [n, MCOLORS[i % MCOLORS.length]]));
+  LATENCY_DATA = { providers, topNames, byModel, mcolor };
+  const W = 1100, H = 250, padL = 46, padB = 24, padT = 18; // 全宽卡片：viewBox≈实际显示宽度，避免整体被拉伸放大
+  const base = H - padB;
+  const max = Math.max(1, ...providers.flatMap(p =>
+    shown.map(n => (byModel.get(n).provs[p] || {}).avg_ms || 0)));
+  const slot = providers.length ? (W - padL - 8) / providers.length : 1;
+  const scale = (base - padT) / max;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
+  for (let i = 0; i <= 4; i++) {
+    const y = base - (base - padT) * i / 4;
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="#262f3c" stroke-width="1"/>` +
+           `<text x="${padL-6}" y="${y+4}" fill="#8b96a5" font-size="11" text-anchor="end">${fmtMs(Math.round(max * i / 4))}</text>`;
+  }
+  providers.forEach((p, i) => {
+    const x0 = padL + i * slot;
+    const n = shown.length;
+    const inner = slot - 14;
+    const bw = Math.min(38, Math.max(5, (inner - (n - 1) * 3) / n));
+    const xStart = x0 + (slot - (n * bw + (n - 1) * 3)) / 2;
+    // 组内最慢的模型标数值；单模型视图每根都标
+    let slowest = null;
+    for (const name of shown) {
+      const m = byModel.get(name).provs[p];
+      if (m && (!slowest || m.avg_ms > slowest.avg_ms)) slowest = m;
+    }
+    shown.forEach((name, k) => {
+      const m = byModel.get(name).provs[p];
+      if (!m) return;
+      const h = Math.max(0, m.avg_ms * scale);
+      const x = xStart + k * (bw + 3);
+      const y = base - h;
+      svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${mcolor.get(name)}" rx="2"/>`;
+      if (n === 1 || m === slowest)
+        svg += `<text x="${x + bw/2}" y="${Math.max(padT + 8, y - 3)}" fill="#dbe4ee" font-size="10.5" text-anchor="middle">${fmtMs(m.avg_ms)}</text>`;
+    });
+    svg += `<text x="${x0 + slot/2}" y="${H - 6}" fill="#8b96a5" font-size="11.5" text-anchor="middle">${esc(p)}</text>`;
+    // 整列悬停热区：移入即显示该通道下各模型耗时明细
+    svg += `<rect class="hitzone" data-p="${esc(p)}" x="${x0}" y="${padT}" width="${slot}" height="${base - padT}" fill="transparent"/>`;
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+
+  // 图例（可点选）：全部 + 请求量前 8 的模型（点模型只看它）
+  const items = [`<span class="legend-item${filt ? '' : ' active'}" data-model="" title="点击显示所有模型">全部</span>`]
+    .concat(topNames.map(n =>
+      `<span class="legend-item${filt === n ? ' active' : ''}" data-model="${esc(n)}" title="只显示 ${esc(n)}">
+         <i style="background:${mcolor.get(n)}"></i>${esc(n)}</span>`));
+  document.getElementById('legend-latency').innerHTML = items.join('');
+  document.getElementById('latency-sub').textContent = filt
+    ? `仅 ${filt} · ${rangeLabel()} 平均耗时`
+    : `${rangeLabel()} · 各通道下模型并列对比（点下方图例可只看某模型）`;
+}
+// 图例点选：点某模型只看它；再点一次或点「全部」回到并列视图
+ document.getElementById('legend-latency').addEventListener('click', e => {
+  const item = e.target.closest('.legend-item');
+  if (!item) return;
+  const n = item.dataset.model; // '' = 全部
+  const next = (n === '') ? null : n;
+  LATENCY_MODEL = (LATENCY_MODEL === next && next !== null) ? null : next;
+  renderLatency();
+});
+
+// ---- 模型分组表 ----
+// 分组折叠状态（localStorage 持久化；30s 自动刷新重渲染后仍保持）
+let COLLAPSED = new Set();
+try { COLLAPSED = new Set(JSON.parse(localStorage.getItem('bp-collapsed') || '[]')); } catch (e) {}
+function persistCollapsed() {
+  try { localStorage.setItem('bp-collapsed', JSON.stringify([...COLLAPSED])); } catch (e) {}
+}
+function toggleGroup(gid) {
+  if (COLLAPSED.has(gid)) COLLAPSED.delete(gid); else COLLAPSED.add(gid);
+  persistCollapsed();
+  const g = document.querySelector(`.group[data-gid="${CSS.escape(gid)}"]`);
+  if (g) g.classList.toggle('collapsed', COLLAPSED.has(gid));
+}
+function setAllGroups(collapse) {
+  COLLAPSED = collapse ? new Set((MODELS.groups || []).map(g => g.id)) : new Set();
+  persistCollapsed();
+  document.querySelectorAll('#groups .group').forEach(g =>
+    g.classList.toggle('collapsed', COLLAPSED.has(g.dataset.gid)));
+}
+// 点击通道条或列头（表头）任意处 → 折叠/展开该组
+document.getElementById('groups').addEventListener('click', e => {
+  const g = e.target.closest('.group');
+  if (!g) return;
+  if (e.target.closest('.group-head') || e.target.closest('thead th')) {
+    if (!e.target.closest('button')) toggleGroup(g.dataset.gid);
+  }
+});
+
+// 打卡日历悬停 tooltip（自绘，即时显示：日期 + 星期 + 各通道当日领取）
+const calTip = document.getElementById('cal-tip');
+document.getElementById('cal').addEventListener('mousemove', e => {
+  const cell = e.target.closest('.day');
+  const tip = cell && !cell.classList.contains('blank')
+    && window._calTips && window._calTips[cell.dataset.date];
+  if (!tip) { calTip.style.display = 'none'; return; }
+  calTip.innerHTML = tip;
+  calTip.style.display = 'block';
+  const r = cell.getBoundingClientRect();
+  let x = r.left + r.width / 2 - calTip.offsetWidth / 2;
+  x = Math.max(8, Math.min(x, window.innerWidth - calTip.offsetWidth - 8));
+  let y = r.top - calTip.offsetHeight - 8;
+  if (y < 8) y = r.bottom + 8;
+  calTip.style.left = x + 'px';
+  calTip.style.top = y + 'px';
+});
+document.getElementById('cal').addEventListener('mouseleave', () => {
+  calTip.style.display = 'none';
+});
+
+// 请求趋势图表悬停 tooltip（与日历同款即时悬浮框）
+const chartTip = document.getElementById('chart-tip');
+function showChartTip(html, rect) {
+  chartTip.innerHTML = html;
+  chartTip.style.display = 'block';
+  let x = rect.left + rect.width / 2 - chartTip.offsetWidth / 2;
+  x = Math.max(8, Math.min(x, window.innerWidth - chartTip.offsetWidth - 8));
+  let y = rect.top - chartTip.offsetHeight - 8;
+  if (y < 8) y = rect.bottom + 8;
+  chartTip.style.left = x + 'px';
+  chartTip.style.top = y + 'px';
+}
+function hideChartTip() { chartTip.style.display = 'none'; }
+
+document.getElementById('chart-daily').addEventListener('mousemove', e => {
+  const hz = e.target.closest('rect.hitzone');
+  const d = hz && DAILY_VIEW[+hz.dataset.i];
+  if (!d) { hideChartTip(); return; }
+  const lines = Object.entries(d.by_provider).sort((a, b) => b[1] - a[1])
+    .map(([p, n]) => `<div class="t-p"><i style="background:${pcolor(p)}"></i>${esc(p)}<b style="margin-left:auto;padding-left:12px">${n}</b></div>`).join('');
+  showChartTip(
+    `<div class="t-date">${esc(d.date)} · 合计 ${d.total} 次${d.errors ? ` · 错误 ${d.errors}` : ''}</div>` +
+    (lines || '<div class="t-p muted">无请求</div>'),
+    hz.getBoundingClientRect());
+});
+document.getElementById('chart-daily').addEventListener('mouseleave', hideChartTip);
+
+document.getElementById('chart-models').addEventListener('mousemove', e => {
+  const row = e.target.closest('[data-mi]');
+  const m = row && RANGE_MODELS[+row.dataset.mi];
+  if (!m) { hideChartTip(); return; }
+  showChartTip(
+    `<div class="t-date"><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(m.provider)};margin-right:6px"></i>${esc(m.provider)} / ${esc(m.model)}</div>` +
+    `<div class="t-p">请求 <b style="margin-left:auto">${m.count}</b> 次 · 错误 ${m.errors}</div>` +
+    `<div class="t-p">平均 ${fmtMs(m.avg_ms)} · 最长 ${fmtMs(m.duration_ms_max)}</div>` +
+    `<div class="t-p">Tokens <b style="margin-left:auto">↑${fmtNum(m.prompt_tokens)} ↓${fmtNum(m.completion_tokens)}</b></div>` +
+    `<div class="t-p muted">↑ 为全部输入（含缓存命中部分）</div>` +
+    (m.last_ts ? `<div class="t-p muted">最近 ${fmtTime(m.last_ts)}</div>` : ''),
+    row.getBoundingClientRect());
+});
+document.getElementById('chart-models').addEventListener('mouseleave', hideChartTip);
+
+// 模型平均耗时图：悬停某通道列 → 该通道下各模型耗时明细
+document.getElementById('chart-latency').addEventListener('mousemove', e => {
+  const hz = e.target.closest('rect.hitzone');
+  const p = hz && hz.dataset.p;
+  if (!p || !LATENCY_DATA) { hideChartTip(); return; }
+  const { topNames, byModel, mcolor } = LATENCY_DATA;
+  const shown = LATENCY_MODEL ? [LATENCY_MODEL] : topNames;
+  const rows = shown.map(n => ({ n, m: byModel.get(n).provs[p] }))
+    .filter(r => r.m).sort((a, b) => b.m.avg_ms - a.m.avg_ms);
+  if (!rows.length) { hideChartTip(); return; }
+  const total = rows.reduce((s, r) => s + r.m.count, 0);
+  const lines = rows.map(r =>
+    `<div class="t-p"><i style="background:${mcolor.get(r.n)}"></i>${esc(r.n)}` +
+    `<b style="margin-left:auto;padding-left:12px">${r.m.count} 次 · ${fmtMs(r.m.avg_ms)}</b></div>`).join('');
+  showChartTip(
+    `<div class="t-date">${esc(p)} · 合计 ${total} 次 · 平均耗时降序</div>` + lines,
+    hz.getBoundingClientRect());
+});
+document.getElementById('chart-latency').addEventListener('mouseleave', hideChartTip);
+
+function renderGroups() {
+  const el = document.getElementById('groups');
+  const groups = (MODELS.groups || []);
+  const totalModels = groups.reduce((n, g) => n + g.models.length, 0);
+  const dm = MODELS.default_model || '';
+  document.getElementById('model-summary').textContent =
+    `${groups.length} 个通道 · ${totalModels} 个模型` + (dm ? ` · 默认 ${dm}` : '');
+  if (!groups.length) { el.innerHTML = '<div class="empty">没有可用通道</div>'; return; }
+  el.innerHTML = groups.map(g => {
+    const h = g.health || {};
+    const okFlag = (g.id === 'codebuddy') ? (h.authenticated && h.token_valid !== false)
+                 : ('configured' in h ? h.configured !== false : (h.ready !== false && h.started !== false));
+    const healthTxt = g.id === 'codebuddy' ? (okFlag ? '已登录' : '未登录')
+                    : h.base_url ? esc(h.base_url.replace(/^https?:\/\//, '')) : (okFlag ? '正常' : '未就绪');
+    const rows = g.models.map(m => {
+      const st = m.stats || {};
+      const dis = !!m.disabled;
+      const sch = m.schedule || null;
+      const schWins = sch ? sch.windows.map(w => w[0] + '~' + w[1]).join(', ') : '';
+      const schTag = sch
+        ? `<span class="tag ${sch.open ? 'ok' : 'bad'}" title="限时可用：${esc(schWins)}${sch.open ? '（当前开放）' : '（当前关闭，窗口外调用被拒）'}">⏰ ${sch.open ? '开放中' : '限时'}</span>`
+        : '';
+      const schWinsAttr = sch ? esc(JSON.stringify(sch.windows)) : '[]';
+      const dim = dis ? ' style="opacity:.5"' : '';
+      return `<tr>
+        <td${dim}><span class="mono">${esc(m.id)}</span>
+            ${m.is_default ? '<span class="badge-default">✦ 默认</span>' : ''}
+            ${dis ? '<span class="tag bad">已停用</span>' : ''}
+            ${schTag}</td>
+        <td class="muted"${dim}>${esc(m.name || '')}</td>
+        <td${dim}>${m.credits ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
+        <td class="num mono muted"${dim}>${st.count || '—'}</td>
+        <td class="num mono muted"${dim}>${st.count ? fmtMs(st.avg_ms) : '—'}</td>
+        <td class="num" style="white-space:nowrap">
+            ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick="setDefault('${esc(g.id)}','${esc(m.id)}')">设为默认</button>`}
+            <button class="primary" onclick="runTest('${esc(g.id)}','${esc(m.id)}')">测试</button>
+            <button class="ghost" title="设置限时可用时段：仅在窗口内可调用，窗口外直接失败（支持跨天）" onclick='openScheduleModal("${esc(g.id)}","${esc(m.id)}",${schWinsAttr})'>${sch ? '时段·' + sch.windows.length : '时段'}</button>
+            <button class="${dis ? 'primary' : 'ghost'}" title="${dis ? '重新启用后可正常调用' : '停用后调用此模型的请求直接失败'}" onclick="toggleModel('${esc(g.id)}','${esc(m.id)}',${dis ? 'false' : 'true'})">${dis ? '启用' : '停用'}</button>
+        </td></tr>`;
+    }).join('');
+    return `<div class="group${COLLAPSED.has(g.id) ? ' collapsed' : ''}" data-gid="${esc(g.id)}">
+      <div class="group-head" title="点击折叠/展开">
+        <span class="dot" style="background:${okFlag ? 'var(--ok)' : 'var(--err)'}"></span>
+        <span class="name">${esc(g.name)}</span>
+        <span class="tag">${g.id}</span>
+        <span class="tag ${okFlag ? 'ok' : 'bad'}">${healthTxt}</span>
+        <span class="spacer"></span>
+        <span class="muted" style="font-size:12px">${g.models.length} 个模型</span>
+        <span class="chev">▾</span>
+      </div>
+      <table>
+        <thead><tr><th>模型 ID</th><th>名称</th><th>标签</th><th class="num">14d 请求</th><th class="num">平均耗时</th><th class="num">操作</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>`;
+  }).join('');
+  refreshStickyVars();
+}
+
+let RECENT_PAGE = 1, RECENT_SIZE = 20;
+let RECENT_SEQ = 0;  // 并发防抖：仅最后一次请求的结果生效（范围/翻页快速切换时）
+
+function recentGo(p) { RECENT_PAGE = p; renderRecent(); }
+function recentSize(v) { RECENT_SIZE = +v; RECENT_PAGE = 1; renderRecent(); }
+
+// 页码序列：首尾常驻，当前页 ±1，间隔以 '…' 占位
+function recentPages(cur, total) {
+  const wanted = new Set([1, total, cur - 1, cur, cur + 1]);
+  const pages = [...wanted].filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
+  const out = [];
+  let prev = 0;
+  for (const p of pages) {
+    if (p - prev > 1) out.push('…');
+    out.push(p);
+    prev = p;
+  }
+  return out;
+}
+
+// 服务端分页：直接读 logs/metrics.jsonl + 30 天归档，突破进程内 200 条上限。
+async function renderRecent() {
+  const el = document.getElementById('recent');
+  const pager = document.getElementById('recent-pager');
+  document.getElementById('recent-sub').textContent =
+    `${rangeLabel()} · 读磁盘日志（最多 30 天归档），服务端分页；TTFT 为首 token 延迟（流式）`;
+  const seq = ++RECENT_SEQ;
+  let resp;
+  try {
+    let qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}` +
+             `&page=${RECENT_PAGE}&page_size=${RECENT_SIZE}`;
+    if (LOG_FILTERS.provider.size)
+      qs += `&provider=${encodeURIComponent([...LOG_FILTERS.provider].join(','))}`;
+    if (LOG_FILTERS.model.size)
+      qs += `&model=${encodeURIComponent([...LOG_FILTERS.model].join(','))}`;
+    resp = await api('/ui/api/logs?' + qs);
+  } catch (e) {
+    if (seq !== RECENT_SEQ) return;  // 已被更晚的请求取代
+    el.innerHTML = `<tr><td colspan="9" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    pager.innerHTML = '';
+    return;
+  }
+  if (seq !== RECENT_SEQ) return;  // 已被更晚的请求取代
+  const rows = resp.rows || [];
+  const total = resp.total || 0;
+  const pages = resp.pages || 1;
+  RECENT_PAGE = resp.page || 1;  // 后端已收敛到合法区间
+  if (!rows.length) {
+    const filtered = LOG_FILTERS.provider.size || LOG_FILTERS.model.size;
+    el.innerHTML = `<tr><td colspan="9" class="empty">${
+      filtered ? '当前筛选条件下没有请求记录' : (total ? '所选范围内没有请求记录' : '还没有请求记录')}</td></tr>`;
+    pager.innerHTML = '';
+    return;
+  }
+  const cmap = STATS.credits_map || {};
+  el.innerHTML = rows.map(r => {
+    const bad = (r.status >= 400 || r.error);
+    const ttft = r.ttft_ms != null ? fmtMs(r.ttft_ms) : '—';
+    const hasTok = (r.prompt_tokens || r.completion_tokens || r.cached_tokens);
+    let tok = '—', tokTitle = '';
+    if (hasTok) {
+      const cacheTxt = r.cached_tokens ? ` · 其中缓存命中 ${fmtNum(r.cached_tokens)}` : '';
+      tok = `↑${fmtNum(r.prompt_tokens)} ↓${fmtNum(r.completion_tokens)}`;
+      tokTitle = `输入 ${r.prompt_tokens}（↑ 含缓存命中）· 输出 ${r.completion_tokens}${cacheTxt}`;
+    }
+    const creditTxt = r.credit != null ? r.credit
+                    : cmap[r.provider + '/' + r.model] || null;
+    // 多账号通道（traepat）：括号内展示账号缩略，hover 看完整 id；≤10 字符直接全显
+    const acct = r.account
+      ? ` <span class="muted" title="账号：${esc(r.account)}">(${esc(r.account.length > 10 ? r.account.slice(0, 6) + '…' : r.account)})</span>`
+      : '';
+    return `<tr>
+      <td class="mono muted">${fmtTime(r.ts)}</td>
+      <td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i><span class="mono muted">${esc(r.provider)}</span>${acct}</td>
+      <td class="mono">${esc(r.model)}</td>
+      <td class="mono muted" title="客户端来源：X-Client-Name 自声明 > UA 推断（旧记录无此字段）">${r.client ? esc(r.client) : '<span class="muted">—</span>'}</td>
+      <td class="num mono">${r.ttft_ms != null ? ttft : '—'}</td>
+      <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
+      <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
+      <td class="num mono">${r.credit != null ? (r.credit_estimated
+          ? `<b style="color:var(--ok)" title="按 token 粗估：(输入+输出)/1M × 100 × 模型倍率；与真实扣费可能有偏差（会话首请求实测偏高约 2~3 倍）">≈${r.credit}</b>`
+          : `<b style="color:var(--ok)" title="上游实扣积分">${r.credit}</b>`)
+        : (creditTxt ? `<span class="tag" title="仅倍率参考（×基准单价），非本次实际消耗；${esc(r.provider)} 不提供单次消耗">${esc(creditTxt)}</span>` : '<span class="muted" title="该上游未提供单次积分消耗">—</span>')}</td>
+      <td>${bad ? `<span class="tag bad" title="${esc(r.error || '')}">${r.status || 'ERR'}</span>` : '<span class="tag ok">OK</span>'}</td>
+    </tr>`;
+  }).join('');
+  const nav = (label, page, disabled) =>
+    `<button class="ghost" ${disabled ? 'disabled' : ''} onclick="recentGo(${page})">${label}</button>`;
+  pager.innerHTML =
+    `<span class="muted">共 ${total} 条</span>` +
+    `<select title="每页条数" onchange="recentSize(this.value)">` +
+      [20, 50, 100].map(n => `<option value="${n}" ${n === RECENT_SIZE ? 'selected' : ''}>${n} 条/页</option>`).join('') +
+    `</select>` +
+    `<span class="spacer"></span>` +
+    nav('«', 1, RECENT_PAGE === 1) +
+    nav('‹', RECENT_PAGE - 1, RECENT_PAGE === 1) +
+    recentPages(RECENT_PAGE, pages).map(p => p === '…'
+      ? '<span class="muted">…</span>'
+      : `<button class="${p === RECENT_PAGE ? 'primary' : 'ghost'}" onclick="recentGo(${p})">${p}</button>`).join('') +
+    nav('›', RECENT_PAGE + 1, RECENT_PAGE === pages) +
+    nav('»', pages, RECENT_PAGE === pages);
+}
+
+// ---- 操作 ----
+async function setDefault(provider, model) {
+  try {
+    await api('/ui/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ default_model: provider + '/' + model })});
+    toast(`默认模型已设为 ${provider}/${model}`);
+    loadAll();
+  } catch (e) { toast('设置失败: ' + e.message, true); }
+}
+
+async function toggleModel(provider, model, disabled) {
+  try {
+    await api('/ui/api/model-toggle', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ provider, model, disabled })});
+    toast(`${provider}/${model} 已${disabled ? '停用（调用将直接失败）' : '启用'}`);
+    loadAll();
+  } catch (e) { toast('操作失败: ' + e.message, true); }
+}
+
+// ── 限时可用时段编辑 ──
+let SCHEDULE_CTX = null;  // { provider, model }
+
+function openScheduleModal(provider, model, windows) {
+  SCHEDULE_CTX = { provider, model };
+  document.getElementById('modal-title').textContent = `设置可用时段 · ${provider}/${model}`;
+  const rows = (windows && windows.length ? windows : []).map(w => scheduleRow(w[0], w[1])).join('');
+  document.getElementById('modal-body').innerHTML = `
+    <div class="muted" style="font-size:13px;margin-bottom:10px">
+      仅在下列时间窗内可调用，窗口外请求直接失败。<b>起 &gt; 止 视为跨天</b>（如 22:00→次日 08:00）。
+      不添加任何时段 = 恢复全天可用。时区：Asia/Shanghai。
+    </div>
+    <div id="sched-rows">${rows}</div>
+    <button class="ghost" style="margin-top:8px" onclick="addScheduleRow()">+ 添加时段</button>
+    <div style="margin-top:16px;text-align:right">
+      <button onclick="closeModal()">取消</button>
+      <button class="primary" onclick="saveSchedule()">保存</button>
+    </div>`;
+  document.getElementById('overlay').classList.add('show');
+}
+
+function scheduleRow(start, end) {
+  return `<div class="sched-row" style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <input type="time" class="sched-start" value="${esc(start || '22:00')}" style="flex:1">
+    <span class="muted">→</span>
+    <input type="time" class="sched-end" value="${esc(end || '08:00')}" style="flex:1">
+    <button class="ghost" title="删除此时段" onclick="this.closest('.sched-row').remove()">✕</button>
+  </div>`;
+}
+
+function addScheduleRow() {
+  document.getElementById('sched-rows').insertAdjacentHTML('beforeend', scheduleRow('', ''));
+}
+
+async function saveSchedule() {
+  if (!SCHEDULE_CTX) return;
+  const windows = [];
+  document.querySelectorAll('#sched-rows .sched-row').forEach(row => {
+    const s = row.querySelector('.sched-start').value;
+    const e = row.querySelector('.sched-end').value;
+    if (s && e && s !== e) windows.push([s, e]);
+  });
+  try {
+    await api('/ui/api/model-schedule', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ ...SCHEDULE_CTX, windows })});
+    toast(windows.length
+      ? `${SCHEDULE_CTX.provider}/${SCHEDULE_CTX.model} 限时可用：${windows.map(w => w.join('~')).join(', ')}`
+      : `${SCHEDULE_CTX.provider}/${SCHEDULE_CTX.model} 已恢复全天可用`);
+    closeModal();
+    loadAll();
+  } catch (e) { toast('保存失败: ' + e.message, true); }
+}
+
+async function runTest(provider, model) {
+  const overlay = document.getElementById('overlay');
+  document.getElementById('modal-title').textContent = `测试 ${provider}/${model}`;
+  document.getElementById('modal-body').innerHTML = '<span class="spin"></span>发送 "hi" 到上游，等待回复…（最长 120s）';
+  overlay.classList.add('show');
+  try {
+    const r = await api('/ui/api/test', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ provider, model })});
+    const u = r.usage || {};
+    document.getElementById('modal-body').innerHTML = r.ok ? `
+      <div class="kv">
+        <span class="k">结果</span><span style="color:var(--ok)">✓ 成功</span>
+        <span class="k">耗时</span><span class="mono">${fmtMs(r.latency_ms)}</span>
+        <span class="k">回复模型</span><span class="mono">${esc(r.model || '')}</span>
+        <span class="k">Tokens</span><span class="mono">${u.prompt_tokens ?? '—'} + ${u.completion_tokens ?? '—'}</span>
+        <span class="k">finish</span><span class="mono">${esc(r.finish_reason || '—')}</span>
+      </div>
+      <pre class="view">${esc(r.content)}</pre>` : `
+      <div class="kv">
+        <span class="k">结果</span><span style="color:var(--err)">✗ 失败</span>
+        <span class="k">耗时</span><span class="mono">${fmtMs(r.latency_ms)}</span>
+        <span class="k">状态</span><span class="mono">${r.status || '—'}</span>
+      </div>
+      <pre class="view" style="color:#ffb3b3">${esc(r.error || '未知错误')}</pre>`;
+    loadAll();
+  } catch (e) {
+    document.getElementById('modal-body').innerHTML =
+      `<pre class="view" style="color:#ffb3b3">${esc(e.message)}</pre>`;
+  }
+}
+
+function closeModal() { document.getElementById('overlay').classList.remove('show'); }
+document.getElementById('overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeModal();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+let initTab = location.hash.replace('#', '');
+try { initTab = initTab || localStorage.getItem('bp-tab') || ''; } catch (e) {}
+switchTab(initTab);
+loadAll();
+setInterval(loadAll, 30000);
+</script>
+</body>
+</html>

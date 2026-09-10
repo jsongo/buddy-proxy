@@ -83,6 +83,9 @@ _DOUBAO_CHAT_MODELS: dict[str, dict[str, Any]] = {
 # ``reasoning_effort`` 字段按模型覆盖
 _DEFAULT_REASONING_EFFORT = 5
 
+# 新会话引导消息：纯文本、不触发工具（见 DoubaoProvider.stream_agent_task）
+_BOOTSTRAP_TASK = "（会话初始化）请直接回复两个字：就绪"
+
 
 def _extract_prompt(messages: list[dict[str, Any]]) -> str:
     """从 OpenAI 标准 messages 提取文本提示词。
@@ -539,6 +542,13 @@ class DoubaoProvider(BaseProvider):
         会话语义：session_id 显式指定时续聊该会话（"new"/空串 = 强制新建）；
         缺省续聊进程内默认会话（即最近一次任务用的会话，首次自动新建）。
 
+        新会话引导（2026-09-09 实测）：runtime_type=2 的新会话要等 App 侧
+        完成运行时握手（「工作环境准备中」），裸 fetch 不会做这一步，首条
+        消息里一旦触发工具调用就会一直报错重试直到流卡死。因此新建会话时
+        先发一条纯文本引导消息把会话建起来（纯文本回复不需要工具），拿到
+        conversation_id 后以续聊（runtime_type=1）发正式任务，工具即可正常
+        执行；引导消息的回复不透出给客户端。
+
         事件协议（每行 ``data: <JSON>``）：
         - ``{"type":"start","model":...,"session_id":...}``  首事件（session_id 为本次续聊的会话，新建时 null）
         - ``{"type":"session","session_id":"..."}``          从上游拿到 conversation_id 后发一次
@@ -556,6 +566,38 @@ class DoubaoProvider(BaseProvider):
             conv = None if s.lower() in ("", "new") else s
         result_conv = conv
         yield _evt({"type": "start", "model": model, "session_id": conv})
+
+        if conv is None:
+            # 新会话引导：见 docstring。引导失败则整个任务失败。
+            boot_conv = ""
+            async for event in self._client.chat_completion(
+                _BOOTSTRAP_TASK, conversation_id=None, model_spec=model_spec,
+            ):
+                if event.get("error"):
+                    status = event.get("status", 0)
+                    body_text = event.get("body", "")
+                    log.error("doubao agent bootstrap upstream error %s: %s",
+                              status, body_text[:200])
+                    self._client.record_failure(status or 0)
+                    yield _evt({"type": "error",
+                                "message": f"上游 HTTP {status}: {body_text[:300]}"})
+                    return
+                if event.get("_event") == "STREAM_ERROR" or event.get("error_code"):
+                    code = event.get("error_code", 0)
+                    msg = event.get("error_msg", "unknown error")
+                    self._client.record_failure(code)
+                    yield _evt({"type": "error", "message": f"code={code}: {msg}"})
+                    return
+                if not boot_conv:
+                    cid = self._client.extract_conversation_id(event)
+                    if cid and cid != "0":
+                        boot_conv = cid
+            if not boot_conv:
+                yield _evt({"type": "error", "message": "会话引导失败：未拿到 conversation_id"})
+                return
+            conv = boot_conv
+            result_conv = conv
+            yield _evt({"type": "session", "session_id": conv})
 
         thinking_count = 0
         in_thinking = False
