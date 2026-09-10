@@ -37,6 +37,7 @@ class ProxyState:
         default_provider: str = "codebuddy",
         default_model: Optional[str] = None,
         disabled_models: Optional[set[str]] = None,
+        model_schedules: Optional[dict[str, list]] = None,
         metrics: Optional[Any] = None,
         benefits: Optional[Any] = None,
     ):
@@ -52,6 +53,10 @@ class ProxyState:
         # 已停用的模型键集合，形如 "codebuddy/glm-4.7"（provider/model）。
         # 命中的 (provider, model) 组合在转发时直接失败（settings.py 持久化，/ui 可改）
         self.disabled_models: set[str] = set(disabled_models or ())
+        # 限时可用模型：键 "provider/model" → 允许时间窗列表 [["HH:MM","HH:MM"], ...]。
+        # 命中的模型仅在窗口内放行、窗口外 403（与 disabled_models 并存，disabled
+        # 优先级更高）。settings.py 持久化，/ui 可改。空 dict = 所有模型不受时段限制。
+        self.model_schedules: dict[str, list] = dict(model_schedules or {})
         # 请求指标收集器（metrics.MetricsCollector，供 /ui 图表聚合）
         self.metrics = metrics
         # 打卡/额度管理器（benefits.BenefitsManager，供 /ui 打卡日历与额度展示）
