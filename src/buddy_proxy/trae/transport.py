@@ -94,6 +94,8 @@ def _send_trae_work_chat(
         "Accept": "text/event-stream" if stream else "application/json",
     }
 
+    # 聊天网关固定 BASE_URL_CN，**不要**改用凭证里的 work["api_host"]：
+    # 那是 OAuth 域，对该路径返回 404（2026-09 实测）。
     url = f"{BASE_URL_CN}/api/agent/v3/llm_utils_chat"
     # 上游断流多为瞬态（实测：长响应读到一半连接被关 → http.client.IncompleteRead，
     # 曾被流式层当正文吐成 "[Error: IncompleteRead(...)]"）。读失败后丢弃半截响应，

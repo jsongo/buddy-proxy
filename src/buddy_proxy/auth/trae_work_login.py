@@ -168,6 +168,8 @@ def main() -> int:
         "access_token": cred["access_token"],
         "refresh_token": cred["refresh_token"],
         "expires_at": cred["expires_at"],
+        # OAuth 域（ExchangeToken/GetUserInfo 用），**不是聊天网关**：
+        # 聊天固定连 trae/config.py 的 BASE_URL_CN，读本字段会 404（实测）。
         "api_host": API_HOST,
         "machine_id": machine_id,
         "device_id": device_id,
