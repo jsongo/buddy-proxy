@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from typing import Any
@@ -125,16 +126,28 @@ def _map_model(requested: str) -> str:
     return MODEL_MAP.get(requested, requested)
 
 
+_DEBUG_SENSITIVE_KEYS = {"raw", "body", "content", "messages", "token", "uid", "tool_calls", "arguments"}
+
+
 def _debug_dump(event: str, **kwargs: Any) -> None:
-    """WB_DEBUG_DUMP=1 时把调试事件写进 jsonl 日志（完整请求/响应/路由决策）。
+    """WB_DEBUG_DUMP=1 时记录安全诊断摘要，绝不落请求或响应原文。
 
     惰性 import state 避免模块级循环依赖；失败静默（调试设施不能影响主流程）。
+    保留敏感文本的长度和短哈希，供关联同一故障使用。
     """
     if not os.environ.get("WB_DEBUG_DUMP"):
         return
+    safe: dict[str, Any] = {}
+    for key, value in kwargs.items():
+        if key in _DEBUG_SENSITIVE_KEYS:
+            raw = str(value).encode("utf-8", errors="replace")
+            safe[f"{key}_bytes"] = len(raw)
+            safe[f"{key}_sha256"] = hashlib.sha256(raw).hexdigest()[:16]
+        else:
+            safe[key] = value
     try:
-        from .state import get_state
-        get_state().write_log(event, **kwargs)
+        from ..core.state import get_state
+        get_state().write_log(event, **safe)
     except Exception:
         pass
 

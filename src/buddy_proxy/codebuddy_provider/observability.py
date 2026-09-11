@@ -24,9 +24,9 @@ from typing import Any, Optional
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from buddy_proxy.credit_estimate import estimate_credit
-from buddy_proxy.metrics import ACCOUNT_META, SSEUsageExtractor, normalize_usage
-from buddy_proxy.state import (
+from buddy_proxy.core.credit_estimate import estimate_credit
+from buddy_proxy.core.metrics import ACCOUNT_META, SSEUsageExtractor, normalize_usage
+from buddy_proxy.core.state import (
     diagnostic,
     get_state,
     is_policy_blocked,
@@ -67,7 +67,7 @@ def _client_names_path() -> pathlib.Path:
     configured = os.environ.get("BUDDY_CLIENT_NAMES_FILE", "")
     if configured:
         return pathlib.Path(configured)
-    from buddy_proxy.paths import state_file
+    from buddy_proxy.core.paths import state_file
     return state_file("buddy_client_names.json", legacy="buddy_client_names.json")
 
 
@@ -272,67 +272,49 @@ def body_summary(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def log_client_request(method: str, path: str, body: dict[str, Any] | None, **client_info) -> None:
-    """Log client request with verbosity control.
+    """记录客户端请求的安全摘要，不持久化请求原文。
 
-    ``client_info`` 携带来源标识（user_agent / client_ip / api_key_hint），
-    由 routes 层从请求头提取，用于区分是哪个客户端在调用。
+    ``verbose_llm`` 保持兼容，但只表示输出更多运行诊断，不能突破日志
+    红线：token、UID、body 和工具参数均不写入日志。
     """
     state = get_state()
-
-    if state.verbose_llm:
-        state.write_log("client_request", method=method, path=path,
-                       **client_info, body=body)
+    if body:
+        summary = body_summary(body)
+        state.write_log("client_request_summary", method=method, path=path,
+                        **client_info, **summary)
     else:
-        if body:
-            summary = body_summary(body)
-            state.write_log("client_request_summary", method=method, path=path,
-                            **client_info, **summary)
-        else:
-            state.write_log("client_request_summary", method=method, path=path, **client_info)
+        state.write_log("client_request_summary", method=method, path=path, **client_info)
 
 
 def log_upstream_request(protocol: str, body: dict[str, Any]) -> None:
-    """Log upstream request with verbosity control."""
+    """记录上游请求安全摘要，不持久化请求原文。"""
     state = get_state()
-
-    if state.verbose_llm:
-        state.write_log("upstream_request", protocol=protocol,
-                       method="POST", path="/v2/chat/completions", body=body)
-        diagnostic("upstream_request", protocol=protocol, **body_summary(body))
-    else:
-        messages = body.get("messages", [])
-        total_chars = sum(
-            len(str(m.get("content", "")))
-            for m in messages
-            if isinstance(m, dict)
-        )
-        summary = {
-            "model": body.get("model"),
-            "message_count": len(messages),
-            "tool_count": len(body.get("tools", [])),
-            "stream": bool(body.get("stream")),
-            "total_chars": total_chars
-        }
-        state.write_log("upstream_request_summary", protocol=protocol, **summary)
-        diagnostic("upstream_request_summary", protocol=protocol, **summary)
+    messages = body.get("messages", [])
+    total_chars = sum(
+        len(str(m.get("content", "")))
+        for m in messages
+        if isinstance(m, dict)
+    )
+    summary = {
+        "model": body.get("model"),
+        "message_count": len(messages),
+        "tool_count": len(body.get("tools", [])),
+        "stream": bool(body.get("stream")),
+        "total_chars": total_chars,
+    }
+    state.write_log("upstream_request_summary", protocol=protocol, **summary)
+    diagnostic("upstream_request_summary", protocol=protocol, **summary)
 
 
 def log_upstream_response(protocol: str, text: str, **stats) -> None:
-    """Log upstream response with verbosity control."""
+    """记录上游响应的长度、短哈希和状态，不记录正文。"""
     state = get_state()
-
     common = {
         "protocol": protocol,
         "content_length": len(text),
         "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
         "safety_message_detected": is_policy_blocked(text),
-        **stats
+        **stats,
     }
-
-    if state.verbose_llm:
-        common["content_preview"] = text[:200] if text else ""
-
     diagnostic("response", **common)
-    state.write_log("stream_completed" if stats.get("stream") else "response",
-                   **{k: v for k, v in common.items()
-                      if k not in ("content_preview",)})
+    state.write_log("stream_completed" if stats.get("stream") else "response", **common)

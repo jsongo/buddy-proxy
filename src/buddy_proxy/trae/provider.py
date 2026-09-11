@@ -15,8 +15,8 @@ from typing import Any, AsyncIterator, Sequence
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ..anthropic_adapter import chat_completion_to_anthropic_message
-from ..providers import BaseProvider
+from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
+from ..providers.base import BaseProvider
 from .benefits_api import claim_checkin_credits, fetch_checkin_status, fetch_ent_usage
 from .config import (
     BASE_URL_CN,

@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Any, Iterator
 
-from ..anthropic_adapter import AnthropicStreamConverter
+from ..protocols.anthropic_adapter import AnthropicStreamConverter
 
 log = logging.getLogger(__name__)
 

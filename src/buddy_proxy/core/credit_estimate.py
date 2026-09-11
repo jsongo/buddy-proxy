@@ -29,7 +29,7 @@ CREDITS_PER_M_PER_MULT = 100.0
 def _load_trae_tables() -> tuple[dict[str, str], dict[str, str]]:
     """惰性加载 Trae 的倍率表与别名映射（避免模块级循环导入）。"""
     try:
-        from .trae.config import MODEL_CREDITS, MODEL_MAP
+        from ..trae.config import MODEL_CREDITS, MODEL_MAP
         return MODEL_CREDITS, MODEL_MAP
     except Exception:
         return {}, {}

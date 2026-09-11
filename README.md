@@ -268,7 +268,7 @@ providers:
                           ~/.buddy-proxy/settings.json (editable from the admin UI) wins
 --login                   browser login at startup
 --no-browser              don't auto-open the browser on login
---verbose-llm             log full request/response bodies
+--verbose-llm             emit expanded safe diagnostics (never logs request/response bodies, tokens, or UIDs)
 --mock-dir DIR            serve recorded fixtures (testing)
 ```
 

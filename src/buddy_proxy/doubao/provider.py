@@ -25,7 +25,7 @@ from typing import Any, AsyncIterator, Sequence
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .providers import BaseProvider
+from ..providers.base import BaseProvider
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ class DoubaoProvider(BaseProvider):
         self,
         startup_timeout: float = 120.0,
     ):
-        from .doubao.cdp_client import CDPDoubaoClient
+        from .cdp_client import CDPDoubaoClient
 
         self._client = CDPDoubaoClient()
         self._startup_timeout = startup_timeout
@@ -319,8 +319,8 @@ class DoubaoProvider(BaseProvider):
             ):
                 if event.get("error"):
                     status = event.get("status", 0)
-                    body_text = event.get("body", "")
-                    log.error("doubao stream error %s: %s", status, body_text[:200])
+                    # 上游错误 body 可能回显请求/账号信息，只记录状态码。
+                    log.error("doubao stream error status=%s", status)
                     self._client.record_failure(status or 0)
                     yield f"data: {json.dumps(_chunk({'content': f'[Error {status}]'}), ensure_ascii=False)}\n\n"
                     yield "data: [DONE]\n\n"
@@ -575,12 +575,9 @@ class DoubaoProvider(BaseProvider):
             ):
                 if event.get("error"):
                     status = event.get("status", 0)
-                    body_text = event.get("body", "")
-                    log.error("doubao agent bootstrap upstream error %s: %s",
-                              status, body_text[:200])
+                    log.error("doubao agent bootstrap upstream error status=%s", status)
                     self._client.record_failure(status or 0)
-                    yield _evt({"type": "error",
-                                "message": f"上游 HTTP {status}: {body_text[:300]}"})
+                    yield _evt({"type": "error", "message": f"上游 HTTP {status}"})
                     return
                 if event.get("_event") == "STREAM_ERROR" or event.get("error_code"):
                     code = event.get("error_code", 0)
@@ -618,11 +615,9 @@ class DoubaoProvider(BaseProvider):
             ):
                 if event.get("error"):
                     status = event.get("status", 0)
-                    body_text = event.get("body", "")
-                    log.error("doubao agent task upstream error %s: %s", status, body_text[:200])
+                    log.error("doubao agent task upstream error status=%s", status)
                     self._client.record_failure(status or 0)
-                    yield _evt({"type": "error",
-                                "message": f"上游 HTTP {status}: {body_text[:300]}"})
+                    yield _evt({"type": "error", "message": f"上游 HTTP {status}"})
                     return
 
                 if not result_conv:

@@ -99,7 +99,7 @@ def _work_headers(work: dict[str, Any]) -> dict[str, str]:
 _auth_cache: tuple[str, str] | None = None
 # 凭证路径可用 TRAE_WORK_CRED_PATH 覆盖；默认统一存 ~/.buddy-proxy/，
 # 首次访问自动从遗留位置 ~/.ethan/trae_work.json 迁移（copy，原文件保留）。
-from ..paths import state_file
+from ..core.paths import state_file
 
 
 def _work_cred_path() -> Path:

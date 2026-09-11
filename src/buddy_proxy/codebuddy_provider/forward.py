@@ -10,11 +10,11 @@ from typing import Any
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from buddy_proxy.state import (
+from buddy_proxy.core.state import (
     diagnostic,
     get_state,
 )
-from buddy_proxy import settings as settings_mod
+from buddy_proxy.core import settings as settings_mod
 
 from .observability import _instrument
 from .provider import _default_codebuddy

@@ -20,9 +20,9 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 
-from buddy_proxy.dsml_parser import DSMLStreamBuffer
-from buddy_proxy.logging_setup import now_s
-from buddy_proxy.state import (
+from buddy_proxy.protocols.dsml_parser import DSMLStreamBuffer
+from buddy_proxy.core.logging_setup import now_s
+from buddy_proxy.core.state import (
     diagnostic,
     get_state,
 )
@@ -31,7 +31,7 @@ from .observability import log_upstream_response
 
 # 可选高级功能模块（脱敏 / 投影 / 协议转换器）
 try:
-    from buddy_proxy.desensitize import desensitize_body
+    from buddy_proxy.core.desensitize import desensitize_body
     HAS_DESENSITIZE = True
 except ImportError:
     HAS_DESENSITIZE = False
@@ -41,7 +41,7 @@ except ImportError:
 
 
 try:
-    from buddy_proxy.responses_projection import project_responses_chat_body
+    from buddy_proxy.protocols.responses_projection import project_responses_chat_body
     HAS_PROJECTION = True
 except ImportError:
     HAS_PROJECTION = False
@@ -51,7 +51,7 @@ except ImportError:
 
 
 try:
-    from buddy_proxy.responses_adapter import responses_request_to_chat, ResponsesStreamConverter
+    from buddy_proxy.protocols.responses_adapter import responses_request_to_chat, ResponsesStreamConverter
     HAS_RESPONSES_ADAPTER = True
 except ImportError:
     HAS_RESPONSES_ADAPTER = False
@@ -63,7 +63,7 @@ except ImportError:
 
 
 try:
-    from buddy_proxy.anthropic_adapter import (
+    from buddy_proxy.protocols.anthropic_adapter import (
         AnthropicStreamConverter,
         anthropic_to_chat,
         chat_completion_to_anthropic_message,
@@ -146,7 +146,6 @@ async def stream_upstream(
     response_text_started = False
     chunk_count = 0
     done_seen = False
-    raw_chunks: list[bytes] = []
     last_progress_log = stream_start_time
     detected_tool_calls = []
     # 【修复 C3】记录最后一个上游 chunk 的元数据，供流结束 flush 时复用，
@@ -261,7 +260,6 @@ async def stream_upstream(
                                 elapsed=round(now - stream_start_time, 2))
                             last_progress_log = now
                     line = line.strip()
-                    raw_chunks.append(line.encode("utf-8"))
 
                     if not line.startswith("data:"):
                         continue
@@ -548,12 +546,7 @@ async def stream_upstream(
         yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n".encode()
 
     finally:
-        # 【日志】流完成
-        if state.verbose_llm:
-            raw_response = b"\n".join(raw_chunks)
-            state.write_body_log("upstream_response", raw_response, protocol=protocol,
-                                status=200, method="POST", path="/v2/chat/completions")
-
+        # 不收集或落盘原始 SSE 正文；仅在下方记录安全摘要。
         logged_text = (
             anthropic_state.text if anthropic_state
             else responses_state.text if responses_state

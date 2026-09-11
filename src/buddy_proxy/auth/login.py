@@ -2,11 +2,11 @@
 
 用法（一般通过 proxy.sh 调用，也可直接运行）：
 
-    python -m buddy_proxy.login codebuddy           # CodeBuddy（腾讯）浏览器授权
-    python -m buddy_proxy.login workbuddy           # 同 codebuddy（workbuddy 是其别名）
-    python -m buddy_proxy.login trae                # Trae Work (SOLO)：浏览器登录后粘贴回调链接
-    python -m buddy_proxy.login zcode               # 检查并打印 zcode 凭据配置指引（API key，无交互登录）
-    python -m buddy_proxy.login doubao              # 打印豆包（CDP）说明
+    python -m buddy_proxy.auth.login codebuddy           # CodeBuddy（腾讯）浏览器授权
+    python -m buddy_proxy.auth.login workbuddy           # 同 codebuddy（workbuddy 是其别名）
+    python -m buddy_proxy.auth.login trae                # Trae Work (SOLO)：浏览器登录后粘贴回调链接
+    python -m buddy_proxy.auth.login zcode               # 检查并打印 zcode 凭据配置指引（API key，无交互登录）
+    python -m buddy_proxy.auth.login doubao              # 打印豆包（CDP）说明
 
 可选参数：
     --no-browser    codebuddy 登录不自动打开浏览器，只打印授权链接
@@ -36,7 +36,7 @@ def _login_codebuddy(open_browser: bool = True) -> int:
     """CodeBuddy（copilot.tencent.com）浏览器 OAuth 登录。"""
     import json
 
-    from buddy_proxy.codebuddy_client import CodeBuddyClient, CodeBuddyError
+    from buddy_proxy.codebuddy_provider.client import CodeBuddyClient, CodeBuddyError
 
     endpoint = os.getenv("CODEBUDDY_ENDPOINT", "https://copilot.tencent.com")
     client = CodeBuddyClient(endpoint)
@@ -83,7 +83,7 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     trae.cn 授权页（auth_type=local）要求本机 18080 回调服务在线，否则页面报
     「登录失败 - 网络错误」。这里自动拉起 trae_work_login_server，授权成功后
     回调服务会删除 state 文件，以此作为完成信号。手动粘贴模式保留：
-    python3 -m buddy_proxy.trae_work_login
+    python3 -m buddy_proxy.auth.trae_work_login
     """
     import json
     import socket
@@ -92,7 +92,7 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     import time
     import webbrowser
 
-    from buddy_proxy.trae_work_login import (
+    from buddy_proxy.auth.trae_work_login import (
         OUT_PATH,
         STATE_PATH,
         STATE_TTL,
@@ -118,7 +118,7 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
         print("[*] 18080 端口已有回调服务在监听，直接复用")
     else:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "buddy_proxy.trae_work_login_server"],
+            [sys.executable, "-m", "buddy_proxy.auth.trae_work_login_server"],
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
@@ -174,7 +174,7 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     _stop(proc)
     print(
         "[!] 登录未完成（超时/取消）。可重试 buddy login trae，"
-        "或手动模式：python3 -m buddy_proxy.trae_work_login",
+        "或手动模式：python3 -m buddy_proxy.auth.trae_work_login",
         file=sys.stderr,
     )
     return 1
@@ -182,7 +182,7 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
 
 def _login_zcode(**_kwargs) -> int:
     """zcode 无交互登录：凭据是 API key，这里检查配置并打印指引。"""
-    from buddy_proxy.zcode_provider import resolve_credentials
+    from buddy_proxy.providers.zcode import resolve_credentials
 
     key, base = resolve_credentials()
     if key:
@@ -216,7 +216,7 @@ _DISPATCH = {
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="buddy_proxy.login",
+        prog="buddy_proxy.auth.login",
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",

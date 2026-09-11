@@ -21,9 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from buddy_proxy import __main__ as m
-from buddy_proxy import state as st
+from buddy_proxy.core import state as st
 from buddy_proxy import trae_provider as tp
-from buddy_proxy.anthropic_adapter import (
+from buddy_proxy.protocols.anthropic_adapter import (
     AnthropicStreamConverter,
     anthropic_request_to_chat,
     chat_completion_to_anthropic_message,
@@ -213,7 +213,7 @@ def test_nonstream_convert_tool_calls_with_null_content():
 
 def test_think_split_only_leading():
     """正文中段的 <think> 不拆（避免误伤举例文本）。"""
-    from buddy_proxy.anthropic_adapter import _split_leading_think
+    from buddy_proxy.protocols.anthropic_adapter import _split_leading_think
     thinking, text = _split_leading_think("前文 <think>xx</think> 后文")
     assert thinking == ""
     assert text == "前文 <think>xx</think> 后文"
@@ -359,7 +359,7 @@ def test_stream_converter_usage_includes_input_tokens():
 def test_stream_converter_usage_carries_credit_and_cache():
     """CodeBuddy 上游 usage 里的 credit/cached_tokens 必须透传到 anthropic
     流——否则 /v1/messages 的请求在 /ui 指标里记不到积分与缓存。"""
-    from buddy_proxy.metrics import SSEUsageExtractor
+    from buddy_proxy.core.metrics import SSEUsageExtractor
 
     conv = AnthropicStreamConverter("glm-5.3-flash")
     events = []
@@ -393,7 +393,7 @@ def test_nonstream_anthropic_message_carries_credit_and_cache():
     Anthropic 语义 input_tokens 不含缓存，须扣除后再输出，
     否则客户端把 input + cache_read 加总会双倍计数。
     """
-    from buddy_proxy.anthropic_adapter import chat_completion_to_anthropic_message
+    from buddy_proxy.protocols.anthropic_adapter import chat_completion_to_anthropic_message
 
     msg = chat_completion_to_anthropic_message({
         "model": "glm-5.3-flash",

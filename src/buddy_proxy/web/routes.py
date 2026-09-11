@@ -13,13 +13,13 @@ from typing import Any
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from buddy_proxy.state import (
+from buddy_proxy.core.state import (
     app,
     _get_state_or_none,
     diagnostic,
     get_state,
 )
-from buddy_proxy.model_list import load_models_from_local_config, model_to_codex_format
+from buddy_proxy.web.model_list import load_models_from_local_config, model_to_codex_format
 from buddy_proxy.codebuddy_provider import (
     CLIENT_TAG,
     HAS_PROJECTION,
@@ -34,7 +34,7 @@ from buddy_proxy.codebuddy_provider import (
 
 # 尝试导入高级功能模块（可选）
 try:
-    from buddy_proxy.desensitize import desensitize_body
+    from buddy_proxy.core.desensitize import desensitize_body
     HAS_DESENSITIZE = True
 except ImportError:
     HAS_DESENSITIZE = False
@@ -153,14 +153,14 @@ def client_meta(request: Request) -> dict[str, str]:
     auth = request.headers.get("x-api-key") or request.headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
         auth = auth[7:]
-    key_hint = f"{auth[:4]}…{auth[-4:]}" if len(auth) > 8 else (auth or "-")
     user_agent = request.headers.get("user-agent", "-")
     client_name = request.headers.get("x-client-name", "")
     CLIENT_TAG.set(resolve_client_tag(user_agent, client_name, api_key=auth))
     return {
         "user_agent": user_agent,
         "client_ip": request.client.host if request.client else "-",
-        "api_key_hint": key_hint,
+        # 不记录 API key 的明文或片段；resolve_client_tag 仅在内存中匹配本地映射。
+        "has_api_key": bool(auth),
         "client_name": client_name,
     }
 
@@ -245,10 +245,9 @@ async def chat_completions(request: Request):
     log_client_request("POST", "/v1/chat/completions", body, **client_meta(request))
     diagnostic("request", protocol="openai", **body_summary(body))
 
-    # 调试抓包：WB_DEBUG_DUMP=1 时落完整请求体（含 messages 全文、tools），
-    # 用于排查下游 agent 的协议细节（默认关闭，不影响生产日志）
+    # 调试开关只增加安全摘要，绝不落请求原文、token、UID 或工具参数。
     if os.environ.get("WB_DEBUG_DUMP"):
-        state.write_log("debug_full_request", body=body)
+        state.write_log("debug_request_summary", **body_summary(body))
 
     return await forward_chat(body, "openai")
 

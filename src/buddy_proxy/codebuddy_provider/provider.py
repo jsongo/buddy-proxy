@@ -11,8 +11,8 @@ from typing import Any
 
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from buddy_proxy.providers import BaseProvider
-from buddy_proxy.state import diagnostic
+from buddy_proxy.providers.base import BaseProvider
+from buddy_proxy.core.state import diagnostic
 
 from .observability import body_summary
 from .pipeline import desensitize_body

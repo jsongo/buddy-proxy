@@ -145,5 +145,5 @@ def _token_file() -> pathlib.Path:
     if configured:
         return pathlib.Path(configured)
     # 状态统一收敛到 ~/.buddy-proxy/；首次访问自动从 ~/.ethan/ 迁移。
-    from buddy_proxy.paths import state_file
+    from buddy_proxy.core.paths import state_file
     return state_file("trae_pat_token.json", legacy="trae_pat_token.json")

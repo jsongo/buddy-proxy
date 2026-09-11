@@ -23,12 +23,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 
 from buddy_proxy import __main__ as m
-from buddy_proxy import state as st
-from buddy_proxy import settings as settings_mod
+from buddy_proxy.core import state as st
+from buddy_proxy.core import settings as settings_mod
 from buddy_proxy.benefits import BenefitsManager, CheckinHistory
-from buddy_proxy.metrics import MetricsCollector, SSEUsageExtractor, normalize_usage
-from buddy_proxy.providers import BaseProvider
-from buddy_proxy.zcode_provider import _quota_items
+from buddy_proxy.core.metrics import MetricsCollector, SSEUsageExtractor, normalize_usage
+from buddy_proxy.providers.base import BaseProvider
+from buddy_proxy.providers.zcode import _quota_items
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +539,7 @@ def test_normalize_usage_shapes():
 
 def test_responses_converter_carries_credit_and_cache():
     """Responses 流式转换完成事件要带真实 cached_tokens 与 credit。"""
-    from buddy_proxy.responses_adapter import ResponsesStreamConverter
+    from buddy_proxy.protocols.responses_adapter import ResponsesStreamConverter
 
     conv = ResponsesStreamConverter(model="glm-5.3-flash")
     for chunk in (
@@ -804,11 +804,16 @@ def test_checkin_disabled_provider_not_touched(tmp_path):
 
 
 def test_zcode_quota_items_normalization():
+    # 窗口标签按「距重置还有多久」分类（<2 天=5 小时窗口，2~10 天=每周窗口），
+    # 相对 time.time() 判定。用固定时间戳会随真实日期漂移，故按 now 构造：
+    now_ms = int(time.time() * 1000)
+    week_reset = now_ms + 5 * 86400 * 1000   # 5 天后重置 → 每周窗口
+    hourly_reset = now_ms + 3600 * 1000       # 1 小时后重置 → 5 小时窗口
     data = {"limits": [
         {"type": "CREDIT_LIMIT", "usage": 10000, "currentValue": 4242,
-         "remaining": 5757, "percentage": 42, "nextResetTime": 1789035412996},
+         "remaining": 5757, "percentage": 42, "nextResetTime": week_reset},
         {"type": "CREDIT_LIMIT", "usage": 2000, "currentValue": 1249,
-         "remaining": 750, "percentage": 62, "nextResetTime": 1788603896427},
+         "remaining": 750, "percentage": 62, "nextResetTime": hourly_reset},
     ], "level": "lite"}
     items = _quota_items(data)
     # 按 nextResetTime 升序：5 小时窗口在前
@@ -854,7 +859,7 @@ def test_zcode_retries_transient_disconnect():
     """上游在返回任何字节前断连 → 原地重发一次，成功即正常返回。"""
     import asyncio
     import httpx
-    from buddy_proxy.zcode_provider import ZcodeProvider
+    from buddy_proxy.providers.zcode import ZcodeProvider
 
     p = ZcodeProvider(api_key="k", base_url="https://open.bigmodel.cn/api/anthropic")
     calls = {"n": 0}
@@ -918,6 +923,18 @@ def test_load_dotenv_multiline_json_with_brace_in_string(tmp_path, monkeypatch):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+def test_settings_write_is_atomic_and_private(tmp_path, monkeypatch):
+    """设置落盘用原子替换，且最终文件保持仅当前用户可读。"""
+    path = tmp_path / "nested" / "settings.json"
+    monkeypatch.setenv("BUDDY_PROXY_SETTINGS", str(path))
+    settings_mod.save_settings({"default_model": "glm-5.3"})
+    settings_mod.save_settings({"default_provider": "trae"})
+    assert settings_mod.load_settings()["default_model"] == "glm-5.3"
+    assert settings_mod.load_settings()["default_provider"] == "trae"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert not list(path.parent.glob(".settings.json.*.tmp"))
+
 
 def test_reject_if_disabled_uses_model_key_alias(env, monkeypatch):
     """停用/时段键经 settings.model_key 归一：legacy workbuddy/* 进来的请求

@@ -34,19 +34,19 @@ import pathlib
 import uvicorn
 from fastapi import HTTPException
 
-from buddy_proxy.codebuddy_client import CodeBuddyClient
-from buddy_proxy.providers import BaseProvider
-from buddy_proxy.doubao_provider import DoubaoProvider
-from buddy_proxy.logging_setup import setup_logging, setup_json_logging
-from buddy_proxy.metrics import MetricsCollector
+from buddy_proxy.codebuddy_provider.client import CodeBuddyClient
+from buddy_proxy.providers.base import BaseProvider
+from buddy_proxy.doubao.provider import DoubaoProvider
+from buddy_proxy.core.logging_setup import setup_logging, setup_json_logging
+from buddy_proxy.core.metrics import MetricsCollector
 from buddy_proxy.benefits import BenefitsManager
-from buddy_proxy import settings as settings_mod
-from buddy_proxy.state import ProxyState, app
-from buddy_proxy.settings import normalize_default_model
+from buddy_proxy.core import settings as settings_mod
+from buddy_proxy.core.state import ProxyState, app
+from buddy_proxy.core.settings import normalize_default_model
 
 # 导入 routes / ui 以注册所有 @app 路由（副作用导入）
-from buddy_proxy import routes as _routes  # noqa: F401
-from buddy_proxy import ui as _ui  # noqa: F401
+from buddy_proxy.web import routes as _routes  # noqa: F401
+from buddy_proxy.web import ui as _ui  # noqa: F401
 
 
 _DEFAULT_ENV = pathlib.Path(__file__).resolve().parents[2] / ".env"
@@ -134,7 +134,7 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
 
 
 def main():
-    import buddy_proxy.state as _state
+    import buddy_proxy.core.state as _state
 
     _load_dotenv()
     parser = argparse.ArgumentParser(description="CodeBuddy local API proxy")
@@ -171,7 +171,7 @@ def main():
     parser.add_argument("--no-browser", action="store_true",
                         help="登录时不自动打开浏览器")
     parser.add_argument("--verbose-llm", action="store_true",
-                        help="log full LLM request/response content (default: summary only, saves 98%% space)")
+                        help="输出扩展安全诊断（绝不记录请求/响应体、token 或 UID）")
     parser.add_argument("--default-model", default=None,
                         help="默认启用模型，形如 zcode/glm-5.3（或裸 glm-5.3 按路由自动匹配通道）；"
                              "客户端请求未带 model 字段时使用。"
@@ -209,7 +209,7 @@ def main():
     # （小写 id），若 trae 先注册，forward_chat 自动匹配会先命中 trae，glm-*
     # 请求就落不到 zcode coding-plan 通道。providers dict 按插入序遍历匹配。
     if args.zcode:
-        from buddy_proxy.zcode_provider import ZcodeProvider
+        from buddy_proxy.providers.zcode import ZcodeProvider
 
         zcode = ZcodeProvider()
         try:
