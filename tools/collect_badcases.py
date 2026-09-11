@@ -4,8 +4,8 @@
 下次再遇到"回复里出现 {"name": ... / <tool_call / seed:tool_call 之类"
 的泄漏，不用再翻聊天记录：跑
 
-    python3 collect_badcases.py            # 扫描并列出
-    python3 collect_badcases.py --save     # 顺带落盘 fixtures/badcases/
+    python3 tools/collect_badcases.py            # 扫描并列出
+    python3 tools/collect_badcases.py --save     # 顺带落盘 fixtures/badcases/
 
 签名判定：assistant 消息正文里含调用语法特征、但 tool_calls 字段为空
 （即泄漏而非正常调用）。输出消息 id / 会话 / 模型 / 特征，可直接定位到
@@ -22,7 +22,8 @@ import sys
 from pathlib import Path
 
 DB = Path.home() / ".ethan/db/sessions.db"
-OUT = Path(__file__).resolve().parent / "fixtures" / "badcases"
+# 本脚本位于 tools/ 下，fixtures/badcases 在仓库根，故上溯一层（parents[1]）。
+OUT = Path(__file__).resolve().parents[1] / "fixtures" / "badcases"
 
 # 泄漏签名：正文含调用语法特征（tool_calls 为空 = 没走正常调用通道）
 SIGS = {
