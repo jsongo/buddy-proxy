@@ -25,7 +25,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 CLIENT_ID = "en1oxy7wnw8j9n"
 APP_VERSION = "0.1.43"
+# OAuth 域：仅用于 ExchangeToken / GetUserInfo（/cloudide/api/v3/trae/*），
+# 也被写进凭证的 api_host 字段。**不是聊天网关**——实测它对该路径一律 404。
 API_HOST = "https://api.trae.com.cn"
+# 聊天网关（与 trae/config.py 的 BASE_URL_CN 一致）：/api/agent/v3/llm_utils_chat
+CHAT_HOST = "https://trae-api-cn.mchost.guru"
 OUT_PATH = Path.home() / ".buddy-proxy" / "trae_work.json"
 # 与 trae_work_login.py 共享的本次登录状态（nonce + machine_id/device_id）
 STATE_PATH = Path("/tmp/trae_work_login_state.json")
@@ -97,13 +101,16 @@ def get_user_info(token: str) -> dict:
 
 
 def test_work_chat(work: dict) -> str:
-    """用 Work 通道发一条测试消息。"""
-    import hashlib
+    """用 Work 通道发一条测试消息。
+
+    请求头复用 ``trae.credentials._work_headers``，与真实聊天路径完全一致：
+    手写头会漏掉 ``User-Agent``，上游按异常客户端限流返回 4011（实测），
+    把「网络/凭证正常」误报成失败。
+    """
     import uuid
 
-    token = work["access_token"]
-    machine_id = work.get("machine_id") or uuid.uuid4().hex
-    device_id = work.get("device_id") or hashlib.sha256(machine_id.encode()).hexdigest()[:32]
+    from buddy_proxy.trae.credentials import _work_headers
+
     body = {
         "messages": [{"role": "user", "content": [{"type": "text", "text": "1+1等于几"}]}],
         "model": "glm-5.2",
@@ -113,21 +120,12 @@ def test_work_chat(work: dict) -> str:
         "session_id": str(uuid.uuid4()),
     }
     headers = {
-        "Authorization": f"Cloud-IDE-JWT {token}",
-        "X-Cloudide-Token": token,
-        "x-uid": work.get("uid") or "",
-        "x-app-id": "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
-        "x-device-id": device_id,
-        "x-machine-id": machine_id,
-        "x-request-id": str(uuid.uuid4()),
-        "x-ide-version": "3.3.67",
-        "x-ide-version-code": "20260401",
-        "x-device-type": "windows",
-        "x-os-version": "Windows 10",
-        "Content-Type": "application/json",
+        **_work_headers(work),
         "Accept": "text/event-stream",
     }
-    url = work.get("api_host", API_HOST).rstrip("/") + "/api/agent/v3/llm_utils_chat"
+    # 聊天走专用网关，不能用 work["api_host"]：那是 OAuth 域，
+    # 对 /api/agent/v3/llm_utils_chat 恒返回 404（实测）。
+    url = CHAT_HOST.rstrip("/") + "/api/agent/v3/llm_utils_chat"
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
@@ -203,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
                 "access_token": cred["access_token"],
                 "refresh_token": cred["refresh_token"],
                 "expires_at": cred["expires_at"],
+                # OAuth 域，**不是聊天网关**（见文件头 API_HOST 注释）。
                 "api_host": API_HOST,
                 "machine_id": login_state.get("machine_id", ""),
                 "device_id": login_state.get("device_id", ""),
