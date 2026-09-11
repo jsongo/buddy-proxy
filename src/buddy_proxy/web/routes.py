@@ -160,7 +160,9 @@ def client_meta(request: Request) -> dict[str, str]:
         "user_agent": user_agent,
         "client_ip": request.client.host if request.client else "-",
         # 不记录 API key 的明文或片段；resolve_client_tag 仅在内存中匹配本地映射。
-        "has_api_key": bool(auth),
+        # 字段名刻意不含 "api_key"——safe_log_fields 会把含敏感词的键当正文哈希，
+        # 布尔值会被替换成无意义的 *_bytes/*_sha256，丢失「是否带鉴权」的可观测性。
+        "auth_present": bool(auth),
         "client_name": client_name,
     }
 
