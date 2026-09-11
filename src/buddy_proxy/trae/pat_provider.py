@@ -14,7 +14,7 @@ from typing import Any, Sequence
 
 from fastapi import HTTPException
 
-from ..metrics import ACCOUNT_META
+from ..core.metrics import ACCOUNT_META
 from .pat import ensure_pat_config, pat_enabled, pat_model_names, fetch_pat_ent_usage
 from .provider import TraeProvider
 

@@ -50,7 +50,7 @@ def _migrate_standard_cooldowns_once() -> None:
     if _standard_cooldown_migrated:
         return
     _standard_cooldown_migrated = True
-    from buddy_proxy.paths import state_file
+    from buddy_proxy.core.paths import state_file
 
     marker = state_file("trae_pat_standard_cooldown_cleanup.done")
     if marker.exists():

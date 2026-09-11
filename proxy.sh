@@ -264,7 +264,7 @@ cmd_login() {
         log "开始 $provider 登录..."
     fi
     # 登录成功与否由 python 侧返回码决定；失败时这里原样透传非零退出码
-    PYTHONPATH="$SCRIPT_DIR/src" $PYTHON_BIN -m buddy_proxy.login "$provider" \
+    PYTHONPATH="$SCRIPT_DIR/src" $PYTHON_BIN -m buddy_proxy.auth.login "$provider" \
         ${extra[@]+"${extra[@]}"}
 }
 

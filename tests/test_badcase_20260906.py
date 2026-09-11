@@ -22,7 +22,7 @@
 import sys
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"))
-from buddy_proxy.anthropic_adapter import (  # noqa: E402
+from buddy_proxy.protocols.anthropic_adapter import (  # noqa: E402
     anthropic_request_to_chat,
     repair_tool_sequence,
 )

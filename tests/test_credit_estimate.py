@@ -15,7 +15,7 @@ import pathlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 
-from buddy_proxy.credit_estimate import estimate_credit  # noqa: E402
+from buddy_proxy.core.credit_estimate import estimate_credit  # noqa: E402
 
 # (输入 token, 输出 token, 网页真实积分)；顺序即代理记录时间序
 CALIBRATION_SAMPLES = [

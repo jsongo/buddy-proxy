@@ -15,7 +15,7 @@ import json
 import pytest
 
 from buddy_proxy.doubao.cdp_client import CDPDoubaoClient
-from buddy_proxy.doubao_provider import _DOUBAO_CHAT_MODELS
+from buddy_proxy.doubao.provider import _DOUBAO_CHAT_MODELS
 
 
 def _agent_payload(model_spec: dict, need_create: bool = True) -> dict:
@@ -207,7 +207,7 @@ def _run_agent_task(provider, task, session_id=None):
 
 
 def _provider_with(fake_client):
-    from buddy_proxy.doubao_provider import DoubaoProvider
+    from buddy_proxy.doubao.provider import DoubaoProvider
     p = DoubaoProvider.__new__(DoubaoProvider)  # 跳过 __init__（不起 CDP）
     p._client = fake_client
     p._agent_session = None

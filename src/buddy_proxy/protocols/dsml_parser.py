@@ -588,43 +588,6 @@ def parse_single_xml_tool_call(block: XMLElementBlock) -> Tuple[Optional[ParsedT
 # ============================================================================
 # 工具调用解析
 def find_invoke_blocks(text: str) -> List[XMLElementBlock]:
-    """查找所有 <invoke> 块（跳过忽略区域）"""
-    blocks = []
-    i = 0
-    
-    while i < len(text):
-        # 使用新的忽略区域检测
-        tag, found = find_tool_markup_tag_outside_ignored(text, i)
-        
-        if not found:
-            break
-        
-        if tag.name == "invoke" and not tag.closing:
-            close_tag, found_close = find_matching_tool_markup_close(text, tag)
-            
-            if found_close:
-                blocks.append(XMLElementBlock(
-                    start=tag.start,
-                    end=close_tag.end + 1,
-                    tag_name=tag.name,
-                    attrs=tag.attributes,
-                    body=text[tag.end + 1:close_tag.start]
-                ))
-                i = close_tag.end + 1
-                continue
-        
-    return OpenAIToolCall(
-        id=f"call_{tool_name}_{id(params)}",
-        type="function",
-        function={
-            "name": tool_name,
-            "arguments": json.dumps(params, ensure_ascii=False)
-        }
-    )
-    return tool_call, True
-
-
-def find_invoke_blocks(text: str) -> List[XMLElementBlock]:
     """查找所有 <invoke> 块"""
     blocks = []
     i = 0

@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from buddy_proxy import __main__ as m
-from buddy_proxy import state as st
+from buddy_proxy.core import state as st
 from buddy_proxy import codebuddy_provider as cbp
 
 
@@ -235,6 +235,46 @@ def test_messages_nonstream(client, monkeypatch):
 # ---------------------------------------------------------------------------
 # 请求体非 UTF-8（GBK）也能解析
 # ---------------------------------------------------------------------------
+def test_safe_log_fields_redacts_request_data():
+    """日志最后一道防线也不能让调用方意外写入敏感正文。"""
+    secret = "bearer-secret-value"
+    safe = st.safe_log_fields({"body": {"token": secret}, "status": 502})
+    assert secret not in repr(safe)
+    assert "body" not in safe
+    assert safe["body_bytes"] > 0
+    assert safe["status"] == 502
+    assert st.safe_log_fields({
+        "content_length": 12, "content_sha256": "abc", "message_count": 2,
+    }) == {
+        "content_length": 12,
+        "content_sha256": "abc",
+        "message_count": 2,
+    }
+
+
+def test_client_request_log_never_contains_api_key(client, proxy_state, monkeypatch):
+    """客户端日志只标记是否携带 key，绝不记录 key 或其片段。"""
+    async def fake_collect(*args, **kwargs):
+        return _fake_collected()
+    monkeypatch.setattr(cbp, "collect_upstream", fake_collect)
+    secret = "super-secret-api-key-value"
+    r = client.post("/v1/chat/completions", json={
+        "model": "glm-5.3", "messages": [{"role": "user", "content": "hello"}],
+    }, headers={"Authorization": f"Bearer {secret}"})
+    assert r.status_code == 200
+    calls = proxy_state.write_log.call_args_list
+    assert calls
+    rendered = repr(calls)
+    assert secret not in rendered
+    assert secret[:4] not in rendered
+    assert any(call.args[0] == "client_request_summary" and call.kwargs["auth_present"]
+               for call in calls)
+    # auth_present 字段名必须绕开 safe_log_fields 的敏感词表——否则布尔值会被
+    # 当正文哈希成 *_bytes/*_sha256，丢失「是否带鉴权」的可观测性（PR #37 评论）。
+    safe = st.safe_log_fields({"auth_present": True})
+    assert safe == {"auth_present": True}
+
+
 def test_gbk_request_body(client, monkeypatch):
     """parse_request_body 要能处理 GBK 编码的请求体，不应 500。"""
     async def fake_collect(*args, **kwargs):

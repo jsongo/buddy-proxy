@@ -6,7 +6,7 @@ import json
 import pathlib
 from typing import Any
 
-from buddy_proxy.state import diagnostic
+from buddy_proxy.core.state import diagnostic
 
 
 def build_model_list_static() -> list[dict[str, Any]]:

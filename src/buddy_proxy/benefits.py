@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from buddy_proxy import settings as settings_mod
+from buddy_proxy.core import settings as settings_mod
 
 # 自动打卡巡检周期；失败重试间隔
 CHECK_INTERVAL_S = 600

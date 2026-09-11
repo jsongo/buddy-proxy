@@ -11,12 +11,15 @@ import json
 import os
 import pathlib
 import re
+import tempfile
+import threading
 import time
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 _DEFAULT_PATH = "~/.buddy-proxy/settings.json"
+_SETTINGS_LOCK = threading.Lock()
 
 # 时段判定统一用上海时区，与 trae/pat/cooldown._next_day_timestamp 的日界一致。
 _SCHEDULE_TZ = ZoneInfo("Asia/Shanghai")
@@ -40,15 +43,33 @@ def load_settings() -> dict[str, Any]:
 
 
 def save_settings(update: dict[str, Any]) -> dict[str, Any]:
-    """合并写入并返回合并后的完整设置。"""
+    """合并并原子写入设置，避免半写入或同进程更新互相覆盖。"""
     path = settings_path()
-    merged = {**load_settings(), **update, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except Exception:
-        pass
+    with _SETTINGS_LOCK:
+        merged = {
+            **load_settings(),
+            **update,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_name = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp", delete=False,
+            ) as tmp:
+                tmp.write(json.dumps(merged, ensure_ascii=False, indent=2) + "\n")
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_name = tmp.name
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, path)
+        finally:
+            if tmp_name:
+                try:
+                    pathlib.Path(tmp_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
     return merged
 
 

@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from buddy_proxy import __main__ as m
-from buddy_proxy import state as st
+from buddy_proxy.core import state as st
 from buddy_proxy.trae import provider as tp_impl
 from buddy_proxy.trae.provider import TraeProvider
 

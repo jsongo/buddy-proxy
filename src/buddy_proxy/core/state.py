@@ -11,13 +11,49 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import FastAPI, HTTPException
 
-from buddy_proxy.codebuddy_client import CodeBuddyClient
-from buddy_proxy.providers import BaseProvider
-from buddy_proxy.logging_setup import get_runtime_info
+if TYPE_CHECKING:
+    # 仅用于类型标注；运行期导入会触发
+    # codebuddy_provider 包 __init__ → observability → core.state 的循环导入
+    # （codebuddy_client 从包根模块迁入 codebuddy_provider.client 后暴露）。
+    from buddy_proxy.codebuddy_provider.client import CodeBuddyClient
+    from buddy_proxy.providers.base import BaseProvider
+from buddy_proxy.core.logging_setup import get_runtime_info
+
+
+_SENSITIVE_LOG_KEY_PARTS = (
+    "body", "content", "message", "messages", "raw", "token", "bearer",
+    "authorization", "api_key", "uid", "argument", "prompt", "response",
+    "detail", "error",
+)
+
+
+def safe_log_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """返回可安全写日志的字段，敏感正文只保留长度和短哈希。
+
+    这是 ``write_log`` 和 ``diagnostic`` 的最后一道防线。调用方仍应传递
+    结构化摘要；该函数避免新调试代码意外把 body、凭证或上游错误正文落盘。
+    """
+    safe: dict[str, Any] = {}
+    for key, value in fields.items():
+        key_lower = key.lower()
+        # 已计算的长度/哈希是安全元数据；不要因名称中含 content/body
+        # 而把它们再次哈希，避免损失有效可观测性。
+        if key_lower.endswith((
+            "_bytes", "_length", "_sha256", "_count", "_code", "_status",
+            "_ms", "_tokens", "_detected",
+        )):
+            safe[key] = value
+        elif any(part in key_lower for part in _SENSITIVE_LOG_KEY_PARTS):
+            raw = str(value).encode("utf-8", errors="replace")
+            safe[f"{key}_bytes"] = len(raw)
+            safe[f"{key}_sha256"] = hashlib.sha256(raw).hexdigest()[:16]
+        else:
+            safe[key] = value
+    return safe
 
 
 class ProxyState:
@@ -99,24 +135,28 @@ class ProxyState:
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "event": event,
                 **self.runtime_info,
-                **kwargs,
+                **safe_log_fields(kwargs),
             }
             self.json_logger.info(json.dumps(record, ensure_ascii=False))
         except Exception:
             pass
 
     def write_body_log(self, event: str, body: bytes, **kwargs) -> None:
+        """记录 body 的不可逆摘要，绝不将原文写入日志。
+
+        方法名为兼容旧调用保留；日志里只留长度和短哈希，供同一次故障
+        的关联排查使用。请求、响应、token、UID 和工具参数原文均不得落盘。
+        """
         if self.json_logger is None:
             return
         try:
-            text = body.decode("utf-8", errors="replace")
             record = {
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "event": event,
                 **self.runtime_info,
                 "body_bytes": len(body),
-                "body_text": text,
-                **kwargs,
+                "body_sha256": hashlib.sha256(body).hexdigest()[:16],
+                **safe_log_fields(kwargs),
             }
             self.json_logger.info(json.dumps(record, ensure_ascii=False))
         except Exception:
@@ -148,10 +188,10 @@ def get_state() -> ProxyState:
 
 
 def diagnostic(event: str, **kwargs) -> None:
-    """输出诊断日志到 logger。"""
+    """输出安全诊断日志，避免调试调用意外泄露原文。"""
     state = get_state()
     if state.logger:
-        state.logger.info(f"{event}: {json.dumps(kwargs, ensure_ascii=False)}")
+        state.logger.info(f"{event}: {json.dumps(safe_log_fields(kwargs), ensure_ascii=False)}")
 
 
 # 安全词检测统一关键词（中英混合）

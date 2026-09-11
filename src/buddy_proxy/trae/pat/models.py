@@ -25,11 +25,14 @@ def _find_models_config() -> pathlib.Path:
     拆分教训（2026-09-09）：本文件从 trae/pat.py 移入 trae/pat/models.py 后，
     硬编码 parents[1] 错位到 trae/ 目录，模型目录静默加载为空（stat 失败
     被吞掉），traepat 全部模型 400。改为向上搜索，层级变化不再敏感。
+
+    2026-09-11：models_config.json 迁入 web/ 子包后不再是本文件的直系祖先，
+    故每级祖先同时探测 ``<parent>/web/models_config.json``。
     """
     for parent in pathlib.Path(__file__).resolve().parents:
-        candidate = parent / "models_config.json"
-        if candidate.is_file():
-            return candidate
+        for candidate in (parent / "models_config.json", parent / "web" / "models_config.json"):
+            if candidate.is_file():
+                return candidate
     raise FileNotFoundError("models_config.json 未在包目录上游找到")
 
 

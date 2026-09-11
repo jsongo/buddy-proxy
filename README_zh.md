@@ -339,7 +339,7 @@ providers:
                           首次启动写入设置文件，此后以 ~/.buddy-proxy/settings.json 为准
 --login                   启动时浏览器登录
 --no-browser              登录时不自动打开浏览器
---verbose-llm             记录完整请求/响应体
+--verbose-llm             输出扩展安全诊断（绝不记录请求/响应体、token 或 UID）
 --mock-dir DIR            使用录制的响应（测试用）
 ```
 

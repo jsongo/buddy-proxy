@@ -40,7 +40,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .providers import BaseProvider
+from .base import BaseProvider
 
 log = logging.getLogger(__name__)
 
@@ -411,7 +411,7 @@ class ZcodeProvider(BaseProvider):
 
 
 # ---------------------------------------------------------------------------
-# 冒烟自测：python -m buddy_proxy.zcode_provider
+# 冒烟自测：python -m buddy_proxy.providers.zcode
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":  # pragma: no cover

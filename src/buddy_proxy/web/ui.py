@@ -25,11 +25,11 @@ from typing import Any
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from buddy_proxy.state import app, get_state, _get_state_or_none
-from buddy_proxy.model_list import load_models_from_local_config
+from buddy_proxy.core.state import app, get_state, _get_state_or_none
+from buddy_proxy.web.model_list import load_models_from_local_config
 from buddy_proxy.codebuddy_provider import forward_chat
 from buddy_proxy.benefits import BenefitsManager, read_checkin_settings
-from buddy_proxy import settings as settings_mod
+from buddy_proxy.core import settings as settings_mod
 
 # 一键测试发送的内容与 token 上限（够穿透 thinking 模型的少量预算）
 TEST_PROMPT = "hi"
@@ -142,6 +142,14 @@ def _validate_model(provider_id: str, model_id: str, state: Any) -> None:
     )
 
 
+def _model_exists_anywhere(model_id: str, state: Any) -> bool:
+    """裸模型名能否匹配任一已启用通道。"""
+    return any(
+        any(m["id"] == model_id for m in group["models"])
+        for group in _model_groups(state)
+    )
+
+
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
@@ -195,7 +203,7 @@ async def ui_models(request: Request):
                 "avg_ms": st.get("avg_ms", 0),
                 "last_ts": st.get("last_ts", 0),
             }
-            key = f"{group['id']}/{m['id']}"
+            key = settings_mod.model_key(group["id"], m["id"])
             m["is_default"] = default_model in (key, m["id"])
             m["disabled"] = key in disabled
             # 限时窗口：有配置则附窗口列表 + 当前是否在开放时段，供前端渲染徽标/编辑器
@@ -226,7 +234,7 @@ async def ui_stats(request: Request):
     for p in getattr(state, "providers", {}).values():
         for m in p.models():
             if m.get("credits"):
-                snap["credits_map"].setdefault(f"{p.id}/{m['id']}", m.get("credits"))
+                snap["credits_map"].setdefault(settings_mod.model_key(p.id, m["id"]), m.get("credits"))
     return snap
 
 
@@ -282,7 +290,7 @@ async def ui_traepat_model_status_cached(request: Request):
     """读取 traepat 模型负载缓存（纯本地，不触网）；无缓存返回空壳供页面默认展示。"""
     _ensure_local(request)
     try:
-        from .trae.pat import fetch_pat_model_status
+        from ..trae.pat import fetch_pat_model_status
     except Exception:
         raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
     return await asyncio.to_thread(fetch_pat_model_status, False, True)
@@ -293,7 +301,7 @@ async def ui_traepat_model_status(request: Request):
     """手动触发 traepat 模型负载查询（10 分钟内重复触发走缓存，避免频打上游）。"""
     _ensure_local(request)
     try:
-        from .trae.pat import fetch_pat_model_status
+        from ..trae.pat import fetch_pat_model_status
     except Exception:
         raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
     return await asyncio.to_thread(fetch_pat_model_status)
@@ -304,7 +312,7 @@ async def ui_traepat_accounts(request: Request):
     """traepat 各账号本地凭证/冷却状态 + 后台自愈循环最近一轮结果（纯本地，不触网）。"""
     _ensure_local(request)
     try:
-        from .trae.pat import accounts_status
+        from ..trae.pat import accounts_status
     except Exception:
         raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
     return await asyncio.to_thread(accounts_status)
@@ -315,7 +323,7 @@ async def ui_traepat_refresh_tokens(request: Request):
     """立即补签 traepat 缺失/临期 Token；健康账号不强刷。"""
     _ensure_local(request)
     try:
-        from .trae.pat import refresh_missing_tokens
+        from ..trae.pat import refresh_missing_tokens
     except Exception:
         raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
     return await asyncio.to_thread(refresh_missing_tokens)

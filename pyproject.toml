@@ -14,6 +14,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
+    "ruff>=0.12.0",
 ]
 
 [project.scripts]
@@ -28,12 +29,21 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-buddy_proxy = ["models_config.json", "static/*.html"]
+"buddy_proxy.web" = ["models_config.json", "static/*.html"]
 
 [dependency-groups]
 dev = [
     "pytest>=7.4.0",
+    "ruff>=0.12.0",
 ]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# 先阻断语法错误和未定义名称；其余历史 lint 债务后续逐步收紧。
+select = ["E9", "F821"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
