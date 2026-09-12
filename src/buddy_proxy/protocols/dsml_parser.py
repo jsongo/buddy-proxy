@@ -209,8 +209,72 @@ def is_inside_markdown_fence(text: str, pos: int) -> bool:
                 i += 1
         else:
             i += 1
-    
+
     return fence_depth > 0
+
+
+class MarkdownFenceTracker:
+    """按位置单调推进的 fence 状态跟踪器。
+
+    语义等价于反复调用 ``is_inside_markdown_fence(text, pos)``，但整段只线性
+    扫一遍。``find_tool_markup_tag_outside_ignored`` 会对**每个字符位置**调用
+    一次 ``is_inside_markdown_fence``，而后者每次都从 0 重扫到 pos，整体退化
+    为 O(n²)：实测 19KB 需 17s、2.4KB 需 0.26s（长度翻倍耗时 ×4）。大 payload
+    会把 uvicorn 事件循环卡到 100% CPU 长达数分钟，表现为整个代理无响应。
+
+    仅当 pos 单调不减时使用；pos 回退时自动退回原函数保证语义不变。
+    """
+
+    __slots__ = ("_text", "_i", "_depth", "_current")
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._i = 0
+        self._depth = 0
+        self._current: Optional[str] = None
+
+    def inside_at(self, pos: int) -> bool:
+        if pos < self._i:
+            # 位置回退：缓存已越过该点，退回全量重扫以保证结果正确。
+            return is_inside_markdown_fence(self._text, pos)
+
+        text = self._text
+        i = self._i
+        depth = self._depth
+        current = self._current
+
+        while i < pos:
+            if i == 0 or text[i-1] == '\n':
+                for marker in FENCE_MARKERS:
+                    if text[i:i+len(marker)] == marker:
+                        if current is None:
+                            current = marker
+                            depth += 1
+                            line_end = text.find('\n', i)
+                            if line_end == -1:
+                                i = len(text)
+                            else:
+                                i = line_end + 1
+                            break
+                        elif text[i:i+len(current)] == current:
+                            depth -= 1
+                            if depth == 0:
+                                current = None
+                            i = text.find('\n', i)
+                            if i == -1:
+                                i = len(text)
+                            else:
+                                i += 1
+                            break
+                else:
+                    i += 1
+            else:
+                i += 1
+
+        self._i = i
+        self._depth = depth
+        self._current = current
+        return depth > 0
 
 
 # ============================================================================
@@ -384,7 +448,10 @@ def scan_tool_markup_tag_at(text: str, start: int) -> Tuple[Optional[ToolMarkupT
 def find_tool_markup_tag_outside_ignored(text: str, start: int) -> Tuple[Optional[ToolMarkupTag], bool]:
     """从指定位置开始查找下一个工具标记标签（跳过忽略区域）"""
     i = max(start, 0)
-    
+    # i 在本函数内单调不减，用跟踪器替代逐位置调用 is_inside_markdown_fence
+    # （后者每次都从 0 重扫，整体 O(n²)——见 MarkdownFenceTracker 文档）。
+    fence = MarkdownFenceTracker(text)
+
     while i < len(text):
         next_pos, advanced, blocked = skip_xml_ignored_section(text, i)
         if blocked:
@@ -398,15 +465,15 @@ def find_tool_markup_tag_outside_ignored(text: str, start: int) -> Tuple[Optiona
             if found:
                 i = end
                 continue
-            elif end == len(text) and not is_inside_markdown_fence(text, i):
+            elif end == len(text) and not fence.inside_at(i):
                 # 未闭合的单/双反引号 code span（流式下闭合符尚未到达）：
                 # 剩余内容视为代码，不再识别工具调用标签，避免把内联代码里的
                 # `<tool_calls>` 误判为工具调用开标签而被扣留到流末尾。
-                # 注意排除 fence 内的反引号（fence 由 is_inside_markdown_fence 处理）。
+                # 注意排除 fence 内的反引号（fence 由 MarkdownFenceTracker 处理）。
                 return None, False
-            # end == start（三反引号 fence 首字节）或处于 fence 内：交给 is_inside_markdown_fence 处理
-        
-        if is_inside_markdown_fence(text, i):
+            # end == start（三反引号 fence 首字节）或处于 fence 内：交给 fence 跟踪器处理
+
+        if fence.inside_at(i):
             line_end = text.find('\n', i)
             if line_end == -1:
                 return None, False
