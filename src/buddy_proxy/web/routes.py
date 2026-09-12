@@ -111,6 +111,10 @@ async def list_models():
                 **({"credits": m["credits"]} if m.get("credits") is not None else {}),
                 **({"max_input": m["max_input"]} if m.get("max_input") is not None else {}),
                 **({"reasoning": m["reasoning"]} if "reasoning" in m else {}),
+                # 能力字段必须透传：漏传会让 /v1/models 把这些通道的模型
+                # 一律报成纯文本，客户端据此误剥图片（见列表下方 input_modalities）
+                **({"images": bool(m["images"])} if "images" in m else {}),
+                **({"tool_call": bool(m["tool_call"])} if "tool_call" in m else {}),
             })
 
     # 记录模型列表请求
@@ -120,7 +124,12 @@ async def list_models():
         source="local_config"
     )
 
-    # 标准 OpenAI 格式：/v1/models 的 data 数组（客户端按此解析）
+    # 标准 OpenAI 格式：/v1/models 的 data 数组（客户端按此解析）。
+    # 能力字段（input_modalities / supports_images）同时放进 data：
+    # 第三方客户端（agent/IDE）只会按标准字段解析，读不到下面的 models
+    # 扩展数组，缺了能力信息就会自行猜测是否支持图片（典型做法是按模型名
+    # 匹配关键词），导致支持读图的模型被判为纯文本、图片在客户端就被剥掉。
+    # 这里显式声明，让客户端可直接读取。
     openai_models = [
         {
             "id": m.get("id", "unknown"),
@@ -133,6 +142,10 @@ async def list_models():
             "display_name": m.get("name") or m.get("id", "unknown"),
             "credits": m.get("credits"),
             "tags": m.get("tags", []),
+            # 能力：与 models 扩展数组同口径（model_to_codex_format 为唯一来源）
+            "input_modalities": ["text", "image"] if m.get("images") else ["text"],
+            "supports_images": bool(m.get("images")),
+            "supports_tool_call": bool(m.get("tool_call")),
         }
         for m in data
     ]

@@ -164,6 +164,29 @@
    "vendor": "f"
   },
   {
+   "descriptionEn": "DeepSeek flagship model with native image input, supporting 1M context window",
+   "descriptionZh": "DeepSeek 旗舰模型,原生支持图片输入,支持 1M 上下文窗口",
+   "id": "deepseek-v4.1-flash",
+   "maxAllowedSize": 1000000,
+   "maxInputTokens": 1000000,
+   "maxOutputTokens": 50000,
+   "name": "Deepseek-V4.1-Flash",
+   "onlyReasoning": true,
+   "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+   },
+   "relatedModels": {
+    "lite": "deepseek-v4.1-flash",
+    "reasoning": "deepseek-v4.1-flash"
+   },
+   "supportsImages": true,
+   "supportsReasoning": true,
+   "supportsToolCall": true,
+   "temperature": 1,
+   "vendor": "f"
+  },
+  {
    "credits": "x0.17 credits",
    "descriptionEn": "DeepSeek flagship model, supporting 1M context window",
    "descriptionZh": "DeepSeek 旗舰模型,支持 1M 上下文窗口",
@@ -181,7 +204,7 @@
     "lite": "deepseek-v4-flash",
     "reasoning": "deepseek-v4-flash"
    },
-   "supportsImages": true,
+   "supportsImages": false,
    "supportsReasoning": true,
    "supportsToolCall": true,
    "temperature": 1,
@@ -206,7 +229,7 @@
     "lite": "deepseek-v4-pro",
     "reasoning": "deepseek-v4-pro"
    },
-   "supportsImages": true,
+   "supportsImages": false,
    "supportsReasoning": true,
    "supportsToolCall": true,
    "temperature": 1,

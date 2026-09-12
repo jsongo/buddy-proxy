@@ -112,6 +112,22 @@ MODEL_CREDITS: dict[str, str] = {
     "qwen-3.7-plus": "x0.25",
 }
 
+# 支持图片输入的模型（内部 config_name 口径）。
+# 这些模型上游 llm_utils_chat 接受 OpenAI 风格 image_url（data URL）block。
+#
+# 注意：Trae 目录里的 DeepSeek-V4-Flash / V4-Pro **不支持**图片输入；
+# 该目录中带图片能力的是新一代的 DeepSeek-V4.1-Flash / DeepSeek-Flash
+# （与 CodeBuddy 通道的 deepseek-v4.1-flash 同源），接入后把内部名加进来。
+# 若声明与实际不符，会导致 /v1/models 把纯文本模型报成可读图，客户端盲发
+# 图片 → 上游 4001。
+#
+# 反向的漏报同样有害：未声明时 /v1/models 报 input_modalities=["text"]，
+# 外部客户端（agent/IDE）据此自行判断（典型做法是按模型名匹配关键词）会
+# 误剥图片，表现为「不支持读图」——即使模型本身支持。
+#
+# 未在此列表中的模型一律按不支持处理（保守）。
+MODEL_SUPPORTS_IMAGES: set[str] = set()
+
 # 部分模型在 solo_work_lite function 下不可用（服务端 4001），需改用 chat_v3。
 # 实测（2026-09-03）：glm-5.1 / Doubao-Seed-Code 仅在 chat_v3 下可路由；
 # glm-5.3-flash 同理——solo_work_lite 报 4001 "param is invalid"，

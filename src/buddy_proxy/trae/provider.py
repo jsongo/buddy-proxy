@@ -22,6 +22,7 @@ from .config import (
     BASE_URL_CN,
     MODEL_CREDITS,
     MODEL_MAP,
+    MODEL_SUPPORTS_IMAGES,
     MODEL_TIERS,
     TRAE_HEARTBEAT_INTERVAL,
     TRAE_SEMANTIC_TIMEOUT,
@@ -68,9 +69,12 @@ class TraeProvider(BaseProvider):
                     "owned_by": self.id,
                     "tier": tier,
                     "credits": MODEL_CREDITS.get(m),
+                    # 图片能力：与 CodeBuddy 通道同口径（供 /v1/models 的
+                    # input_modalities 判定），漏报会让客户端误剥图片
+                    "images": m in MODEL_SUPPORTS_IMAGES,
                     "description": f"Trae {tier} 模型",
                 })
-        # 加别名（外部名映射）——倍率跟随映射到的内部模型
+        # 加别名（外部名映射）——倍率与图片能力均跟随映射到的内部模型
         for external, internal in MODEL_MAP.items():
             if external not in seen:
                 seen.add(external)
@@ -81,6 +85,7 @@ class TraeProvider(BaseProvider):
                     "owned_by": self.id,
                     "maps_to": internal,
                     "credits": MODEL_CREDITS.get(internal),
+                    "images": internal in MODEL_SUPPORTS_IMAGES,
                     "description": f"Trae 别名 -> {internal}",
                 })
         return result
