@@ -164,7 +164,6 @@
    "vendor": "f"
   },
   {
-   "credits": "x0.17 credits",
    "descriptionEn": "DeepSeek flagship model with native image input, supporting 1M context window",
    "descriptionZh": "DeepSeek 旗舰模型,原生支持图片输入,支持 1M 上下文窗口",
    "id": "deepseek-v4.1-flash",
