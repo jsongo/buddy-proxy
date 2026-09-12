@@ -336,11 +336,21 @@ function toast(msg, isErr) {
   el.textContent = msg; el.className = isErr ? 'err' : ''; el.style.display = 'block';
   clearTimeout(el._t); el._t = setTimeout(() => el.style.display = 'none', 2600);
 }
+// GET 去重：同一 URL 在飞时复用 Promise。页面里多处 render 会重复触发同一接口
+// （切页签 + 轮询 + 各区块渲染），重复请求会白读磁盘（/ui/api/logs 最重）。
+// 仅对 GET 生效；带 opts（POST 等写操作）一律直通，避免误合并。
+const GET_INFLIGHT = new Map();
 async function api(path, opts) {
-  const r = await fetch(path, opts);
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((body.error && body.error.message) || body.detail || (r.status + ' error'));
-  return body;
+  const isGet = !opts || (!opts.method || opts.method.toUpperCase() === 'GET');
+  if (isGet && GET_INFLIGHT.has(path)) return GET_INFLIGHT.get(path);
+  const p = (async () => {
+    const r = await fetch(path, opts);
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((body.error && body.error.message) || body.detail || (r.status + ' error'));
+    return body;
+  })();
+  if (isGet) p.finally(() => GET_INFLIGHT.delete(path)).catch(() => {});
+  return p;
 }
 
 let OVERVIEW = null, MODELS = null, STATS = null, BENEFITS = null;
@@ -441,7 +451,7 @@ document.getElementById('log-filters').addEventListener('click', ev => {
 // 结构与后端 STATS.models 一致（供 Top10、平均耗时图、悬停共用）。
 let RANGE_MODELS = [];
 function modelsInRange() {
-  const md = STATS.model_daily || [];
+  const md = (STATS && STATS.model_daily) || [];
   const per = new Map();
   for (const b of md) {
     if (!inRange(b.date)) continue;
@@ -464,39 +474,112 @@ function modelsInRange() {
   return out;
 }
 
-async function loadAll(manual) {
+// ---- 数据加载：按需拉取 ----
+// 四个数据集各有归属页，惰性加载：
+//   overview/benefits  轻量，首屏 + 轮询常驻（顶栏状态与页签角标要用）
+//   stats              总览/日志页的图表与筛选候选，首次进入时拉
+//   models             模型页，首次进入时拉
+//   logs               请求日志页，仅在日志页可见时拉
+// 每个 loader 并发去重（同键进行中的 Promise 复用），避免重复请求。
+const LOADED = { overview: false, benefits: false, stats: false, models: false };
+const INFLIGHT = {};
+const LOADERS = {
+  overview: () => api('/ui/api/overview').then(v => { OVERVIEW = v; LOADED.overview = true; }),
+  benefits: () => api('/ui/api/benefits').then(v => { BENEFITS = v; LOADED.benefits = true; }),
+  stats:    () => api('/ui/api/stats').then(v => { STATS = v; LOADED.stats = true; }),
+  models:   () => api('/ui/api/models').then(v => { MODELS = v; LOADED.models = true; }),
+};
+
+function ensureData(key, force) {
+  if (!force && LOADED[key]) return Promise.resolve();
+  if (INFLIGHT[key]) return INFLIGHT[key];
+  const p = LOADERS[key]().finally(() => { delete INFLIGHT[key]; });
+  INFLIGHT[key] = p;
+  return p;
+}
+
+// 强制重取时作废日志页的已渲染标记：新请求可能已产生新日志行，
+// 否则 renderRecent() 会因 qs 相同而跳过，导致刷新后看不到最新记录。
+function invalidateRecent() {
+  RECENT_QS = null;
+  GET_INFLIGHT.clear();
+}
+
+// 当前页需要哪些数据集（render 只渲染已就绪的页，见 render() 内分支）
+function dataForTab(name) {
+  if (name === 'models') return ['models'];
+  if (name === 'log') return ['stats'];
+  if (name === 'benefits') return ['benefits'];
+  return ['stats'];  // overview：概览卡片与图表都来自 stats
+}
+
+// 拉取指定数据集后统一渲染一次。
+// 注意：只对真正发起/命中的键渲染，避免「全部已缓存」时白跑一次 render()
+// —— render() 里的日志页分支会打最慢的 /ui/api/logs，重复 render 会放大成多次请求。
+async function loadData(keys, manual) {
+  const want = [...new Set(keys)];
+  if (manual) invalidateRecent();  // 手动刷新/写操作后：日志视图需重取
   try {
-    const [ov, md, st, bn] = await Promise.all([
-      api('/ui/api/overview'), api('/ui/api/models'), api('/ui/api/stats'), api('/ui/api/benefits')]);
-    OVERVIEW = ov; MODELS = md; STATS = st; BENEFITS = bn;
+    await Promise.all(want.map(k => ensureData(k, manual)));
     render(); if (manual) toast('已刷新');
   } catch (e) { toast('加载失败: ' + e.message, true); }
 }
 
+// 首屏 + 30s 轮询：轻量 overview/benefits 常驻，重接口交给各自页签按需触发。
+// 合并成一次 loadData，保证只 render 一次（否则日志页会被渲染多遍 → 重复请求）。
+// poll=true（定时轮询）：允许日志表重取，保证停在日志页时数据是活的；
+//   与 manual 的区别是不作废 GET 去重条目、不弹 toast。
+async function loadAll(manual, poll) {
+  const cur = currentTab();
+  const keys = new Set(['overview', 'benefits', ...dataForTab(cur)]);
+  if (poll) RECENT_QS = null;  // 轮询：日志查询是活数据，需重取
+  await loadData([...keys], manual);
+}
+
+// 写操作（改默认模型/启停/时段/打卡/测试）后强制重取：数据已变，不能吃缓存。
+// 模型相关操作会同时影响 models 与 stats（统计里带模型的停用/默认态）。
+function refreshAll() {
+  const cur = currentTab();
+  const keys = new Set(['overview', 'benefits', ...dataForTab(cur)]);
+  if (cur === 'models') keys.add('stats');
+  return loadData([...keys], true);
+}
+
+// 渲染当前激活页签（数据未就绪的页跳过，由 ensureData 拉回后再渲染）。
+function currentTab() {
+  const b = document.querySelector('.tab.active');
+  return (b && b.dataset.tab) || 'overview';
+}
+
 function render() {
+  const tab = currentTab();
+
   // 范围选择器 + 当前范围下的模型聚合（Top10/耗时图/悬停共用）
   renderRangeQuick();
   RANGE_MODELS = modelsInRange();
   renderLogFilters();  // 筛选候选随范围数据刷新，选中态保留
 
-  // 状态条
-  const dot = document.getElementById('status-dot');
-  const ok = OVERVIEW.authenticated !== false;
-  dot.className = 'dot' + (ok ? '' : ' off');
-  document.getElementById('status-text').textContent =
-    `运行中 · 已运行 ${fmtUptime(OVERVIEW.uptime_seconds)}` + (ok ? '' : ' · codebuddy 未登录');
-  document.getElementById('listen-hint').textContent =
-    '默认模型: ' + (OVERVIEW.default_model.raw ? OVERVIEW.default_model.raw : '(未设置，按请求原样路由)');
+  // 状态条（overview 数据未就绪时保留旧值，避免首屏闪 "undefined"）
+  if (OVERVIEW) {
+    const dot = document.getElementById('status-dot');
+    const ok = OVERVIEW.authenticated !== false;
+    dot.className = 'dot' + (ok ? '' : ' off');
+    document.getElementById('status-text').textContent =
+      `运行中 · 已运行 ${fmtUptime(OVERVIEW.uptime_seconds)}` + (ok ? '' : ' · codebuddy 未登录');
+    document.getElementById('listen-hint').textContent =
+      '默认模型: ' + (OVERVIEW.default_model.raw ? OVERVIEW.default_model.raw : '(未设置，按请求原样路由)');
+  }
 
   // 概览卡片：请求量/平均耗时按所选范围合计（从 daily 过滤累加）
-  const dm = OVERVIEW.default_model;
-  const rl = rangeLabel();
-  const dRange = (STATS.daily || []).filter(d => inRange(d.date));
-  const rTotal = dRange.reduce((n, d) => n + (d.total || 0), 0);
-  const rErr = dRange.reduce((n, d) => n + (d.errors || 0), 0);
-  const rDurSum = dRange.reduce((n, d) => n + (d.duration_ms_sum || 0), 0);
-  const rAvg = rTotal ? Math.round(rDurSum / rTotal) : 0;
-  document.getElementById('cards').innerHTML = `
+  if (OVERVIEW) {
+    const dm = OVERVIEW.default_model;
+    const rl = rangeLabel();
+    const dRange = (STATS.daily || []).filter(d => inRange(d.date));
+    const rTotal = dRange.reduce((n, d) => n + (d.total || 0), 0);
+    const rErr = dRange.reduce((n, d) => n + (d.errors || 0), 0);
+    const rDurSum = dRange.reduce((n, d) => n + (d.duration_ms_sum || 0), 0);
+    const rAvg = rTotal ? Math.round(rDurSum / rTotal) : 0;
+    document.getElementById('cards').innerHTML = `
     <div class="card" style="cursor:pointer" title="点击去模型页修改。仅在客户端请求未带 model 字段时生效；不影响已指定 model 的请求" onclick="switchTab('models')"><div class="k">默认启用模型 ↗</div>
       <div class="v">${dm.raw ? `<span class="chip">${esc(dm.provider || 'codebuddy')}</span>${esc(dm.model)}` :
         '<small>未设置（不影响正常使用）</small>'}</div></div>
@@ -504,19 +587,32 @@ function render() {
       <small>错误 ${rErr}</small></div></div>
     <div class="card"><div class="k">${esc(rl)} 平均耗时</div><div class="v">${rAvg ? fmtMs(rAvg) : '—'}</div></div>
     <div class="card"><div class="k">兜底通道</div><div class="v"><span class="chip">${esc(OVERVIEW.default_provider)}</span><small>未命中模型时</small></div></div>`;
+  }
 
-  // 页签角标：模型总数 / 打卡状态
-  const totalModels = (MODELS.groups || []).reduce((n, g) => n + g.models.length, 0);
-  document.getElementById('cnt-models').textContent = totalModels || '';
-  const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
-  const cb = document.getElementById('cnt-benefits');
-  if (ck.length) {
-    const pending = ck.filter(p => !p.checkin.done_today && !p.checkin.inactive && !p.checkin.error);
-    if (!pending.length) { cb.textContent = '✓ 已签'; cb.className = 'cnt ok'; }
-    else { cb.textContent = `未签 ${pending.length}`; cb.className = 'cnt warn'; }
-  } else { cb.textContent = ''; }
+  // 页签角标：模型总数（models 未加载时留空）/ 打卡状态
+  if (MODELS)
+    document.getElementById('cnt-models').textContent =
+      (MODELS.groups || []).reduce((n, g) => n + g.models.length, 0) || '';
+  if (BENEFITS) {
+    const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
+    const cb = document.getElementById('cnt-benefits');
+    if (ck.length) {
+      const pending = ck.filter(p => !p.checkin.done_today && !p.checkin.inactive && !p.checkin.error);
+      if (!pending.length) { cb.textContent = '✓ 已签'; cb.className = 'cnt ok'; }
+      else { cb.textContent = `未签 ${pending.length}`; cb.className = 'cnt warn'; }
+    } else { cb.textContent = ''; }
+  }
 
-  renderDaily(); renderModelBars(); renderLatency(); renderBenefits(); renderGroups(); renderRecent();
+  // 只渲染当前页的区块：模型页/日志页的重活不再随总览页一起跑
+  if (tab === 'overview') {
+    renderDaily(); renderModelBars(); renderLatency();
+  } else if (tab === 'models') {
+    if (MODELS) renderGroups();
+  } else if (tab === 'benefits') {
+    if (BENEFITS) renderBenefits();
+  } else if (tab === 'log') {
+    if (STATS) renderRecent();
+  }
 }
 
 // 吸顶偏移：应用顶栏 + 通道条高度（动态测量，写进 CSS 变量供 sticky 使用）
@@ -550,6 +646,9 @@ function switchTab(name) {
   try { localStorage.setItem('bp-tab', name); } catch (e) {}
   refreshStickyVars();
   if (typeof syncPatStatusAuto === 'function') syncPatStatusAuto();  // 进/离额度页 → 起停模型负载自动刷新
+
+  // 懒加载：进入页签时补齐该页所需数据，拉回后 render() 会渲染该页
+  loadData(dataForTab(name)).catch(() => {});
 }
 document.querySelectorAll('.tab').forEach(
   b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
@@ -832,7 +931,7 @@ async function claimNow(pid) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({provider: pid})});
     toast(r.ok ? `✓ ${pid} 打卡成功` : `打卡失败: ${r.message || r.error || '未知原因'}`, !r.ok);
-    loadAll();
+    refreshAll();
   } catch (e) { toast('打卡失败: ' + e.message, true); }
 }
 
@@ -844,7 +943,7 @@ async function saveCheckinSettings() {
         auto_checkin: document.getElementById('auto-checkin').checked,
         checkin_time: document.getElementById('checkin-time').value})});
     toast('自动打卡设置已保存');
-    loadAll();
+    refreshAll();
   } catch (e) { toast('保存失败: ' + e.message, true); }
 }
 
@@ -1215,6 +1314,7 @@ function renderGroups() {
 
 let RECENT_PAGE = 1, RECENT_SIZE = 20;
 let RECENT_SEQ = 0;  // 并发防抖：仅最后一次请求的结果生效（范围/翻页快速切换时）
+let RECENT_QS = null;  // 已渲染结果对应的查询串；相同则跳过（多次 render 不重复打请求）
 
 function recentGo(p) { RECENT_PAGE = p; renderRecent(); }
 function recentSize(v) { RECENT_SIZE = +v; RECENT_PAGE = 1; renderRecent(); }
@@ -1234,20 +1334,29 @@ function recentPages(cur, total) {
 }
 
 // 服务端分页：直接读 logs/metrics.jsonl + 30 天归档，突破进程内 200 条上限。
+// 该接口最慢（要全量扫归档），故对「相同查询」直接跳过（RECENT_QS），
+// 并在飞请求由 api() 的 GET 去重兜住。
 async function renderRecent() {
+  // 日志页不可见时直接跳过：翻页/筛选/范围变化都可能调到这里，别在其它页签白跑。
+  if (currentTab() !== 'log') return;
   const el = document.getElementById('recent');
   const pager = document.getElementById('recent-pager');
   document.getElementById('recent-sub').textContent =
     `${rangeLabel()} · 读磁盘日志（最多 30 天归档），服务端分页；TTFT 为首 token 延迟（流式）`;
+  let qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}` +
+           `&page=${RECENT_PAGE}&page_size=${RECENT_SIZE}`;
+  if (LOG_FILTERS.provider.size)
+    qs += `&provider=${encodeURIComponent([...LOG_FILTERS.provider].join(','))}`;
+  if (LOG_FILTERS.model.size)
+    qs += `&model=${encodeURIComponent([...LOG_FILTERS.model].join(','))}`;
+
+  // 同一查询已渲染过 → 直接跳过。首屏/切页签/轮询会多次 render(),
+  // 该接口要全量扫归档，重复请求代价最高。
+  if (qs === RECENT_QS) return;
+
   const seq = ++RECENT_SEQ;
   let resp;
   try {
-    let qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}` +
-             `&page=${RECENT_PAGE}&page_size=${RECENT_SIZE}`;
-    if (LOG_FILTERS.provider.size)
-      qs += `&provider=${encodeURIComponent([...LOG_FILTERS.provider].join(','))}`;
-    if (LOG_FILTERS.model.size)
-      qs += `&model=${encodeURIComponent([...LOG_FILTERS.model].join(','))}`;
     resp = await api('/ui/api/logs?' + qs);
   } catch (e) {
     if (seq !== RECENT_SEQ) return;  // 已被更晚的请求取代
@@ -1314,6 +1423,7 @@ async function renderRecent() {
       : `<button class="${p === RECENT_PAGE ? 'primary' : 'ghost'}" onclick="recentGo(${p})">${p}</button>`).join('') +
     nav('›', RECENT_PAGE + 1, RECENT_PAGE === pages) +
     nav('»', pages, RECENT_PAGE === pages);
+  RECENT_QS = qs;  // 记录本次已渲染的查询，后续相同查询直接跳过
 }
 
 // ---- 操作 ----
@@ -1323,7 +1433,7 @@ async function setDefault(provider, model) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ default_model: provider + '/' + model })});
     toast(`默认模型已设为 ${provider}/${model}`);
-    loadAll();
+    refreshAll();
   } catch (e) { toast('设置失败: ' + e.message, true); }
 }
 
@@ -1333,7 +1443,7 @@ async function toggleModel(provider, model, disabled) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ provider, model, disabled })});
     toast(`${provider}/${model} 已${disabled ? '停用（调用将直接失败）' : '启用'}`);
-    loadAll();
+    refreshAll();
   } catch (e) { toast('操作失败: ' + e.message, true); }
 }
 
@@ -1387,7 +1497,7 @@ async function saveSchedule() {
       ? `${SCHEDULE_CTX.provider}/${SCHEDULE_CTX.model} 限时可用：${windows.map(w => w.join('~')).join(', ')}`
       : `${SCHEDULE_CTX.provider}/${SCHEDULE_CTX.model} 已恢复全天可用`);
     closeModal();
-    loadAll();
+    refreshAll();
   } catch (e) { toast('保存失败: ' + e.message, true); }
 }
 
@@ -1416,7 +1526,7 @@ async function runTest(provider, model) {
         <span class="k">状态</span><span class="mono">${r.status || '—'}</span>
       </div>
       <pre class="view" style="color:#ffb3b3">${esc(r.error || '未知错误')}</pre>`;
-    loadAll();
+    refreshAll();
   } catch (e) {
     document.getElementById('modal-body').innerHTML =
       `<pre class="view" style="color:#ffb3b3">${esc(e.message)}</pre>`;
@@ -1433,7 +1543,7 @@ let initTab = location.hash.replace('#', '');
 try { initTab = initTab || localStorage.getItem('bp-tab') || ''; } catch (e) {}
 switchTab(initTab);
 loadAll();
-setInterval(loadAll, 30000);
+setInterval(() => loadAll(false, true), 30000);
 </script>
 </body>
 </html>
