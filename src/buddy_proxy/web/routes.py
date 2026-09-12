@@ -128,8 +128,8 @@ async def list_models():
     # 能力字段（input_modalities / supports_images）同时放进 data：
     # 第三方客户端（agent/IDE）只会按标准字段解析，读不到下面的 models
     # 扩展数组，缺了能力信息就会自行猜测是否支持图片（典型做法是按模型名
-    # 匹配关键词），导致支持读图的模型（如 deepseek-v4-flash）被误判为
-    # 纯文本、图片在客户端就被剥掉。这里显式声明，让客户端可直接读取。
+    # 匹配关键词），导致支持读图的模型被判为纯文本、图片在客户端就被剥掉。
+    # 这里显式声明，让客户端可直接读取。
     openai_models = [
         {
             "id": m.get("id", "unknown"),

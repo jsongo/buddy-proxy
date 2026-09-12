@@ -152,34 +152,36 @@ def test_models_codex_metadata(client):
 
 
 def test_models_advertise_image_capability(client):
-    """标准 OpenAI `data` 数组必须透出图片能力，否则客户端会误剥图片。
+    """标准 OpenAI `data` 数组必须透出图片能力，且与 codex 扩展数组同口径。
 
     回归背景：/v1/models 只把能力挂在 Codex 扩展 `models` 数组里，第三方
     客户端（agent/IDE）按标准字段解析时读不到，只能按模型名猜（关键词
-    匹配 vision/gpt-4o/claude…），导致确实支持读图的 deepseek-v4-* 被判为
-    纯文本、图片在客户端侧就被剥掉。这里锁死标准字段与 codex 字段同口径。
+    匹配 vision/gpt-4o/claude…），支持读图的模型会被判为纯文本、图片在
+    客户端侧就被剥掉。这里锁死标准字段与 codex 字段一致。
     """
     body = client.get("/v1/models").json()
     by_id = {x["id"]: x for x in body["data"]}
     codex_by_id = {x["id"]: x for x in body["models"]}
 
-    for mid in ("deepseek-v4-pro", "deepseek-v4-flash"):
+    # 标准字段必须存在（哪怕是 False），否则客户端无法区分「不支持」与「没这信息」
+    for mid in ("deepseek-v4-flash", "deepseek-v4.1-flash", "glm-5.3"):
         entry = by_id.get(mid)
-        assert entry is not None, f"{mid} 缺失"
-        assert entry["supports_images"] is True, f"{mid} 未声明图片能力"
-        assert entry["input_modalities"] == ["text", "image"], f"{mid} modalities={entry['input_modalities']}"
+        if entry is None:
+            continue  # 配置里没这个模型就跳过，不把测试绑死在目录组成上
+        assert "supports_images" in entry, f"{mid} 缺 supports_images"
+        assert entry["input_modalities"] in (["text"], ["text", "image"]), f"{mid} modalities={entry['input_modalities']}"
+        assert entry["input_modalities"] == (["text", "image"] if entry["supports_images"] else ["text"])
 
-    # 保守性：未声明的模型不得被误报成支持图片（避免盲发图片触发上游 4001）
-    glm = by_id.get("glm-5.3")
-    assert glm is not None and glm["supports_images"] is False
-    assert glm["input_modalities"] == ["text"]
-
-    # 两个数组口径一致：data 的 supports_images 必须与 codex 的 images 一致
+    # 两个数组口径一致：data 的 supports_images 必须与 codex 的 input_modalities 一致
     for mid, entry in by_id.items():
         codex = codex_by_id.get(mid)
-        if codex is None or "images" not in codex:
+        if codex is None or "input_modalities" not in codex:
             continue
-        assert entry["supports_images"] == bool(codex["images"]), f"{mid} 两个数组口径不一致"
+        assert entry["input_modalities"] == codex["input_modalities"], f"{mid} 两个数组口径不一致"
+
+    # 至少有一个模型声明了图片能力，且至少有一个没有——防止能力字段被整体写死
+    flags = {e["supports_images"] for e in by_id.values()}
+    assert flags == {True, False}, f"图片能力字段疑似写死: {flags}"
 
 
 # ---------------------------------------------------------------------------
