@@ -112,6 +112,17 @@ MODEL_CREDITS: dict[str, str] = {
     "qwen-3.7-plus": "x0.25",
 }
 
+# 支持图片输入的模型（内部 config_name 口径）。
+# 这些模型上游 llm_utils_chat 接受 OpenAI 风格 image_url（data URL）block。
+# 实测（2026-09-12）：DeepSeek-V4-Flash / Pro 收图并正确识别颜色。
+# 若不在此声明，/v1/models 会把该模型报成纯文本（input_modalities=["text"]），
+# 外部客户端（agent/IDE）据此自行判断时会误剥图片，表现为「不支持读图」。
+# 未在此列表中的模型按不支持处理（保守，避免盲发图片触发上游 4001）。
+MODEL_SUPPORTS_IMAGES: set[str] = {
+    "DeepSeek-V4-Flash",
+    "DeepSeek-V4-Pro",
+}
+
 # 部分模型在 solo_work_lite function 下不可用（服务端 4001），需改用 chat_v3。
 # 实测（2026-09-03）：glm-5.1 / Doubao-Seed-Code 仅在 chat_v3 下可路由；
 # glm-5.3-flash 同理——solo_work_lite 报 4001 "param is invalid"，

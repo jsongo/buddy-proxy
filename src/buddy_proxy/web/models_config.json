@@ -499,7 +499,8 @@
    "config_name": "DeepSeek-V4-Pro",
    "reasoning": true,
    "tool_call": true,
-   "credits": "x0.72"
+   "credits": "x0.72",
+   "images": true
   },
   {
    "id": "deepseek-v4-flash",
@@ -511,7 +512,8 @@
    "config_name": "DeepSeek-V4-Flash",
    "reasoning": true,
    "tool_call": true,
-   "credits": "x0.08"
+   "credits": "x0.08",
+   "images": true
   },
   {
    "id": "kimi-k3",
