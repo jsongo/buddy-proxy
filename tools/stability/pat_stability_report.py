@@ -3,7 +3,9 @@
 import json, pathlib, collections, statistics, sys
 
 SRC = pathlib.Path("/tmp/pat_stability_results.jsonl")
-OUT_DEFAULT = "/Users/jsongo/code/life/buddy-proxy/logs/pat_stability_report.md"
+# 本脚本位于 tools/stability/ 下，仓库根为上溯两级；默认输出到 <repo>/logs/，
+# 避免写死作者机器上的绝对路径（可用 main(out_path) / argv[1] 覆盖）。
+OUT_DEFAULT = pathlib.Path(__file__).resolve().parents[2] / "logs" / "pat_stability_report.md"
 
 def main(out_path=None):
     rows = []

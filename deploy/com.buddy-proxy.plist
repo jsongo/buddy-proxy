@@ -4,10 +4,12 @@
   buddy-proxy 常驻服务（LaunchAgent：随登录启动、崩溃自动重启）。
 
   安装（一次性）：
-    # 先把所有 /Users/jsongo/code/life/buddy-proxy 替换成你的实际仓库绝对路径；
-    # launchd 不会自动展开 $HOME / ~。日志目录必须预先存在，否则服务无法启动。
-    mkdir -p /你的仓库路径/buddy-proxy/logs
-    cp deploy/com.buddy-proxy.plist ~/Library/LaunchAgents/
+    # 先把模板里所有 __REPO__ 替换成你的实际仓库绝对路径（launchd 不会自动
+    # 展开 $HOME / ~）。日志目录必须预先存在，否则服务无法启动。
+    REPO="/你的仓库路径/buddy-proxy"
+    mkdir -p "$REPO/logs"
+    sed "s|__REPO__|$REPO|g" deploy/com.buddy-proxy.plist \
+      > ~/Library/LaunchAgents/com.buddy-proxy.plist
     launchctl load ~/Library/LaunchAgents/com.buddy-proxy.plist
 
   卸载：
@@ -20,7 +22,7 @@
   - 安全默认：仅监听 127.0.0.1。/v1/* 模型代理端点本身没有 API 鉴权，
     不要无感改成 0.0.0.0——否则同一局域网任何人都能消耗你的 PAT/订阅额度。
     确需 LAN 访问时，必须自行加防火墙/反向代理鉴权，并理解暴露风险。
-  - 模板里的 /Users/jsongo/... 是示例/作者机器路径，安装前必须按实际路径修改。
+  - 模板里的 __REPO__ 是仓库根路径占位符，安装前必须全部替换成你的实际绝对路径。
   - 装了它之后就不要再手动 nohup 启动，避免端口冲突（8787 被占时新进程起不来）。
 -->
 <plist version="1.0">
@@ -30,7 +32,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/jsongo/code/life/buddy-proxy/.venv/bin/python</string>
+        <string>__REPO__/.venv/bin/python</string>
         <string>-m</string>
         <string>buddy_proxy</string>
         <string>--host</string>
@@ -38,7 +40,7 @@
         <string>--port</string>
         <string>8787</string>
         <string>--log-file</string>
-        <string>/Users/jsongo/code/life/buddy-proxy/logs/buddy-proxy.jsonl</string>
+        <string>__REPO__/logs/buddy-proxy.jsonl</string>
         <string>--desensitize</string>
         <string>--trae</string>
         <string>--doubao</string>
@@ -48,7 +50,7 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/jsongo/code/life/buddy-proxy</string>
+    <string>__REPO__</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -60,9 +62,9 @@
     <integer>10</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/jsongo/code/life/buddy-proxy/logs/launchd-stdout.log</string>
+    <string>__REPO__/logs/launchd-stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/jsongo/code/life/buddy-proxy/logs/launchd-stderr.log</string>
+    <string>__REPO__/logs/launchd-stderr.log</string>
 </dict>
 </plist>
