@@ -30,6 +30,12 @@ uv sync
 uv run python -m buddy_proxy --desensitize
 ```
 
+首次运行会自动创建状态目录 `~/.buddy-proxy/`（权限 `0700`，可用
+`BUDDY_PROXY_STATE_DIR` 整体覆盖）。机器本地的东西都在这里：`settings.json`
+（默认模型、已停用模型、限时窗口）、Trae Work 凭证 `trae_work.json`、PAT token
+缓存 `trae_pat_token.json`、客户端名映射 `buddy_client_names.json`。目录内含凭证，
+注意别被备份或版本控制带走。启动时会以 `[State] ...` 打印实际路径。
+
 首次使用需要登录（会打开浏览器）：
 
 ```bash

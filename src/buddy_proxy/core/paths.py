@@ -29,6 +29,26 @@ def state_dir() -> pathlib.Path:
     ).expanduser()
 
 
+def ensure_state_dir() -> pathlib.Path:
+    """确保状态目录存在（首次启动时创建），返回该目录。
+
+    启动时显式建目录，让「首次运行后 ~/.buddy-proxy 里有什么」是确定的：
+    在此之前只有 ``state_file()`` 的迁移分支和 ``save_settings()`` 会顺带
+    mkdir，于是新用户跑完第一条命令后该目录并不存在——用户看不到任何状态
+    落点，误以为没装好。权限收成 0700（目录内含凭证类文件）。
+
+    幂等且不抛：目录建不出来（只读 HOME、权限不足等）时安静返回，交给
+    后续真正需要写盘的调用去报错，不阻断服务启动。
+    """
+    path = state_dir()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
 def state_file(name: str, *, legacy: str | None = None) -> pathlib.Path:
     """状态文件在统一目录下的路径；首次访问时自动从遗留位置迁移。
 

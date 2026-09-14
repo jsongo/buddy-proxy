@@ -41,6 +41,7 @@ from buddy_proxy.core.logging_setup import setup_logging, setup_json_logging
 from buddy_proxy.core.metrics import MetricsCollector
 from buddy_proxy.benefits import BenefitsManager
 from buddy_proxy.core import settings as settings_mod
+from buddy_proxy.core.paths import ensure_state_dir
 from buddy_proxy.core.state import ProxyState, app
 from buddy_proxy.core.settings import normalize_default_model
 
@@ -137,6 +138,10 @@ def main():
     import buddy_proxy.core.state as _state
 
     _load_dotenv()
+    # 首次运行先把状态目录建出来（~/.buddy-proxy/）：新用户装完没有任何
+    # 状态落点，容易误以为没装好；后续 settings/凭证/客户端名都写这里。
+    state_path = ensure_state_dir()
+
     parser = argparse.ArgumentParser(description="CodeBuddy local API proxy")
     parser.add_argument("--host", default=os.getenv("BUDDY_PROXY_HOST", "127.0.0.1"),
                         help="监听地址")
@@ -278,6 +283,7 @@ def main():
         settings_mod.save_settings({"default_model": default_model})
     if default_model:
         print(f"[Default Model] {default_model} (settings: {settings_mod.settings_path()})")
+    print(f"[State] {state_path}")
 
     # 已停用模型：settings.json 持久化的 "provider/model" 列表，命中即拒绝转发
     disabled_models = {

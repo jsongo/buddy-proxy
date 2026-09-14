@@ -30,6 +30,13 @@ uv sync
 uv run python -m buddy_proxy --desensitize
 ```
 
+The first run creates the state directory `~/.buddy-proxy/` (mode `0700`; override with
+`BUDDY_PROXY_STATE_DIR`). Everything machine-local lives there: `settings.json` (default
+model, disabled models, model time windows), the Trae Work credential `trae_work.json`,
+the PAT token cache `trae_pat_token.json`, and the client-name map
+`buddy_client_names.json`. It holds credentials — keep it out of backups and version
+control. Startup prints the resolved path as `[State] ...`.
+
 ### The `buddy` command (recommended)
 
 `buddy` is the day-to-day entry point: one command starts the proxy and opens the admin UI. It can also register the proxy as a macOS launchd service (auto-start at login, automatic restart on crash).
