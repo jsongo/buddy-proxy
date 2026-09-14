@@ -76,8 +76,14 @@ class ProxyState:
         model_schedules: Optional[dict[str, list]] = None,
         metrics: Optional[Any] = None,
         benefits: Optional[Any] = None,
+        interactive_login: bool = True,
     ):
         self.client = client
+        # 启动参数 --no-browser：为 False 时任何隐式补认证都不得拉起浏览器、
+        # 也不得把登录 URL 打到 stdout。后台链路（如自动打卡轮询）会在启动
+        # 后一秒内触发 ensure_auth，此前它走 ensure_authenticated() 默认值，
+        # 无视了这个开关。只有显式 --login 才算「用户在等登录」。
+        self.interactive_login = interactive_login
         # 多 provider 支持：除默认 CodeBuddy 外的其它上游源（按 provider.id 索引）
         self.providers: dict[str, BaseProvider] = providers or {}
         # 兜底通道：模型名未命中任何 provider 时转发到哪个通道
@@ -112,7 +118,7 @@ class ProxyState:
         if self.mock_dir is not None:
             return
         try:
-            self.client.ensure_authenticated()
+            self.client.ensure_authenticated(open_browser=self.interactive_login)
         except HTTPException:
             raise  # 已是结构化异常，原样透传（如 503 proxy not initialized）
         except Exception as exc:

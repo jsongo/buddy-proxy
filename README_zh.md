@@ -383,8 +383,10 @@ providers:
 --trae                    启用 Trae provider（解密 Trae IDE 登录态）
 --zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
---login                   启动时浏览器登录
---no-browser              登录时不自动打开浏览器
+--login                   启动时浏览器登录（会打开浏览器并打印登录链接）
+--no-browser              不自动打开浏览器。隐式/后台补认证（如自动打卡轮询）
+                          无论如何都不会弹浏览器、也不会打印登录链接，只留一行
+                          `[Auth] ...` 日志。真想要登录链接就用 --login
 --verbose-llm             输出扩展安全诊断（绝不记录请求/响应体、token 或 UID）
 --mock-dir DIR            使用录制的响应（测试用）
 ```

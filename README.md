@@ -342,8 +342,11 @@ providers:
 --trae                    enable the Trae provider (decrypts the Trae IDE login)
 --zcode                   enable the ZCode provider (Zhipu GLM, Anthropic passthrough)
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
---login                   browser login at startup
---no-browser              don't auto-open the browser on login
+--login                   browser login at startup (opens the browser; prints the login URL)
+--no-browser              don't auto-open a browser. Implicit/background re-auth (e.g. the
+                          auto-checkin poll) never opens a browser and never prints a login
+                          URL regardless; it only logs one `[Auth] ...` line. Use --login
+                          when you actually want the interactive login link
 --verbose-llm             emit expanded safe diagnostics (never logs request/response bodies, tokens, or UIDs)
 --mock-dir DIR            serve recorded fixtures (testing)
 ```

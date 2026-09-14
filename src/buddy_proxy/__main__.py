@@ -329,6 +329,7 @@ def main():
         disabled_models=disabled_models,
         model_schedules=model_schedules,
         metrics=metrics,
+        interactive_login=args.login,
     )
     # 打卡管理器要引用 state 本身，构造后挂上
     _state.proxy_state.benefits = BenefitsManager(

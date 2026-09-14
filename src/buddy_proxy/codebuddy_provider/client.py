@@ -228,7 +228,17 @@ class CodeBuddyClient:
         self._save_session(self.session)
         return machine_id
 
-    def login(self, *, open_browser: bool = True, timeout: int = 300) -> None:
+    def login(self, *, open_browser: bool = True, timeout: int = 300,
+              announce: bool = True) -> None:
+        """执行上游登录。
+
+        - ``open_browser``：是否自动拉起浏览器；
+        - ``announce``：是否把登录 URL 打到 stdout。
+
+        两者分开是因为「后台自动补认证」场景：它既不该弹浏览器，也不该
+        在 stdout 喷一个用户没主动要求的登录链接（后台链路去登录本身就
+        意味着凭证失效，此时提示走 ``[Auth] ...`` 一行日志更合适）。
+        """
         no_auth = {
             "X-No-Authorization": "true",
             "X-No-User-Id": "true",
@@ -249,7 +259,11 @@ class CodeBuddyClient:
         state = state_payload.get("state")
         if not state:
             raise CodeBuddyError("登录状态响应缺少 state")
-        print(f"请在浏览器中完成登录：\n{auth_url}")
+        if announce:
+            print(f"请在浏览器中完成登录：\n{auth_url}")
+        else:
+            print("[Auth] 凭证失效，需重新登录（未自动打开浏览器；"
+                  "运行 `buddy login` 或使用 --login 获取登录链接）")
         if open_browser:
             webbrowser.open(auth_url)
         deadline = time.monotonic() + timeout
@@ -341,7 +355,10 @@ class CodeBuddyClient:
         if self.refresh():
             print("access token 已刷新")
             return
-        self.login(open_browser=open_browser)
+        # 走到这里说明 refresh 也拿不到 token，只能走交互式登录。此时
+        # 「后台自动补认证」的调用方给的 open_browser=False 表示不希望打扰
+        # 用户，那 URL 也不该喷到 stdout（它是后台路径，用户没在等登录）。
+        self.login(open_browser=open_browser, announce=open_browser)
 
     def stream_chat(
         self,
@@ -351,6 +368,7 @@ class CodeBuddyClient:
         temperature: float = 0.7,
         max_tokens: int = 2048,
     ) -> Iterator[str]:
+        # 纯文本流式演示入口（未接入 ProxyState），属交互用法。
         self.ensure_authenticated()
         payload = {
             "model": model,
