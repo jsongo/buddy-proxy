@@ -9,14 +9,15 @@
 ## Features
 
 - **Protocol conversion** — `/v1/chat/completions` (OpenAI), `/v1/responses` (Codex CLI), `/v1/messages` (Anthropic / Claude Code)
-- **Admin UI** — built-in web console at `/ui`: browse models grouped by provider, one-click "set as default model", one-click test per model (sends a "hi"), and per-model request stats with charts
-- **Model list** — `/v1/models` returns an OpenAI-compatible model list plus rich per-model metadata (context window, capabilities)
+- **Admin UI** — built-in web console at `/ui`: browse models grouped by provider, one-click "set as default model", one-click test per model (sends a "hi"), and per-model request stats with charts. Loads lazily per tab, so the first paint never waits on the slowest endpoint (the request log)
+- **Model list** — `/v1/models` returns an OpenAI-compatible model list plus rich per-model metadata (context window, credits, input modalities / image support)
 - **Desensitization** (`--desensitize`) — inserts zero-width spaces into compliance terms inside system messages to avoid backend false-blocking by keyword review
 - **Message compression** (`--optimize-context`) — compresses long histories / large schemas / oversized tool output for `/v1/responses`, cutting token usage dramatically
-- **Tool calls** — full function calling support with automatic filtering of invalid tool definitions
+- **Tool calls** — full function calling support with automatic filtering of invalid tool definitions; `tool_choice` is normalized across both OpenAI and Anthropic shapes so it never reaches the upstream as an object
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Multi-account** — isolated session files for work / personal accounts
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM) and **Doubao** (pure-stdlib CDP into the Doubao desktop app); all listed by `/v1/models` and routed by model name
 
 ---
 
@@ -36,7 +37,7 @@ uv run python -m buddy_proxy --desensitize
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode)
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 
 # one-time install: put buddy on your PATH so it works from anywhere
@@ -79,7 +80,9 @@ The script:
 
 ## Models
 
-The model catalog is maintained in `src/buddy_proxy/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **11 models** with their credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
+The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **39 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
+
+**CodeBuddy channel** (12) — bare model ids, no prefix:
 
 | id | name | credits |
 |---|---|---|
@@ -92,10 +95,29 @@ The model catalog is maintained in `src/buddy_proxy/models_config.json` — `/v1
 | `minimax-m3` | MiniMax-M3 | x0.25 |
 | `kimi-k3` | Kimi-K3 | x1.62 |
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
+| `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | — |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
 
-Edit `src/buddy_proxy/models_config.json` to add or tweak entries — changes take effect on restart.
+**Trae PAT channel** (27) — addresses as `traepat/<id>`. A bare id that several channels declare resolves to whichever one claims it first in registration order (the personal `trae` channel, if enabled) — **not** to CodeBuddy, whose `models()` is empty and is therefore only reached by the no-match fallback or an explicit `codebuddy/` prefix. So always use the `traepat/` prefix when you mean this channel. Credit values here are the channel's own scale:
+
+| id | name | credits |
+|---|---|---|
+| `gpt-6-astra-max` | GPT-6-Astra Max | — |
+| `gpt-5.6-sol-max` / `gpt-5.6-sol` | GPT-5.6-Sol Max / GPT-5.6-Sol | — |
+| `gpt-5.6-luna-max` / `gpt-5.6-terra-max` | GPT-5.6-Luna / Terra Max | — |
+| `gpt-5.5-max` / `gpt-5.4` / `gpt-5.2` | GPT-5.5 Max / 5.4 / 5.2 | — |
+| `gemini-3.1-pro` / `gemini-3-flash` | Gemini-3.1-Pro / Gemini-3-Flash | — |
+| `openrouter-3o-max` / `-2o-max` / `-1o` / `-1` | OpenRouter-3o Max / 2o Max / 1o / 1 | — |
+| `glm-5.3` / `glm-5.3-flash` | glm-5.3 / glm-5.3-flash | x0.40 / x0.06 |
+| `glm-5.2` | glm-5.2 | x0.40 |
+| `qwen3.8-max` / `qwen-3.7-plus` | Qwen3.8-Max / Qwen-3.7-Plus | x1.50 / x0.25 |
+| `kimi-k3` / `kimi-k2.7-code` / `kimi-k2.6` | kimi-k3 / Kimi-K2.7-Code / Kimi-K2.6 | x1.83 / x0.83 / — |
+| `deepseek-v4-pro` / `deepseek-v4-flash` | DeepSeek-V4-Pro / -Flash | x0.72 / x0.08 |
+| `minimax-m3` | MiniMax-M3 | x0.26 |
+| `Doubao-Seed-2.1-Pro` / `Doubao-Seed-Code` | Seed-2.1-Pro / Seed-Code | x0.77 / x0.03 |
+
+Edit `src/buddy_proxy/web/models_config.json` to add or tweak entries — changes take effect on restart.
 
 First-time login (opens a browser):
 
@@ -121,9 +143,14 @@ Open <http://127.0.0.1:8787/ui> in a browser (or just run `buddy start` / `buddy
 - **Stats & charts** — per-provider/per-model request counts, errors, average latency and token usage: a 14-day stacked daily chart, a top-models bar list, and the latest 50 requests. Each completed request appends one line to `logs/metrics.jsonl`; the tail is reloaded on startup so history survives restarts (30 days kept).
 - **Provider health** — login/config status at a glance (CodeBuddy session, zcode key, ...).
 - **Auto check-in & calendar** — both Trae and CodeBuddy expose daily sign-in: tick "Auto check-in" (自动打卡) and the proxy claims them every day at the configured time (default 09:30; if the proxy starts later it catches up immediately). The last 35 days are shown as a calendar; "Check in now" (立即打卡) claims manually. Campaigns can be seasonal — when CodeBuddy's is closed the UI shows "no sign-in activity today" and skips it. History is appended to `logs/checkin.jsonl`. ZCode (GLM Coding Plan) / Doubao have no sign-in API.
-- **Quota** — remaining allowance per provider at a glance: CodeBuddy credit packs (total remaining + per-pack detail), Trae total allowance + entitlement pack expiry, ZCode 5-hour / weekly windows with reset times. Quota responses are cached for 5 minutes.
+- **Quota** — remaining allowance per provider at a glance: CodeBuddy credit packs (total remaining + per-pack detail), Trae total allowance + entitlement pack expiry, ZCode 5-hour / weekly windows with reset times. Quota responses are cached for 5 minutes. The Trae PAT standard pool has no active query API — its usage is collected **passively** from the `4031` (quota exhausted) error body, and because that error only fires when the pool is already full, a snapshot that is past its `reset_ts` is shown as "reset · pending confirmation" rather than as a stale 100%.
+- **Trae PAT accounts** — per-account cards showing local credential and cooldown state (read purely locally, never touching the network), one-click token refresh that only fills in missing/expiring tokens, and the upstream's per-model load status for the PAT channel (cached for 10 minutes).
+- **Model toggle & schedule** — disable/enable an individual `(provider, model)` pair (a disabled pair fails fast), and restrict one to time windows such as `22:00–08:00` or `12:00–14:00`. Both persist to the settings file.
+- **Request log** — paginated request log read from `logs/metrics.jsonl` plus the 30-day archive, filtered by date range, provider and model.
 
 The admin UI also lets you switch the **fallback provider** (used when a request matches no model); it persists in the same settings file.
+
+Tabs load lazily and load in parallel on demand, and each tab shows a skeleton until its own data arrives — opening the UI no longer waits on the request log, which is the slowest endpoint because it reads and parses the whole JSONL tail on every poll. Manual refresh invalidates in-flight requests so a late-arriving old response can never overwrite a newer one.
 
 Security: the `/ui/api/*` admin endpoints are **restricted to localhost (127.0.0.1)**. To manage the proxy from the LAN, set `BUDDY_PROXY_ADMIN_OPEN=1` (at your own risk). `/v1/*` proxy endpoints are unaffected.
 
@@ -145,6 +172,43 @@ A built-in provider that drives the local Doubao desktop app (DoubaoWork.app) vi
 | 401 "doubao not logged in" | login expired | sign in inside the Doubao app, retry |
 
 Models: classic pipeline `doubao` / `doubao-think` / `doubao-expert` (the server routes to its default model — the `model` field is ignored) and agent pipeline `doubao-auto`, `doubao-2.1-turbo`, `doubao-2.1-pro`, `orange-5.0`, `gemini-3.7-flash`, `gpt-5.6-sol` (real per-model routing via the app's own model menu; optional `reasoning_effort` 3–7).
+
+## Trae provider (optional)
+
+Decrypts the Trae IDE's locally stored login state and talks straight to the underlying models.
+
+```bash
+uv run python -m buddy_proxy --desensitize --trae
+```
+
+- **How it works** — decrypts the AES-128-CBC + SHA-512 `tc` blob in the local Trae IDE storage, or reads `TRAE_TOKEN` / `TRAE_USER_ID` from `.env`, then connects to the Trae gateway directly.
+- **Native channel** — since 2026-09 all requests (plain chat included) go through the `chat_v3` direct path: with `tools` present it does native function calling (structured `tool_calls` + `role:"tool"` history replay); plain chat gets no server-side agent preset, no suppression instructions and no leak scrubbing. It also returns real token usage. Set `WB_TRAE_NATIVE_TOOLS=0` to fall back to the legacy prompt-taught text protocol.
+- **PAT channel** — `traepat/<model>` addresses the underlying-model channel with multi-account failover: each account's `4031` / `4008` / `4011` codes are classified and cooled independently, exhausted channels fail fast with a `429` instead of probing every account, and cooldowns are cleared once real credits are confirmed back.
+- **Quota** — free accounts have daily/weekly caps; when exhausted you get `4011` (today's usage limit reached), forwarded with a friendly Chinese message.
+- **Dependencies** — pure Python standard library (including a zero-dependency AES fallback); no Node.js required.
+
+### `trae-cli`
+
+Installing the package also puts a `trae-cli` command on your PATH for checking/claiming check-in credits, viewing entitlements and testing chat:
+
+```bash
+uv run trae-cli status            # check-in / credit status
+uv run trae-cli claim             # claim today's check-in credits
+uv run trae-cli usage             # entitlements / usage (total, used %, pack list)
+uv run trae-cli chat -m glm-5.2 -q "hello"
+```
+
+Auth is loaded automatically: the Work credential file `~/.buddy-proxy/trae_work.json` first (generated by `python -m buddy_proxy.auth.trae_work_login`, or via `buddy login trae`; a legacy `~/.ethan/trae_work.json` is migrated on first read), then the decrypted local Trae IDE `storage.json`. No manual token setup.
+
+## ZCode provider (optional)
+
+Zhipu **GLM Coding Plan** via its Anthropic-compatible endpoint, passed through directly:
+
+```bash
+uv run python -m buddy_proxy --desensitize --zcode
+```
+
+Credentials come from `ZCODE_API_KEY`, the project's secrets, or `~/.zcode/v2/config.json`. `ZCODE_OPENAI_BASE` overrides the base URL. Models are listed by `/v1/models` and appear under the `zcode/` prefix (e.g. `zcode/glm-5.3`).
 
 ## Connect clients
 
@@ -256,7 +320,7 @@ providers:
 ## Command-line options
 
 ```
---host HOST               bind address (default 127.0.0.1)
+--host HOST               bind address (default 127.0.0.1; proxy.sh uses 0.0.0.0)
 --port PORT               bind port (default 8787)
 --endpoint ENDPOINT       CodeBuddy backend address
 --session-file PATH       session file (default ~/.codebuddy-session.json)
@@ -266,20 +330,27 @@ providers:
 --default-model MODEL     default model, e.g. zcode/glm-5.3; used when a request has no `model`
                           field. Seeded into the settings file on first start; afterwards
                           ~/.buddy-proxy/settings.json (editable from the admin UI) wins
+--default-provider NAME   fallback channel for model names that match no provider
+                          (codebuddy/zcode/trae/doubao, default codebuddy)
+--trae                    enable the Trae provider (decrypts the Trae IDE login)
+--zcode                   enable the ZCode provider (Zhipu GLM, Anthropic passthrough)
+--doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --login                   browser login at startup
 --no-browser              don't auto-open the browser on login
 --verbose-llm             emit expanded safe diagnostics (never logs request/response bodies, tokens, or UIDs)
 --mock-dir DIR            serve recorded fixtures (testing)
 ```
 
-Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `WB_TRAE_HEARTBEAT_INTERVAL` (Trae stream heartbeat while waiting for the buffered upstream response, seconds, default 45, `0` disables — keeps clients with per-chunk timeouts like Ethan's 120s from aborting long generations). `WB_TRAE_NATIVE_TOOLS` (native channel for all Trae requests — native function calling for tool requests, preset-free chat for plain ones; default `1`; `0` falls back to the legacy prompt-taught text protocol with leak guards). `WB_TRAE_IDE_VERSION_CODE` (Trae client version header, default `20260906` — the upstream gates per-model capabilities by this header; raise it when a model suddenly 4001s).
+Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` (`1` enables that provider, same as the flags), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
+
+Trae stream tuning: `WB_TRAE_HEARTBEAT_INTERVAL` (heartbeat while waiting for the buffered upstream response, seconds, default 45, `0` disables — keeps clients with per-chunk timeouts like Ethan's 120s from aborting long generations), `WB_TRAE_NATIVE_TOOLS` (native channel for all Trae requests — native function calling for tool requests, preset-free chat for plain ones; default `1`; `0` falls back to the legacy prompt-taught text protocol with leak guards), `WB_TRAE_IDE_VERSION_CODE` (Trae client version header, default `20260906` — the upstream gates per-model capabilities by this header; raise it when a model suddenly 4001s), `WB_TRAE_NONSTREAM_MAX_S` (non-streaming aggregation cap), `WB_TRAE_SEMANTIC_TIMEOUT`, `WB_TRAE_TOKEN_KEEPALIVE_S` (background token refresh interval).
 
 ## API endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET  | `/ui`                 | admin UI (`/` 302-redirects here) |
-| GET  | `/ui/api/*`           | admin API (overview / models / stats / benefits / settings / checkin / test, localhost only) |
+| GET  | `/ui/api/*`           | admin API (overview / models / stats / benefits / settings / checkin / test / logs / model-toggle / model-schedule / traepat accounts & model-status, localhost only) |
 | GET  | `/health`             | service + auth status |
 | GET  | `/v1/models`          | model list |
 | POST | `/v1/chat/completions` | OpenAI chat (tools + streaming) |

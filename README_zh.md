@@ -9,15 +9,15 @@
 ## 特性
 
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
-- **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表
-- **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、能力）
+- **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。按页签懒加载，首屏不会卡在最慢的日志接口上
+- **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）
 - **脱敏**（`--desensitize`）— 向 system 消息里的合规关键词插入零宽空格，避免后端关键词审核误拦
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
-- **工具调用** — 完整的 function calling 支持，自动过滤无效工具定义
+- **工具调用** — 完整的 function calling 支持，自动过滤无效工具定义；`tool_choice` 在 OpenAI / Anthropic 两种形态之间统一归一化，绝不会以 object 形式发给上游
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置豆包（纯 stdlib CDP 直连豆包工作 App），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）与**豆包**（纯 stdlib CDP 直连豆包工作 App），统一经 `/v1/models` 列出、按模型名路由
 
 ---
 
@@ -138,8 +138,10 @@ uv run trae-cli usage             # 权益/用量（总额、已用比例、权�
 uv run trae-cli chat -m glm-5.2 -q "你好"    # 发一条对话测试
 ```
 
-认证自动加载：优先 Work 凭证 `~/.ethan/trae_work.json`（`trae_work_login.py` 登录生成），
-其次解密本机 Trae IDE `storage.json`，无需手动配置 token。
+认证自动加载：优先 Work 凭证 `~/.buddy-proxy/trae_work.json`（由
+`python -m buddy_proxy.auth.trae_work_login` 或 `buddy login trae` 生成；遗留的
+`~/.ethan/trae_work.json` 会在首次读取时自动迁移），其次解密本机 Trae IDE `storage.json`，
+无需手动配置 token。
 
 ### 用 `proxy.sh` 后台管理
 
@@ -166,7 +168,9 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 
 ## 模型列表
 
-模型目录由 `src/buddy_proxy/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **11 个模型**，`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
+模型目录由 `src/buddy_proxy/web/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **39 个模型**，分属两个通道；`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
+
+**CodeBuddy 通道**（12 个）——直接用模型名，无前缀：
 
 | id | name | credits |
 |---|---|---|
@@ -179,10 +183,29 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 | `minimax-m3` | MiniMax-M3 | x0.25 |
 | `kimi-k3` | Kimi-K3 | x1.62 |
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
+| `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | — |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
 
-要新增 / 调整模型，直接编辑 `src/buddy_proxy/models_config.json` 后重启即生效。
+**Trae PAT 通道**（27 个）——以 `traepat/<id>` 寻址。若某个 id 被多个通道声明，裸名会落到**注册顺序里第一个声明它的通道**（通常是个人 `trae` 通道，如果启用了），**不是** CodeBuddy——CodeBuddy 的 `models()` 返回空列表，只能经「未命中兜底」或显式 `codebuddy/` 前缀抵达。所以要用本通道时请始终带 `traepat/` 前缀。此处的 credits 是该通道自己的量表：
+
+| id | name | credits |
+|---|---|---|
+| `gpt-6-astra-max` | GPT-6-Astra Max | — |
+| `gpt-5.6-sol-max` / `gpt-5.6-sol` | GPT-5.6-Sol Max / GPT-5.6-Sol | — |
+| `gpt-5.6-luna-max` / `gpt-5.6-terra-max` | GPT-5.6-Luna / Terra Max | — |
+| `gpt-5.5-max` / `gpt-5.4` / `gpt-5.2` | GPT-5.5 Max / 5.4 / 5.2 | — |
+| `gemini-3.1-pro` / `gemini-3-flash` | Gemini-3.1-Pro / Gemini-3-Flash | — |
+| `openrouter-3o-max` / `-2o-max` / `-1o` / `-1` | OpenRouter-3o Max / 2o Max / 1o / 1 | — |
+| `glm-5.3` / `glm-5.3-flash` | glm-5.3 / glm-5.3-flash | x0.40 / x0.06 |
+| `glm-5.2` | glm-5.2 | x0.40 |
+| `qwen3.8-max` / `qwen-3.7-plus` | Qwen3.8-Max / Qwen-3.7-Plus | x1.50 / x0.25 |
+| `kimi-k3` / `kimi-k2.7-code` / `kimi-k2.6` | kimi-k3 / Kimi-K2.7-Code / Kimi-K2.6 | x1.83 / x0.83 / — |
+| `deepseek-v4-pro` / `deepseek-v4-flash` | DeepSeek-V4-Pro / -Flash | x0.72 / x0.08 |
+| `minimax-m3` | MiniMax-M3 | x0.26 |
+| `Doubao-Seed-2.1-Pro` / `Doubao-Seed-Code` | Seed-2.1-Pro / Seed-Code | x0.77 / x0.03 |
+
+要新增 / 调整模型，直接编辑 `src/buddy_proxy/web/models_config.json` 后重启即生效。
 
 ## 管理界面（/ui）
 
@@ -200,13 +223,25 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
   打卡历史逐行落在 `logs/checkin.jsonl`。ZCode（智谱 Coding Plan）/ 豆包没有签到 API
 - **额度查询** — 各通道剩余额度一目了然：CodeBuddy 积分包余额合计 + 各资源包明细（credits）；
   Trae 总额度剩余 + 权益包到期时间；ZCode 的 5 小时 / 每周用量窗口与重置时间。额度数据带
-  5 分钟缓存，避免频繁请求上游
+  5 分钟缓存，避免频繁请求上游。Trae PAT 的 standard 池**没有主动查询接口**，用量只能从
+  `4031`（额度耗尽）错误体里被动采集；而 4031 只在池已满时才出现，所以超过 `reset_ts` 的
+  快照会显示成「已重置 · 用量待确认」，而不是把陈旧的 100% 当现状
+- **Trae PAT 账号** — 每个账号一张卡片：本地凭证与冷却状态（纯本地读取，不触网）、一键补签
+  Token（只补缺失/临期的，不打扰健康账号）、以及上游各模型在本通道的负载状态（10 分钟缓存）
+- **模型停用与时段** — 可停用/启用单个 `(provider, model)` 组合（停用后该组合调用直接失败），
+  也可给模型限定时段窗口（如 `22:00–08:00`、`12:00–14:00`）。两者都持久化到设置文件
+- **请求日志** — 从 `logs/metrics.jsonl` 与 30 天归档里读取的服务端分页请求日志，可按日期范围 /
+  通道 / 模型筛选
 - **统计图表** — 按 provider/模型维度聚合请求数、错误数、平均耗时、token 用量：
   近 14 天按通道堆叠的柱状图、模型请求 Top 榜、最近 50 条请求明细。
   每次请求完成追加一行到 `logs/metrics.jsonl`，重启后自动回读恢复历史（保留 30 天）
 - **通道健康** — 各 provider 的登录/配置状态一目了然（CodeBuddy 是否登录、zcode key 是否配置等）
 
 管理页里还可以切换**兜底通道**（请求未命中任何模型时的默认路由），设置持久化在同一文件。
+
+页签按需懒加载、需要时并发拉取，各自的骨架屏独立显示——打开管理页不再等待最慢的日志接口
+（它每次轮询都要读取并解析整个 JSONL 尾部）。手动刷新会作废在飞的旧请求，因此晚到的旧响应
+不可能覆盖更新的结果。
 
 安全约定：`/ui/api/*` 管理接口**仅允许本机（127.0.0.1）访问**；确需从局域网操作管理页时设置
 `BUDDY_PROXY_ADMIN_OPEN=1` 放开（自担风险）。`/v1/*` 代理端点不受此限制。
@@ -328,7 +363,7 @@ providers:
 ## 命令行参数
 
 ```
---host HOST               绑定地址（默认 127.0.0.1）
+--host HOST               绑定地址（默认 127.0.0.1；proxy.sh 用 0.0.0.0）
 --port PORT               绑定端口（默认 8787）
 --endpoint ENDPOINT       CodeBuddy 后端地址
 --session-file PATH       会话文件（默认 ~/.codebuddy-session.json）
@@ -337,20 +372,27 @@ providers:
 --optimize-context        启用消息压缩（Codex 场景推荐）
 --default-model MODEL     默认启用模型（如 zcode/glm-5.3）；请求未带 model 时使用，
                           首次启动写入设置文件，此后以 ~/.buddy-proxy/settings.json 为准
+--default-provider NAME   兜底通道：模型名未命中任何 provider 时转发到哪个通道
+                          （codebuddy/zcode/trae/doubao，默认 codebuddy）
+--trae                    启用 Trae provider（解密 Trae IDE 登录态）
+--zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
+--doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --login                   启动时浏览器登录
 --no-browser              登录时不自动打开浏览器
 --verbose-llm             输出扩展安全诊断（绝不记录请求/响应体、token 或 UID）
 --mock-dir DIR            使用录制的响应（测试用）
 ```
 
-环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）。
+环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED`（置 `1` 等同对应开关）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
+
+Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期间的心跳秒数，默认 45，`0` 关闭——避免像 Ethan 那种 120s 分块超时的客户端中断长生成）、`WB_TRAE_NATIVE_TOOLS`（全部 Trae 请求是否走原生通道，默认 `1`，`0` 回落到旧的提示词教文本协议）、`WB_TRAE_IDE_VERSION_CODE`（Trae 客户端版本头，默认 `20260906`——上游按此头放开各模型能力，某模型突然 4001 时调高它）、`WB_TRAE_NONSTREAM_MAX_S`（非流式聚合上限）、`WB_TRAE_SEMANTIC_TIMEOUT`、`WB_TRAE_TOKEN_KEEPALIVE_S`（后台 Token 刷新间隔）。
 
 ## API 端点
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET  | `/ui`                 | 管理界面（`/` 302 跳转到 `/ui`） |
-| GET  | `/ui/api/*`           | 管理接口（overview/models/stats/benefits/settings/checkin/test，仅限本机） |
+| GET  | `/ui/api/*`           | 管理接口（overview/models/stats/benefits/settings/checkin/test/logs/model-toggle/model-schedule/traepat 账号与模型状态，仅限本机） |
 | GET  | `/health`             | 服务 + 认证状态 |
 | GET  | `/v1/models`          | 模型列表 |
 | POST | `/v1/chat/completions` | OpenAI 对话（工具 + 流式） |
@@ -363,9 +405,10 @@ providers:
 
 ## Provider 接口一览
 
-三种 provider 统一注册到 `providers.py` 的抽象层，`forward_chat` 按模型名路由。
+四种 provider 统一注册到 `providers/` 包的抽象层，`forward_chat` 按模型名路由；
+模型名未命中任何 provider 时转发到兜底通道（`--default-provider`，默认 codebuddy）。
 
-### 1. CodeBuddy Provider（`codebuddy_provider.py`）
+### 1. CodeBuddy Provider（`codebuddy_provider/`）
 
 | 接口 | 说明 |
 | --- | --- |
@@ -386,27 +429,40 @@ providers:
 | 模型 | 经典：`doubao`（快速）/ `doubao-pro`（旧别名）/ `doubao-think`（深度思考）/ `doubao-expert`（专家）；agent（App 菜单同款）：`doubao-auto` / `doubao-2.1-turbo` / `doubao-2.1-pro` / `orange-5.0` / `gemini-3.7-flash` / `gpt-5.6-sol` |
 | 依赖 | 纯 Python 标准库，无 Playwright / chromium |
 
-### 3. Trae Provider（`trae/` 子包 + `trae_work_login*.py`）
+### 3. Trae Provider（`trae/` 子包）
 
-实现已从单体 `trae_provider.py`（3400+ 行）拆分为 `trae/` 子包，按职责分 12 个模块：
+实现已从单体 `trae_provider.py`（3400+ 行）拆分为 `trae/` 子包，按职责分模块：
 `config`（常量/版本头/模型映射）、`auth_storage`（IDE 存储解密）、`benefits_api`（签到/权益）、
-`credentials`（凭证与请求头）、`leak_guard`（预设泄漏防护）、`text_toolcall`（文本协议解析兜底）、
-`text_protocol`（教学注入/请求改写）、`native_tools`（原生 function calling）、`transport`（HTTP 发送）、
-`sse`（SSE 解析/Anthropic 包装）、`provider`（编排入口）、`cli`（账号工具）。
+`credentials`（凭证与请求头）、`leak_guard`（预设泄漏防护）、`text_protocol`（教学注入/请求改写，
+含文本协议解析兜底）、`native_tools`（原生 function calling）、`transport`（HTTP 发送）、
+`sse`（SSE 解析/Anthropic 包装）、`provider`（编排入口）、`cli`（`trae-cli` 账号工具）、
+`aes_pure`（零依赖 AES 兜底实现）、`pat_provider` + `pat/`（PAT 底层模型通道：多账号、撞码分级冷却、
+4031 快速失败）。
 `trae_provider.py` 保留为兼容 shim，历史导入与 `python -m buddy_proxy.trae_provider` 不受影响。
 
 | 类别 | 接口 | 说明 |
 | --- | --- | --- |
 | 认证 | `auth_storage.decrypt_auth_data()` / `find_auth_data()` | 解密 Trae IDE 本地 `storage.json`（AES-128-CBC + SHA-512 派生） |
-| 认证 | `trae_work_login.py` / `trae_work_login_server.py` | Work 登录（ExchangeToken 换 token，回调自动捕获，落盘 `~/.ethan/trae_work.json`） |
-| 认证 | `credentials._auth()` / `_load_work_cred()` | 凭证加载：`.env` → Work 凭证 → 本地解密 |
+| 认证 | `credentials._auth()` / `_load_work_cred()` | 凭证加载：`.env`（`TRAE_TOKEN`/`TRAE_USER_ID`）→ Work 凭证 `~/.buddy-proxy/trae_work.json` → 本地解密 |
+| 认证 | `auth/trae_work_login.py` / `auth/trae_work_login_server.py` | Work 登录（ExchangeToken 换 token，回调自动捕获） |
 | Chat（原生） | `native_tools._send_native_chat()` | **默认通道**：`function=chat_v3` 直通 + 原生 tools（`parameters` 需 JSON 字符串），结构化 `tool_calls` 与 `role:"tool"` 历史回放，带真实 usage；上游按 `X-Ide-Version-Code` 逐模型门控（`WB_TRAE_IDE_VERSION_CODE` 可覆盖） |
 | Chat（兜底） | `transport.send_trae_chat()` / `_send_trae_work_chat()` | 文本协议通道（IDE 3 级端点回退 / Work `solo_work_lite`）；原生通道 4001 拒绝时自动回落（`WB_TRAE_NATIVE_TOOLS=0` 可强制全走此路） |
-| 解析 | `text_toolcall._parse_tool_calls()` / `_StreamToolCallSplitter()` | 文本协议工具调用解析（教学格式 + 泄漏闸门），仅兜底路径使用 |
+| 解析 | `text_protocol` 内的工具调用解析 / 流式切分器 | 文本协议工具调用解析（教学格式 + 泄漏闸门），仅兜底路径使用 |
+| PAT 通道 | `pat_provider` + `pat/`（`cooldown`/`store`/`config`/`models`/`keeper`） | `traepat/<模型>` 底层模型通道：多账号 failover、撞码分级冷却（首次 5 分钟换号，反复撞才升级到次日）、4031 通道级快速失败（`429`，5 分钟后自动重探）、standard 池用量被动采集 |
 | 签到 | `benefits_api.fetch_checkin_status()` / `claim_checkin_credits()` | 查询/领取签到积分（`/trae/api/v2/ug/checkin_credits/*`） |
 | 权益 | `benefits_api.fetch_ent_usage()` | 查询积分总额 / 已用量 / 权益包 |
 | 模型 | `config._map_model()` | T1-T5 分级 + 外部名别名 |
 | 错误 | `sse._trae_error_text()` | 14+ 个官方错误码 → 中文文案（4011 今日额度 / 1005 plan 权益不足等） |
+| 账号工具 | `cli`（`trae-cli status` / `claim` / `usage` / `chat`） | 命令行查询/领取签到、看权益、发测试对话 |
+
+### 4. ZCode Provider（`providers/zcode.py`）
+
+| 接口 | 说明 |
+| --- | --- |
+| 凭据 | `ZCODE_API_KEY` → 项目 secrets → `~/.zcode/v2/config.json`（ZCode CLI 同款配置） |
+| 端点 | 智谱 GLM Coding Plan 的 Anthropic 兼容端点直通；`ZCODE_OPENAI_BASE` 可覆盖 |
+| 模型 | 以 `zcode/<id>` 寻址（如 `zcode/glm-5.3`），经 `/v1/models` 一并列出 |
+| 登录 | `buddy login zcode`（凭据落在 `~/.zcode/v2/config.json`） |
 
 ## 免责声明
 
