@@ -308,6 +308,75 @@ def test_client_request_log_never_contains_api_key(client, proxy_state, monkeypa
     assert safe == {"auth_present": True}
 
 
+def test_tool_choice_never_reaches_upstream_as_object(client, monkeypatch):
+    """tool_choice 必须归一化成 string 再发上游，任何 object 形态都会 400。
+
+    上游 CodeBuddy 后端是 Go 的 ``Request.tool_choice string``，收到 object 会回
+    ``cannot unmarshal object into ... of type string``（错误码 11101）。实测
+    11101 在 #35 之后仍在复现——当时只覆盖了 OpenAI 的
+    ``{"type":"function","function":{"name":...}}``，而 Anthropic 协议的
+    ``{"type":"any"|"auto"|"none"}`` 会原样漏过去（Claude Code 发
+    ``{"type":"any"}``）。这里对每种形态断言发上游的都是字符串。
+    """
+    captured = {}
+
+    async def fake_collect(_url, _headers, body, _protocol):
+        captured.update(body)
+        return _fake_collected()
+
+    monkeypatch.setattr(cbp, "collect_upstream", fake_collect)
+
+    cases = [
+        {"type": "any"},                                   # Anthropic：必须调工具
+        {"type": "auto"},                                  # Anthropic：自动
+        {"type": "none"},
+        {"type": "tool", "name": "Bash"},                  # Anthropic 原生指定
+        {"type": "function", "function": {"name": "Bash"}},  # OpenAI 指定
+        {"type": "function"},                              # OpenAI 缺 name
+        "any",
+        "auto",
+    ]
+    for tc in cases:
+        captured.clear()
+        r = client.post("/v1/chat/completions", json={
+            "model": "glm-5.3",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tool_choice": tc,
+        })
+        assert r.status_code == 200, (tc, r.text)
+        sent = captured.get("tool_choice")
+        assert not isinstance(sent, dict), f"tool_choice={tc!r} 仍以 object 发往上游: {sent!r}"
+        assert sent in ("auto", "none", "required", "Bash"), (tc, sent)
+
+
+def test_tool_choice_any_maps_to_required(client, monkeypatch):
+    """语义映射：Anthropic 的 any（必须调用工具）→ 上游 required。"""
+    captured = {}
+
+    async def fake_collect(_url, _headers, body, _protocol):
+        captured.update(body)
+        return _fake_collected()
+
+    monkeypatch.setattr(cbp, "collect_upstream", fake_collect)
+    r = client.post("/v1/chat/completions", json={
+        "model": "glm-5.3",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tool_choice": {"type": "any"},
+    })
+    assert r.status_code == 200
+    assert captured["tool_choice"] == "required"
+
+    # 指定具体工具时传函数名本身
+    captured.clear()
+    r = client.post("/v1/chat/completions", json={
+        "model": "glm-5.3",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tool_choice": {"type": "tool", "name": "Bash"},
+    })
+    assert r.status_code == 200
+    assert captured["tool_choice"] == "Bash"
+
+
 def test_gbk_request_body(client, monkeypatch):
     """parse_request_body 要能处理 GBK 编码的请求体，不应 500。"""
     async def fake_collect(*args, **kwargs):

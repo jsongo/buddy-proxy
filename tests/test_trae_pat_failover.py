@@ -957,9 +957,12 @@ def test_quota_code_repeated_hits_escalate_to_next_day(monkeypatch):
     profile = pat.ensure_pat_config()[0]
     for _ in range(pat._QUOTA_CODE_ESCALATE_HITS):
         pat._mark_cooldown(profile, "standard", code=4008)
-    left = pat._cooldown_until(profile, "standard") - time.time()
-    # 到次日 = 剩余 > 20 小时（现在距午夜至少几小时）
-    assert left > 3600
+    until = pat._cooldown_until(profile, "standard")
+    # 到次日 = 冷却时刻就是次日零点。断言这个语义本身，而不是拍一个固定秒数：
+    # 原先写 `left > 3600`，在每天 23:00 之后跑（距午夜不足 1 小时）必然误报。
+    next_midnight = pat._next_day_timestamp(time.time())
+    assert until == pytest.approx(next_midnight, abs=2)
+    assert until > time.time()
 
 
 def test_quota_code_hits_isolated_per_account_and_class(monkeypatch):

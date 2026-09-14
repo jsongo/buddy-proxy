@@ -33,21 +33,51 @@ def get_state():
 
 
 def _normalize_tool_choice(tool_choice: Any) -> Any:
-    """把 OpenAI 的 object 形式 tool_choice 转成上游接受的 string 形式。
+    """把各种 object 形式 tool_choice 一律转成上游接受的 string 形式。
 
-    上游 CodeBuddy 后端（Go）的 Request.tool_choice 字段是 string 类型，
-    OpenAI 标准里 ``{"type":"function","function":{"name":"X"}}`` 这种 object
-    形式（强制调用函数 X）会触发 400：cannot unmarshal object into ...
-    of type string。此处转换为等价的函数名字符串 "X"（实测上游接受且语义一致）。
+    上游 CodeBuddy 后端（Go）的 Request.tool_choice 字段是 string 类型，任何
+    object 形式都会触发 400：``cannot unmarshal object into Go struct field
+    Request.tool_choice of type string``（上游错误码 11101 Unmarshal chat
+    params failed）。实测该错误在 #35 之后仍在复现，因为当时只覆盖了
+    ``{"type":"function",...}`` 一种形态，而 Anthropic 协议的
+    ``{"type":"any"|"auto"|"none"}`` 会原样漏到上游（Anthropic 侧允许把
+    tool_choice 写成这两种形式，Claude Code 会发 ``{"type":"any"}``）。
+
+    归一规则（语义等价映射）：
+      - ``{"type":"function","function":{"name":"X"}}`` → "X"（强制调用 X）
+      - ``{"type":"function"}``（缺 name）              → "required"
+      - ``{"type":"any"}``   / "any"                    → "required"（必须调工具）
+      - ``{"type":"auto"}``  / "auto"                   → "auto"
+      - ``{"type":"none"}``  / "none"                   → "none"
+      - ``{"type":"tool","name":"X"}``（Anthropic 原生）→ "X"
+      - 其余 dict（无法识别）                           → "auto"（兜底，绝不放 object 过去）
     """
-    if isinstance(tool_choice, dict):
-        name = (tool_choice.get("function") or {}).get("name")
-        if name:
-            return name
-        # {"type": "function"} 但缺 name：退化为 required（强制调用工具）
-        if tool_choice.get("type") == "function":
-            return "required"
-    return tool_choice
+    if not isinstance(tool_choice, dict):
+        # 字符串形式原样透传；"any" 是 Anthropic 叫法，上游只认 "required"
+        return "required" if tool_choice == "any" else tool_choice
+
+    name = (tool_choice.get("function") or {}).get("name")
+    if isinstance(name, str) and name:
+        return name
+    # Anthropic 原生 {"type":"tool","name":"X"}
+    if tool_choice.get("type") == "tool":
+        tool_name = tool_choice.get("name")
+        if isinstance(tool_name, str) and tool_name:
+            return tool_name
+
+    kind = tool_choice.get("type")
+    # {"type":"function"} 缺 name：沿用历史行为退化为 required（强制调用工具）
+    if kind in ("function", "any", "required"):
+        return "required"
+    if kind in ("auto", "none"):
+        return kind
+    if kind is None:
+        # 无 type 但有 name（非标准写法）：当作指定函数
+        if isinstance(tool_choice.get("name"), str) and tool_choice.get("name"):
+            return tool_choice["name"]
+        return "auto"
+    # 未知形态兜底：宁可退化成 auto，也不能把 object 发给上游（必然 400）
+    return "auto"
 
 
 class CodeBuddyProvider(BaseProvider):
