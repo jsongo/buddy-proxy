@@ -779,10 +779,17 @@ function quotaItemHtml(it) {
   let rem = it.remaining;
   if (rem == null && it.used != null && it.total != null) rem = it.total - it.used;
   const hasNums = rem != null || it.total != null;
-  const reset = it.reset_ts ? ` · ${new Date(it.reset_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'})} 重置` : '';
+  const fmtReset = it.reset_ts ? new Date(it.reset_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'}) : '';
+  // 已过重置时刻的 standard 池：后端不再给用量（那份快照是撞码时采集的，必然接近
+  // 满额，池重置后不会有新数据来覆盖），这里明确说明「待下一次撞码确认」，
+  // 免得看起来像池没被重置或卡在 100%。
+  const pending = !hasNums && it.reset_pending;
+  const reset = fmtReset && !pending ? ` · ${fmtReset} 重置` : '';
   const nums = hasNums
     ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
-    : '<span class="mono"></span>';
+    : (pending
+        ? `<span class="mono muted" title="standard 池无主动查询接口，用量仅在账号撞 4031 时被动采集；重置后成功请求不带账单事件，故用量待下次撞码确认">已于 ${fmtReset || '—'} 重置 · 用量待确认</span>`
+        : '<span class="mono"></span>');
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
   const bar = hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';

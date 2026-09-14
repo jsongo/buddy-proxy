@@ -1308,6 +1308,81 @@ def test_4031_extra_json_error_body_captured(monkeypatch):
     assert len(items) == 1 and items[0]["total"] == 58
 
 
+def test_standard_pool_expired_reset_drops_stale_usage(monkeypatch):
+    """已过 reset_ts 的 standard 池不再展示陈旧用量。
+
+    4031 只在池**已耗尽**时出现，故被动采集写进来的必然接近满额；池重置后账号
+    恢复正常、成功流不带账单事件，永远没有新数据覆盖它——缓存里会长期留着一份
+    「满额」快照。这里断言过期后只保留 reset_ts 与待确认标记，不再把 100% 当现状。
+    """
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    expired = dict(_EXTRA_4031)
+    expired["extra"] = {"used": 58, "quota": 58, "dimension": "daily",
+                        "next_flash": int((time.time() - 60) * 1000)}  # 已过期 1 分钟
+
+    def post(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            return f"event: error\ndata: {json.dumps(expired)}\n\n"
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+
+    # 采集本身照常落盘（快照仍要留档，只是不再当现状展示）
+    profiles = pat.ensure_pat_config()
+    raw = pat._account_state(profiles[0].cache_key)["quota"]["standard"]["items"][0]
+    assert raw["used"] == 58 and raw["total"] == 58
+
+    items = pat._standard_pool_items()
+    assert len(items) == 1
+    it = items[0]
+    assert it["label"] == "PAT #1 · standard daily 池"
+    assert it["reset_pending"] is True
+    assert it["reset_ts"] and it["reset_ts"] < time.time()
+    # 陈旧用量必须消失：否则 UI 会一直显示「已用 100%」
+    for k in ("used", "total", "percent", "remaining"):
+        assert k not in it, f"{k} 不应出现在已过期的条目里"
+
+
+def test_standard_pool_unexpired_keeps_usage(monkeypatch):
+    """未过 reset_ts 的条目照常展示用量（只有过期才降级）。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    def post(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            return f"event: error\ndata: {json.dumps(_EXTRA_4031)}\n\n"
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    it = pat._standard_pool_items()[0]
+    assert it["used"] == 58 and it["total"] == 58 and it["percent"] == 100
+    assert "reset_pending" not in it
+
+
+def test_standard_pool_no_reset_ts_keeps_usage(monkeypatch):
+    """extra 不带 next_flash（reset_ts 为 None）：无过期判据，保持原样展示。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+
+    no_reset = dict(_EXTRA_4031)
+    no_reset["extra"] = {"used": 30, "quota": 58, "dimension": "daily"}
+
+    def post(_url, _payload, credentials, _stream):
+        if credentials.uid == "uid-primary":
+            return f"event: error\ndata: {json.dumps(no_reset)}\n\n"
+        return _OK
+
+    monkeypatch.setattr(pat, "_post_chat", post)
+    assert pat.send_pat_native([], "standard-model", False) == _OK
+    it = pat._standard_pool_items()[0]
+    assert it["used"] == 30 and it["reset_ts"] is None
+    assert "reset_pending" not in it
+
+
 def test_standard_pool_not_returned_when_never_4031(monkeypatch):
     """从未撞过 4031：fetch_pat_ent_usage 不带 standard 池条目（不能把
     「无数据」伪装成 0%——那是误导）。"""

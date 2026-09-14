@@ -220,7 +220,16 @@ def _standard_pool_items() -> list[dict[str, Any]]:
     """汇总各账号被动采集的 standard 池数据（无数据的账号不产出条目）。
 
     14 天未刷新的条目视为陈旧丢弃（账号早已删配/池结构变化时不展示旧账）。
+
+    已过 ``reset_ts`` 的条目不再展示旧的 used/total：standard 池没有主动查询
+    接口，唯一信号源是撞 4031 时错误体里的 used/quota——而 4031 恰恰只在**池已
+    耗尽**时出现，所以写进来的必然接近满额；池重置后账号恢复正常、成功流出流
+    **不带账单事件**，永远不会有新数据来覆盖它。结果是缓存里会长期留着一份
+    「满额」快照，超过 ``reset_ts`` 之后仍显示 100%，看起来像「池没被重置」。
+    这里把过期条目降级为「已重置·待确认」：只保留 reset_ts 供 UI 展示，不再
+    把陈旧的用量当现状（真实用量要等下一次撞码被动采集才更新）。
     """
+    now = time.time()
     out: list[dict[str, Any]] = []
     profiles = ensure_pat_config()
     multi = len(profiles) > 1
@@ -232,13 +241,19 @@ def _standard_pool_items() -> list[dict[str, Any]]:
         if not (isinstance(items, list) and items):
             continue
         fetched_at = value.get("fetched_at") or 0
-        stale = time.time() - fetched_at > 14 * 86400
+        stale = now - fetched_at > 14 * 86400
         for item in items:
             if stale or not isinstance(item, dict):
                 continue
             label = str(item.get("label") or "standard 池")
-            out.append(dict(item, label=f"PAT #{profile.index + 1} · {label}"
-                           if multi else label))
+            shown = dict(item)
+            reset_ts = item.get("reset_ts")
+            if isinstance(reset_ts, (int, float)) and reset_ts and reset_ts <= now:
+                # 已过重置时刻：用量快照不可信，只留 label/reset_ts 供展示
+                shown = {"label": item.get("label"), "reset_ts": int(reset_ts),
+                         "reset_pending": True, "source": item.get("source")}
+            out.append(dict(shown, label=f"PAT #{profile.index + 1} · {label}"
+                            if multi else label))
     return out
 
 
