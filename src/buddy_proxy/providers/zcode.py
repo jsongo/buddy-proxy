@@ -24,6 +24,12 @@ bigmodel-coding-plan 通道同款）：
    （格式 ``<apiKey>.<secretKey>``，即智谱官网 coding-plan API Key）
 
 安全：API key 只在服务端使用，绝不明文进日志；secrets 文件 chmod 600。
+
+套餐权限（2026-09-19 实测）：模型出现在上游 ``/models`` 列表 ≠ 当前订阅可用。
+``glm-5.3-flashx`` 已在端点模型表中，但本机订阅调它被拒为
+``429 code 1311「当前订阅套餐暂未开放GLM-5.3-FlashX权限」``；同一把 key 打
+``glm-5.3`` / ``glm-5.3-flash`` / ``glm-5-turbo`` 均 200，可见是套餐授权缺口
+而非 key 失效。因此 flashx 只作**预备接入**：订阅开通后无需改代码即可使用。
 """
 
 from __future__ import annotations
@@ -78,14 +84,19 @@ def _openai_base_for(anthropic_base: str) -> str:
 DEFAULT_MODELS: dict[str, str] = {
     "glm-5.3": "GLM-5.3 (thinking, 1M ctx)",
     "glm-5.3-flash": "GLM-5.3-Flash (thinking, multimodal, 1M ctx)",
+    "glm-5.3-flashx": "GLM-5.3-FlashX (thinking, 1M ctx)",
     "glm-5-turbo": "GLM-5-Turbo (200K ctx)",
 }
 
 # 小写 id → 上游正式模型名（ZCode/智谱侧的大小写字面量）。
 # anthropic 直通时若上游对 model 名大小写敏感，用它归一化后再转发。
+# 实测（2026-09-19）：该端点的 model 名**大小写不敏感**——glm-5.3-flashx /
+# GLM-5.3-FlashX / GLM-5.3-flashx 四种写法都解析到同一个 GLM-5.3-FlashX
+# （乱名才报 1211 模型不存在）。保留映射只为与既有约定一致、日志可读。
 MODEL_NAME_CANONICAL: dict[str, str] = {
     "glm-5.3": "GLM-5.3",
     "glm-5.3-flash": "GLM-5.3-Flash",
+    "glm-5.3-flashx": "GLM-5.3-FlashX",
     "glm-5-turbo": "glm-5-turbo",
 }
 

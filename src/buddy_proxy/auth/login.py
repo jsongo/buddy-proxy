@@ -7,6 +7,7 @@
     python -m buddy_proxy.auth.login trae                # Trae Work (SOLO)：浏览器登录后粘贴回调链接
     python -m buddy_proxy.auth.login zcode               # 检查并打印 zcode 凭据配置指引（API key，无交互登录）
     python -m buddy_proxy.auth.login doubao              # 打印豆包（CDP）说明
+    python -m buddy_proxy.auth.login mimo                # 检查并打印 mimo 凭据配置指引（API key 或桌面登录态）
 
 可选参数：
     --no-browser    codebuddy 登录不自动打开浏览器，只打印授权链接
@@ -29,7 +30,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "cb": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo")
 
 
 def _login_codebuddy(open_browser: bool = True) -> int:
@@ -81,9 +82,11 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     """Trae Work (SOLO) 一键登录：自动起本地回调服务 → 打开登录页 → 自动落盘退出。
 
     trae.cn 授权页（auth_type=local）要求本机 18080 回调服务在线，否则页面报
-    「登录失败 - 网络错误」。这里自动拉起 trae_work_login_server，授权成功后
-    回调服务会删除 state 文件，以此作为完成信号。手动粘贴模式保留：
-    python3 -m buddy_proxy.auth.trae_work_login
+    「登录失败 - 网络错误」。这里自动拉起 trae_work_login_server，回调服务会在
+    **成功或失败时都写 RESULT_PATH**，CLI 立刻收割结果——不能只把「STATE 被删」
+    当成功信号，那样任何失败（nonce 被冲掉 / 缺 refreshToken / 换 token 报错）
+    都会让 CLI 干等到 15 分钟超时，浏览器那边却可能已经显示「登录成功」。
+    手动粘贴模式保留：python3 -m buddy_proxy.auth.trae_work_login
     """
     import json
     import socket
@@ -94,6 +97,7 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
 
     from buddy_proxy.auth.trae_work_login import (
         OUT_PATH,
+        RESULT_PATH,
         STATE_PATH,
         STATE_TTL,
         build_login_url,
@@ -112,10 +116,31 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    url, _machine_id, _device_id = build_login_url()
+    def _report_ok() -> int:
+        try:
+            cred = json.loads(OUT_PATH.read_text())
+            expires = cred.get("expires_at", "")
+            expires = expires[:10] if isinstance(expires, str) else expires
+            print(
+                f"[OK] Trae Work 登录完成：uid={cred.get('uid')} "
+                f"昵称={cred.get('nickname')} 有效期至={expires}"
+            )
+        except Exception:
+            print("[OK] Trae Work 登录完成")
+        return 0
+
+    url, _machine_id, _device_id, _port = build_login_url()
+    # 本次尝试的 nonce：只认跟它对得上的 RESULT，免得上一轮迟到的结果误杀本轮
+    try:
+        my_nonce = json.loads(STATE_PATH.read_text()).get("nonce") or ""
+    except Exception:
+        my_nonce = ""
     proc = None
     if _port_busy():
-        print("[*] 18080 端口已有回调服务在监听，直接复用")
+        # 端口被占不一定是我们的回调服务（也可能是别的程序或旧实例）。
+        # 这种情况回调可能被黑洞掉，必须明说，别让人以为「已复用」就万事大吉。
+        print("[!] 18080 已被占用，将直接复用（**请确认它确实是本项目的回调服务**；")
+        print("    若不是，回调会被吞掉，登录会一直停在这里）")
     else:
         proc = subprocess.Popen(
             [sys.executable, "-m", "buddy_proxy.auth.trae_work_login_server"],
@@ -143,38 +168,62 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     deadline = time.time() + STATE_TTL
     try:
         while time.time() < deadline:
-            # state 消失是唯一的权威成功信号（只有 server 成功落盘后才会删它），
-            # 必须先于进程存活检查——server 删完 state 可能立即退出
+            # RESULT 是权威终态（成功/失败都会写），必须最先看
+            if RESULT_PATH.exists():
+                try:
+                    result = json.loads(RESULT_PATH.read_text())
+                except Exception:
+                    result = {"ok": False, "message": "登录结果文件损坏"}
+                RESULT_PATH.unlink(missing_ok=True)
+                # 结果带 nonce 标记：不是本轮的就丢掉继续等（上一轮迟到的结果）
+                got_nonce = result.get("nonce") or ""
+                if got_nonce and my_nonce and got_nonce != my_nonce:
+                    continue
+                STATE_PATH.unlink(missing_ok=True)
+                if result.get("ok"):
+                    # server 还会跑一下 Work 通道测试再退出，稍等收割它的输出；
+                    # 极端情况（挂住）超时再强制清理
+                    if proc is not None:
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            _stop(proc)
+                    return _report_ok()
+                _stop(proc)
+                print(f"[!] Trae 登录失败：{result.get('message')}", file=sys.stderr)
+                print(
+                    "    可重试 buddy login trae；仍不行就用手动模式："
+                    "python3 -m buddy_proxy.auth.trae_work_login",
+                    file=sys.stderr,
+                )
+                return 1
+            # 兜底：旧版 server 只删 STATE 不写 RESULT，仍按成功收割
             if not STATE_PATH.exists():
-                # server 会跑完 Work 通道测试后自动退出，等它自然退出即可收割
-                # 测试输出；极端情况（旧版 server 挂住）超时再强制清理
                 if proc is not None:
                     try:
-                        proc.wait(timeout=60)
+                        proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         _stop(proc)
-                try:
-                    cred = json.loads(OUT_PATH.read_text())
-                    expires = cred.get("expires_at", "")
-                    expires = expires[:10] if isinstance(expires, str) else expires
-                    print(
-                        f"[OK] Trae Work 登录完成：uid={cred.get('uid')} "
-                        f"昵称={cred.get('nickname')} 有效期至={expires}"
-                    )
-                except Exception:
-                    print("[OK] Trae Work 登录完成")
-                return 0
+                return _report_ok()
             if proc is not None and proc.poll() is not None:
                 print("[!] 本地回调服务意外退出", file=sys.stderr)
                 return 1
-            time.sleep(1)
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print()
 
     _stop(proc)
+    STATE_PATH.unlink(missing_ok=True)
+    RESULT_PATH.unlink(missing_ok=True)
     print(
-        "[!] 登录未完成（超时/取消）。可重试 buddy login trae，"
-        "或手动模式：python3 -m buddy_proxy.auth.trae_work_login",
+        "[!] 登录未完成（超时/取消）。若浏览器那边已经显示登录成功，说明回调"
+        "没落到本机服务上——上面若有 [srv] 访问日志可对照；没有则表示浏览器"
+        "压根没回跳（常见于授权页把回调 URL 的 query/path 改写了）。",
+        file=sys.stderr,
+    )
+    print(
+        "    可重试 buddy login trae，或手动模式："
+        "python3 -m buddy_proxy.auth.trae_work_login",
         file=sys.stderr,
     )
     return 1
@@ -206,11 +255,40 @@ def _login_doubao(**_kwargs) -> int:
     return 0
 
 
+def _login_mimo(**_kwargs) -> int:
+    """mimo 无交互登录：API key 或复用 MiMo 桌面的小米账号登录态。"""
+    from buddy_proxy.mimo.credentials import resolve_api_key
+    from buddy_proxy.mimo.sso import load_account_cookies
+
+    key, base = resolve_api_key()
+    if key:
+        print(f"[OK] mimo 凭据已配置(API key): {key[:4]}…{key[-2:]}  base: {base}")
+        print("    如需换号，改下面任意一处配置即可：")
+        print("    1. 环境变量 MIMO_API_KEY（配 MIMO_BASE_URL 可切 billing/token-plan）")
+        print("    2. ~/.mimocode/auth.json（MiMo 桌面「API Key」模式会写这份）")
+        print("    3. ~/.buddy-proxy/mimo_api_key.json")
+        return 0
+
+    account = load_account_cookies()
+    if account is not None:
+        print(f"[OK] mimo 将复用 MiMo 桌面登录态: userId={account.user_id}")
+        print("    （本 provider 自动两阶段换 mimopc serviceToken，无需额外配置）")
+        print("    若要改用 API key，配置 MIMO_API_KEY 或上述文件即可。")
+        return 0
+
+    print("[!] mimo 未配置凭据，按以下任意一种方式配置：")
+    print("    1. 环境变量 MIMO_API_KEY=<platform.xiaomimimo.com 开的 key>")
+    print("    2. 在本机 MiMo Desktop 登录小米账号（本 provider 自动读取其 cookie）")
+    print("    3. 写入 ~/.buddy-proxy/mimo_api_key.json: {\"api_key\": \"...\", \"base_url\": \"...\"}")
+    return 1
+
+
 _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
     "zcode": _login_zcode,
     "doubao": _login_doubao,
+    "mimo": _login_mimo,
 }
 
 
@@ -220,7 +298,7 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy) / trae / zcode / doubao，默认 codebuddy")
+                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae 登录不自动打开浏览器，只打印链接")
     args = parser.parse_args()

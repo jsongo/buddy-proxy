@@ -17,7 +17,8 @@
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）与**豆包**（纯 stdlib CDP 直连豆包工作 App），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）与**小米 MiMo**（API key，或复用 MiMo 桌面登录态），统一经 `/v1/models` 列出、按模型名路由
+- **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
 ---
 
@@ -51,7 +52,7 @@ uv run python -m buddy_proxy --login --desensitize
 ```bash
 ./buddy start              # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # 登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao）
+./buddy login [provider]   # 登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo）
 ./buddy ui                 # 仅打开管理页（必要时先启动）
 
 # 一次性安装：把 buddy 放进 PATH，之后任意目录敲 buddy 即可
@@ -149,6 +150,38 @@ uv run trae-cli chat -m glm-5.2 -q "你好"    # 发一条对话测试
 `~/.ethan/trae_work.json` 会在首次读取时自动迁移），其次解密本机 Trae IDE `storage.json`，
 无需手动配置 token。
 
+> **`buddy login trae` 排障**：若浏览器显示「登录成功」而 CLI 一直停在等待界面，
+> 九成是登录 URL 的参数没和 Trae CN 客户端对齐。关键项 `plugin_version` 必须是
+> **`trae-handoff-1.0`**——传版本号形态会被授权页当版本号规范化并**丢掉
+> `auth_callback_url`**，回调永不发起。另外回调是**跨源 fetch**（`redirect=0`），
+> 本地服务必须回 `Access-Control-Allow-Origin`，否则请求会被浏览器直接拦掉。
+> 回调服务带脱敏访问日志（`[srv] GET /authorize?...`），可据此判断浏览器到底有没有打过来。
+
+### MiMo Provider（可选）
+
+小米 **MiMo**（platform.xiaomimimo.com），以 `mimo/<id>` 寻址（`mimo-auto`、`mimo-pro`）：
+
+```bash
+uv run python -m buddy_proxy --desensitize --mimo
+uv run buddy login mimo     # 打印当前生效的认证模式，或配置指引
+```
+
+认证两种，按序尝试：
+
+1. **API key** — `MIMO_API_KEY`（配 `MIMO_BASE_URL` 可切 billing/token-plan 域）、
+   `~/.mimocode/auth.json`（MiMo 桌面「API Key」模式写入）、`~/.buddy-proxy/mimo_api_key.json`。
+2. **小米 SSO** — 复用本机已安装的 **MiMo 桌面** 登录态：自动读取其账号 cookie，复刻
+   桌面端「两阶段换 `serviceToken`」，过期自动刷新、被拒自动重试一次。无需复制粘贴 cookie。
+
+MiMo 上游是 OpenAI 形态，请求原样转发；**但 Anthropic（`/v1/messages`）例外**——上游没有
+Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件流（`message_start` /
+`content_block_delta` / `message_stop`，含 `thinking` 与 `tool_use` 块），否则 Claude Code
+会报「0 stream events received」/「body is JSON but not a Message」。
+
+> 排障提示：`30012` 是「**未开通会员**」而不是 token 失效——遇到它本 provider 不会去重换票。
+> 管理页额度面板的 `percent` 已由上游的「剩余」换算成「已用」，且管理页显示的
+> 「已用 N%」用的是 `100 - 剩余`。
+
 ### 用 `proxy.sh` 后台管理
 
 `buddy` 内部即调用 `proxy.sh`；想手动精细控制时可以直接用它：
@@ -228,7 +261,8 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
   「立即打卡」手动领。签到活动有档期——CodeBuddy 档期未开时界面显示「今日无签到活动」且不会误打。
   打卡历史逐行落在 `logs/checkin.jsonl`。ZCode（智谱 Coding Plan）/ 豆包没有签到 API
 - **额度查询** — 各通道剩余额度一目了然：CodeBuddy 积分包余额合计 + 各资源包明细（credits）；
-  Trae 总额度剩余 + 权益包到期时间；ZCode 的 5 小时 / 每周用量窗口与重置时间。额度数据带
+  Trae 总额度剩余 + 权益包到期时间；ZCode 的 5 小时 / 每周用量窗口与重置时间；MiMo 的
+  周额用量 + 套餐有效期。额度数据带
   5 分钟缓存，避免频繁请求上游。Trae PAT 的 standard 池**没有主动查询接口**，用量只能从
   `4031`（额度耗尽）错误体里被动采集；而 4031 只在池已满时才出现，所以超过 `reset_ts` 的
   快照会显示成「已重置 · 用量待确认」，而不是把陈旧的 100% 当现状
@@ -379,10 +413,11 @@ providers:
 --default-model MODEL     默认启用模型（如 zcode/glm-5.3）；请求未带 model 时使用，
                           首次启动写入设置文件，此后以 ~/.buddy-proxy/settings.json 为准
 --default-provider NAME   兜底通道：模型名未命中任何 provider 时转发到哪个通道
-                          （codebuddy/zcode/trae/doubao，默认 codebuddy）
+                          （codebuddy/zcode/trae/doubao/mimo，默认 codebuddy）
 --trae                    启用 Trae provider（解密 Trae IDE 登录态）
 --zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
+--mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
 --login                   启动时浏览器登录（会打开浏览器并打印登录链接）
 --no-browser              不自动打开浏览器。隐式/后台补认证（如自动打卡轮询）
                           无论如何都不会弹浏览器、也不会打印登录链接，只留一行
@@ -391,7 +426,7 @@ providers:
 --mock-dir DIR            使用录制的响应（测试用）
 ```
 
-环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED`（置 `1` 等同对应开关）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
+环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED`（置 `1` 等同对应开关）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`MIMO_API_KEY` / `MIMO_BASE_URL`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
 
 Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期间的心跳秒数，默认 45，`0` 关闭——避免像 Ethan 那种 120s 分块超时的客户端中断长生成）、`WB_TRAE_NATIVE_TOOLS`（全部 Trae 请求是否走原生通道，默认 `1`，`0` 回落到旧的提示词教文本协议）、`WB_TRAE_IDE_VERSION_CODE`（Trae 客户端版本头，默认 `20260906`——上游按此头放开各模型能力，某模型突然 4001 时调高它）、`WB_TRAE_NONSTREAM_MAX_S`（非流式聚合上限）、`WB_TRAE_SEMANTIC_TIMEOUT`、`WB_TRAE_TOKEN_KEEPALIVE_S`（后台 Token 刷新间隔）。
 
@@ -471,6 +506,26 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 | 端点 | 智谱 GLM Coding Plan 的 Anthropic 兼容端点直通；`ZCODE_OPENAI_BASE` 可覆盖 |
 | 模型 | 以 `zcode/<id>` 寻址（如 `zcode/glm-5.3`），经 `/v1/models` 一并列出 |
 | 登录 | `buddy login zcode`（凭据落在 `~/.zcode/v2/config.json`） |
+
+### 5. MiMo Provider（`mimo/` 子包）
+
+小米 **MiMo**（platform.xiaomimimo.com），以 `mimo/<id>` 寻址（`mimo-auto`、`mimo-pro`）。
+
+| 接口 | 说明 |
+| --- | --- |
+| 凭据（方式一） | API key：`MIMO_API_KEY`（配 `MIMO_BASE_URL` 可切 billing/token-plan）、`~/.mimocode/auth.json`（MiMo 桌面「API Key」模式写入）、`~/.buddy-proxy/mimo_api_key.json` |
+| 凭据（方式二） | **小米 SSO**：复用本机 MiMo 桌面登录态——自动读取其账号 cookie，并复刻桌面端的「两阶段换 `serviceToken`」，过期自动刷新、被拒自动重试一次 |
+| 端点 | OpenAI 形态 `/chat/completions` 直通（流式/非流式） |
+| **Anthropic（`/v1/messages`）** | 上游无 Anthropic 原生端点，故**响应反向转换**为 Anthropic 事件（`message_start`/`content_block_delta`/`message_stop`，含 `thinking` 与 `tool_use` 块），供 Claude Code 使用 |
+| 登录 | `buddy login mimo`（打印当前生效模式或配置指引；本 provider 无交互式登录） |
+
+管理页的额度面板给两行：**周额用量**与**套餐有效期**。注意这俩是**不同周期**——
+额度窗口是「以订阅 `startTime` 为锚点的 7 天」，而套餐期限通常是 **30 天**。
+上游 `percent` 字段是**剩余**百分比，面板已换算成「已用」。
+
+```bash
+uv run python -m buddy_proxy --desensitize --mimo
+```
 
 ## 免责声明
 
