@@ -514,8 +514,10 @@ class AnthropicStreamConverter:
                     "delta": {"type": "text_delta", "text": text_delta},
                 }))
             
-            # 工具调用
-            for call in delta.get("tool_calls", []):
+            # 工具调用。用 `or []` 而非默认值：上游常在**每个** chunk 里显式带
+            # "tool_calls": null（MiMo 就是这样），默认值只在「缺字段」时生效，
+            # 对显式 null 会迭代 None → TypeError 把整条流打断。
+            for call in delta.get("tool_calls") or []:
                 chat_index = int(call.get("index", 0))
                 
                 # 初始化工具块

@@ -17,7 +17,8 @@
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Multi-account** — isolated session files for work / personal accounts
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM) and **Doubao** (pure-stdlib CDP into the Doubao desktop app); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) and **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login); all listed by `/v1/models` and routed by model name
+- **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
 ---
 
@@ -33,9 +34,9 @@ uv run python -m buddy_proxy --desensitize
 The first run creates the state directory `~/.buddy-proxy/` (mode `0700`; override with
 `BUDDY_PROXY_STATE_DIR`). Everything machine-local lives there: `settings.json` (default
 model, disabled models, model time windows), the Trae Work credential `trae_work.json`,
-the PAT token cache `trae_pat_token.json`, and the client-name map
-`buddy_client_names.json`. It holds credentials — keep it out of backups and version
-control. Startup prints the resolved path as `[State] ...`.
+the PAT token cache `trae_pat_token.json`, the cached MiMo token/serviceToken state, and
+the client-name map `buddy_client_names.json`. It holds credentials — keep it out of
+backups and version control. Startup prints the resolved path as `[State] ...`.
 
 ### The `buddy` command (recommended)
 
@@ -44,7 +45,7 @@ control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo)
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 
 # one-time install: put buddy on your PATH so it works from anywhere
@@ -70,7 +71,7 @@ control. Startup prints the resolved path as `[State] ...`.
 ./proxy.sh status         # show PID and listening address
 ./proxy.sh logs           # tail -F the log file
 ./proxy.sh ui             # ensure it's running, then open the admin UI
-./proxy.sh login codebuddy  # upstream login (also: trae / zcode / doubao)
+./proxy.sh login codebuddy  # upstream login (also: trae / zcode / doubao / mimo)
 
 # customize host / port / args
 ./proxy.sh start -p 9000 -H 0.0.0.0
@@ -148,9 +149,9 @@ Open <http://127.0.0.1:8787/ui> in a browser (or just run `buddy start` / `buddy
 - **Default model** — models are grouped by provider; click "Set as default" (设为默认) on any model to make it the proxy default. Client requests **without a `model` field** are routed to it automatically. Settings persist in `~/.buddy-proxy/settings.json` (override via `BUDDY_PROXY_SETTINGS`) and survive restarts; `--default-model zcode/glm-5.3` seeds the initial value (an existing settings file wins).
 - **One-click test** — every model row has a "Test" (测试) button that sends a real `hi` upstream and shows latency, token usage and the reply preview (non-streaming, `max_tokens=256` — a real, billable upstream call).
 - **Stats & charts** — per-provider/per-model request counts, errors, average latency and token usage: a 14-day stacked daily chart, a top-models bar list, and the latest 50 requests. Each completed request appends one line to `logs/metrics.jsonl`; the tail is reloaded on startup so history survives restarts (30 days kept).
-- **Provider health** — login/config status at a glance (CodeBuddy session, zcode key, ...).
+- **Provider health** — login/config status at a glance (CodeBuddy session, zcode key, mimo auth mode, ...).
 - **Auto check-in & calendar** — both Trae and CodeBuddy expose daily sign-in: tick "Auto check-in" (自动打卡) and the proxy claims them every day at the configured time (default 09:30; if the proxy starts later it catches up immediately). The last 35 days are shown as a calendar; "Check in now" (立即打卡) claims manually. Campaigns can be seasonal — when CodeBuddy's is closed the UI shows "no sign-in activity today" and skips it. History is appended to `logs/checkin.jsonl`. ZCode (GLM Coding Plan) / Doubao have no sign-in API.
-- **Quota** — remaining allowance per provider at a glance: CodeBuddy credit packs (total remaining + per-pack detail), Trae total allowance + entitlement pack expiry, ZCode 5-hour / weekly windows with reset times. Quota responses are cached for 5 minutes. The Trae PAT standard pool has no active query API — its usage is collected **passively** from the `4031` (quota exhausted) error body, and because that error only fires when the pool is already full, a snapshot that is past its `reset_ts` is shown as "reset · pending confirmation" rather than as a stale 100%.
+- **Quota** — remaining allowance per provider at a glance: CodeBuddy credit packs (total remaining + per-pack detail), Trae total allowance + entitlement pack expiry, ZCode 5-hour / weekly windows with reset times, MiMo weekly quota + plan validity. Quota responses are cached for 5 minutes. The Trae PAT standard pool has no active query API — its usage is collected **passively** from the `4031` (quota exhausted) error body, and because that error only fires when the pool is already full, a snapshot that is past its `reset_ts` is shown as "reset · pending confirmation" rather than as a stale 100%.
 - **Trae PAT accounts** — per-account cards showing local credential and cooldown state (read purely locally, never touching the network), one-click token refresh that only fills in missing/expiring tokens, and the upstream's per-model load status for the PAT channel (cached for 10 minutes).
 - **Model toggle & schedule** — disable/enable an individual `(provider, model)` pair (a disabled pair fails fast), and restrict one to time windows such as `22:00–08:00` or `12:00–14:00`. Both persist to the settings file.
 - **Request log** — paginated request log read from `logs/metrics.jsonl` plus the 30-day archive, filtered by date range, provider and model.
@@ -216,6 +217,29 @@ uv run python -m buddy_proxy --desensitize --zcode
 ```
 
 Credentials come from `ZCODE_API_KEY`, the project's secrets, or `~/.zcode/v2/config.json`. `ZCODE_OPENAI_BASE` overrides the base URL. Models are listed by `/v1/models` and appear under the `zcode/` prefix (e.g. `zcode/glm-5.3`).
+
+## MiMo provider (optional)
+
+Xiaomi **MiMo** (platform.xiaomimimo.com), exposed under the `mimo/` prefix (`mimo-auto`, `mimo-pro`):
+
+```bash
+uv run python -m buddy_proxy --desensitize --mimo
+```
+
+Two auth modes, tried in order:
+
+1. **API key** — `MIMO_API_KEY` (plus `MIMO_BASE_URL` to pick the billing / token-plan host), `~/.mimocode/auth.json` (written by MiMo Desktop's "API Key" mode), or `~/.buddy-proxy/mimo_api_key.json`.
+2. **Xiaomi SSO** — reuses the login state of an installed **MiMo Desktop** app. The proxy reads its account cookies and performs the same two-stage exchange the app does to obtain a short-lived `serviceToken`; tokens are refreshed automatically and a stale one is retried once. No clipboard or cookie export needed.
+
+```bash
+uv run buddy login mimo     # reports which mode is in use, or how to configure one
+```
+
+MiMo is OpenAI-shaped upstream, so requests are forwarded as-is — **except** Anthropic (`/v1/messages`) clients such as Claude Code, where the response is converted back into Anthropic events (streaming `message_start` / `content_block_delta` / `message_stop`, plus `thinking` and `tool_use` blocks) because MiMo has no native Anthropic endpoint.
+
+The admin UI shows a quota panel with two rows: **weekly quota used** (the upstream reports *remaining* percent, which the UI converts to used) and **plan validity** (days elapsed out of the plan term). Note the two are different periods: the quota window is **7 days anchored at the subscription start**, while the plan term is usually **30 days**.
+
+> `--mimo` is only needed when you want this channel; without it the provider is not registered and `mimo/...` model names fall through to the fallback provider.
 
 ## Connect clients
 
@@ -338,10 +362,11 @@ providers:
                           field. Seeded into the settings file on first start; afterwards
                           ~/.buddy-proxy/settings.json (editable from the admin UI) wins
 --default-provider NAME   fallback channel for model names that match no provider
-                          (codebuddy/zcode/trae/doubao, default codebuddy)
+                          (codebuddy/zcode/trae/doubao/mimo, default codebuddy)
 --trae                    enable the Trae provider (decrypts the Trae IDE login)
 --zcode                   enable the ZCode provider (Zhipu GLM, Anthropic passthrough)
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
+--mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
 --login                   browser login at startup (opens the browser; prints the login URL)
 --no-browser              don't auto-open a browser. Implicit/background re-auth (e.g. the
                           auto-checkin poll) never opens a browser and never prints a login
@@ -351,7 +376,7 @@ providers:
 --mock-dir DIR            serve recorded fixtures (testing)
 ```
 
-Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` (`1` enables that provider, same as the flags), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
+Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` (`1` enables that provider, same as the flags), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `MIMO_API_KEY` / `MIMO_BASE_URL`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
 
 Trae stream tuning: `WB_TRAE_HEARTBEAT_INTERVAL` (heartbeat while waiting for the buffered upstream response, seconds, default 45, `0` disables — keeps clients with per-chunk timeouts like Ethan's 120s from aborting long generations), `WB_TRAE_NATIVE_TOOLS` (native channel for all Trae requests — native function calling for tool requests, preset-free chat for plain ones; default `1`; `0` falls back to the legacy prompt-taught text protocol with leak guards), `WB_TRAE_IDE_VERSION_CODE` (Trae client version header, default `20260906` — the upstream gates per-model capabilities by this header; raise it when a model suddenly 4001s), `WB_TRAE_NONSTREAM_MAX_S` (non-streaming aggregation cap), `WB_TRAE_SEMANTIC_TIMEOUT`, `WB_TRAE_TOKEN_KEEPALIVE_S` (background token refresh interval).
 
