@@ -44,13 +44,26 @@ PLUGIN_VERSION = "trae-handoff-1.0"
 #: 客户端用的回调路径常量（无 nonce 段）。见 main.js: lf.AUTHORIZE="/authorize"
 CALLBACK_PATH = "/authorize"
 OUT_PATH = Path.home() / ".buddy-proxy" / "trae_work.json"
-# 供 trae_work_login_server.py 读取的本次登录状态（随机 id，非机密）
+# 供 trae_work_login_server.py 读取的本次登录状态（含 nonce，按机密对待：
+# 落盘走 _write_secret，权限 0600）。放 /tmp 是为了让 CLI 与回调服务两个
+# 进程共享，但**不要**用 write_text——那会落成 0644，同机任何进程可读。
 STATE_PATH = Path("/tmp/trae_work_login_state.json")
 # 本次登录的终态（成功/失败都要写）。CLI 靠它立刻知道结果，
 # 不能只看 STATE 是否被删——那样任何失败都会让 CLI 干等到超时。
 RESULT_PATH = Path("/tmp/trae_work_login_result.json")
 # 登录状态有效期（秒）：超时后 server 拒绝回调
 STATE_TTL = 900
+
+
+def _write_secret(path: Path, payload: dict) -> None:
+    """以 0600 权限写 json（避免 write_text 落成 0644，同机可读）。
+
+    STATE/RESULT 都含 nonce（防伪造用）与登录元数据，按机密对待；
+    凭证文件同样走 0600（见 server 的 ``_write_cred_secure``）。
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False))
 
 
 def _http_post_json(url: str, body: dict, headers: dict, timeout: int = 60) -> dict:
@@ -103,14 +116,15 @@ def build_login_url(port: int = 18080) -> tuple[str, str, str, int]:
     }
     url = AUTH_HOST + "?" + urllib.parse.urlencode(params)
     # 状态文件供 trae_work_login_server.py 使用：machine_id/device_id 必须
-    # 复用同一对（避免每请求随机指纹触发风控），nonce 用于回调防伪造
-    STATE_PATH.write_text(json.dumps({
+    # 复用同一对（避免每请求随机指纹触发风控），nonce 用于回调防伪造。
+    # 走 _write_secret（0600）：nonce 泄漏就等于防伪形同虚设。
+    _write_secret(STATE_PATH, {
         "machine_id": machine_id,
         "device_id": device_id,
         "nonce": nonce,
         "port": port,
         "created_at": int(time.time()),
-    }))
+    })
     # 新一次尝试：清掉上一轮终态，免得 CLI 一启动就吃到旧结果
     RESULT_PATH.unlink(missing_ok=True)
     return url, machine_id, device_id, port

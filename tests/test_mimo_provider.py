@@ -656,3 +656,60 @@ class TestAnthropicProtocol:
         assert '"type": "tool_use"' in text.replace("'", '"') or "tool_use" in text
         assert "get_weather" in text
         assert "message_stop" in events
+
+
+class TestAnthropicStreamAbort:
+    """畸形 chunk 不能让整条流「半截断掉」。
+
+    转换器 ``feed_chunk`` 对畸形 delta 会抛（实测 ``delta`` 是 str 时
+    ``AttributeError``）。不兜的话客户端收到的是「内容块悬空、没有
+    message_stop」的残流——比直接报错更难排查。修法是异常时先
+    ``close_open_blocks()`` 再补一个 error 事件。
+    """
+
+    def _sse(self, chunks):
+        import json as _json
+
+        body = b""
+        for c in chunks:
+            body += b"data:" + _json.dumps(c).encode() + b"\n\n"
+        return body + b"data: [DONE]\n\n"
+
+    def _run(self, chunks):
+        import asyncio
+
+        import httpx
+
+        from buddy_proxy.mimo.provider import _to_anthropic_stream
+
+        async def _go():
+            resp = httpx.Response(
+                200,
+                content=self._sse(chunks),
+                headers={"content-type": "text/event-stream"},
+                request=httpx.Request("POST", "https://x/"),
+            )
+            out = []
+            async for piece in _to_anthropic_stream(resp, "mimo-auto"):
+                out.append(piece)
+            return "".join(out)
+
+        return asyncio.run(_go())
+
+    def test_malformed_delta_yields_error_not_broken_stream(self):
+        text = self._run([
+            {"choices": [{"index": 0, "delta": {"content": "开头"}, "finish_reason": None}]},
+            # delta 是 str —— feed_chunk 会抛 AttributeError
+            {"choices": [{"index": 0, "delta": "NOT_A_DICT", "finish_reason": None}]},
+        ])
+        assert "event: error" in text, "畸形数据要给客户端一个 error 事件"
+        assert "AttributeError" in text, "错误信息要带异常类型，便于排查"
+        # 已开出的文本块必须收尾，不能悬空
+        assert "content_block_stop" in text, "已开的内容块要 close 掉"
+
+    def test_normal_stream_unaffected_by_guard(self):
+        text = self._run([
+            {"choices": [{"index": 0, "delta": {"content": "在线"}, "finish_reason": "stop"}]},
+        ])
+        assert "message_start" in text and "message_stop" in text
+        assert "event: error" not in text, "正常流不该被兜底逻辑影响"

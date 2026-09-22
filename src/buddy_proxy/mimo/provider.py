@@ -96,6 +96,11 @@ async def _to_anthropic_stream(
 
     不转的话：Claude Code 收 200 却拿不到任何 Anthropic 事件，报
     「Streaming response ended before any complete data was received」。
+
+    转换途中任何异常都要**先收尾再抛**：``feed_chunk`` 对畸形 chunk 会抛
+    （实测 ``{"choices":[{"delta":"NOT_A_DICT"}]}`` → AttributeError），
+    不兜的话客户端拿到的是「内容块悬空、没有 message_stop」的残流，
+    比直接报错更难排查。
     """
     from ..protocols.anthropic_adapter import AnthropicStreamConverter
 
@@ -104,22 +109,39 @@ async def _to_anthropic_stream(
     def _emit(event_name: str, payload: dict[str, Any]) -> str:
         return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    async for chunk in _iter_openai_chunks(response):
-        if chunk.get("error"):
-            err = chunk["error"]
-            msg = str(err.get("message", err)) if isinstance(err, dict) else str(err)
-            # 已开出内容块要先收尾，否则严格客户端会因块悬空而卡死
-            for name, payload in converter.close_open_blocks():
+    def _close_open() -> list[str]:
+        """把已开出的内容块收尾（best-effort：收尾本身再炸也不能盖掉原错误）。"""
+        try:
+            return [_emit(n, p) for n, p in converter.close_open_blocks()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _abort(msg: str) -> list[str]:
+        """收尾 + 补一个 error 事件，让客户端拿到结构完整的结束。"""
+        out = _close_open()
+        out.append(_emit("error", {
+            "type": "error",
+            "error": {"type": "api_error", "message": msg},
+        }))
+        return out
+
+    try:
+        async for chunk in _iter_openai_chunks(response):
+            if chunk.get("error"):
+                err = chunk["error"]
+                msg = str(err.get("message", err)) if isinstance(err, dict) else str(err)
+                for event in _abort(msg):
+                    yield event
+                return
+            for name, payload in converter.feed_chunk(chunk):
                 yield _emit(name, payload)
-            yield _emit("error", {
-                "type": "error",
-                "error": {"type": "api_error", "message": msg},
-            })
-            return
-        for name, payload in converter.feed_chunk(chunk):
+        for name, payload in converter.finish():
             yield _emit(name, payload)
-    for name, payload in converter.finish():
-        yield _emit(name, payload)
+    except Exception as exc:  # noqa: BLE001 — 上游畸形数据不该让客户端只收到半截流
+        log.warning("mimo anthropic stream aborted: %s: %s", type(exc).__name__, exc)
+        for event in _abort(f"{type(exc).__name__}: {exc}"):
+            yield event
+        return
     yield "data: [DONE]\n\n"
 
 

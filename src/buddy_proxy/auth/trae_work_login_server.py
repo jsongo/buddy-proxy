@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from buddy_proxy.auth.trae_work_login import extract_refresh_token  # noqa: E402
+from buddy_proxy.auth.trae_work_login import _write_secret, extract_refresh_token  # noqa: E402
 
 CLIENT_ID = "en1oxy7wnw8j9n"
 APP_VERSION = "0.1.43"
@@ -57,6 +57,8 @@ def _write_result(ok: bool, message: str, *, nonce: str = "", **extra) -> None:
 
     ``nonce`` 标明这是哪一次尝试的结果：CLI 只认跟自己对得上的，免得上一轮
     迟到的结果误杀新一轮登录。
+
+    走 ``_write_secret``（0600）：payload 含 nonce，不该被同机其他进程读到。
     """
     payload = {
         "ok": ok,
@@ -66,7 +68,7 @@ def _write_result(ok: bool, message: str, *, nonce: str = "", **extra) -> None:
         **extra,
     }
     try:
-        RESULT_PATH.write_text(json.dumps(payload, ensure_ascii=False))
+        _write_secret(RESULT_PATH, payload)
     except Exception as e:  # noqa: BLE001 — 结果文件写失败不该盖掉真实错误
         print(f"[!] 写登录结果文件失败: {e}", file=sys.stderr)
 
@@ -265,7 +267,14 @@ class Handler(BaseHTTPRequestHandler):
             _write_result(False, reason, nonce=nonce)
 
     def do_GET(self):
-        """捕获 /authorize 回调。"""
+        """捕获 /authorize 回调。
+
+        关于 STATE 的生命周期：**只有成功路径删 STATE**（一次性消费）。
+        失败路径（nonce 不匹配 / 缺 refreshToken / 换票报错 / 状态过期）一律保留，
+        因为失败常常是上游抖动（或用户复制错了回调链接），此时保留 nonce 让用户
+        能直接在浏览器重试或重新粘贴，不必回 CLI 重跑一轮；反正它有 15 分钟
+        ``STATE_TTL`` 兜底。这不是遗漏——改动这里前先想清楚重试路径。
+        """
         if not self.path.startswith("/authorize"):
             self.send_response(404)
             self._cors()

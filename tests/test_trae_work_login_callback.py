@@ -275,3 +275,45 @@ class TestExtractRefreshToken:
         from buddy_proxy.auth.trae_work_login import extract_refresh_token
 
         assert extract_refresh_token("/authorize?state=abc") == ""
+
+
+class TestSecretFilePermissions:
+    """STATE / RESULT 都含 nonce，落盘必须 0600。
+
+    以前用 ``write_text`` 落成 0644，而路径在 /tmp（0777+sticky）——
+    同机任何进程都能读到 nonce，防伪造就形同虚设。
+    """
+
+    def test_state_file_is_0600(self, tmp_path, monkeypatch):
+        import stat
+
+        from buddy_proxy.auth import trae_work_login as mod
+
+        target = tmp_path / "state.json"
+        monkeypatch.setattr(mod, "STATE_PATH", target)
+        monkeypatch.setattr(mod, "RESULT_PATH", tmp_path / "result.json")
+        mod.build_login_url()
+
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert mode == 0o600, f"STATE 含 nonce，权限要 0600，实际 {oct(mode)}"
+
+    def test_result_file_is_0600(self, tmp_path, monkeypatch):
+        import stat
+
+        from buddy_proxy.auth import trae_work_login_server as srv
+
+        target = tmp_path / "result.json"
+        monkeypatch.setattr(srv, "RESULT_PATH", target)
+        srv._write_result(True, "登录成功", nonce="abc")
+
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert mode == 0o600, f"RESULT 含 nonce，权限要 0600，实际 {oct(mode)}"
+
+    def test_secret_write_is_valid_json(self, tmp_path):
+        import json
+
+        from buddy_proxy.auth.trae_work_login import _write_secret
+
+        target = tmp_path / "s.json"
+        _write_secret(target, {"nonce": "abc", "中文": "值"})
+        assert json.loads(target.read_text()) == {"nonce": "abc", "中文": "值"}
