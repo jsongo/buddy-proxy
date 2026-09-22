@@ -387,6 +387,13 @@ class TestMimoProvider:
             cred, "mimocode_auth_path", lambda: state_dir / "missing-auth.json"
         )
         account = sso.AccountCookies("pt", "1")
+        # 两个模块**都要**打，因为两条路径的取值方式不同：
+        #   - provider.ensure_auth() 里是函数内 `from .sso import load_account_cookies`
+        #     → 打 sso 模块才生效
+        #   - credentials.resolve_upstream() 用的是模块级 `from .sso import ...`
+        #     → 打 cred 模块才生效
+        # 只打一个会回落到真实机器状态：CI 上没登录 MiMo 桌面就 401（已踩）。
+        monkeypatch.setattr(sso, "load_account_cookies", lambda: account)
         monkeypatch.setattr(cred, "load_account_cookies", lambda: account)
 
         calls: list[dict] = []
@@ -436,9 +443,10 @@ class TestMimoProvider:
         monkeypatch.setattr(
             cred, "mimocode_auth_path", lambda: state_dir / "missing-auth.json"
         )
-        monkeypatch.setattr(
-            cred, "load_account_cookies", lambda: sso.AccountCookies("pt", "1")
-        )
+        # 同上：sso 与 cred 两个模块都要打（两条 import 路径不同）
+        account = sso.AccountCookies("pt", "1")
+        monkeypatch.setattr(sso, "load_account_cookies", lambda: account)
+        monkeypatch.setattr(cred, "load_account_cookies", lambda: account)
         calls: list[dict] = []
 
         async def fake_ensure(force: bool = False, **kwargs):
