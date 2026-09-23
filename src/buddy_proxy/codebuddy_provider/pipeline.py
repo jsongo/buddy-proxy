@@ -102,6 +102,29 @@ def _build_openai_flush_chunk(
     }
 
 
+def _build_dsml_tool_call_deltas(
+    chunk_tool_calls: list[dict], start_index: int
+) -> tuple[list[dict], int]:
+    """DSML 兜底注入的流式 tool_calls 分片，index 跨 chunk 自增。
+
+    每 chunk 从 0 重排会让 AnthropicStreamConverter 把两次调用
+    合并进同一个 tool_use 槽位（它按 index 开槽），arguments 互相污染。
+    """
+    deltas = [
+        {
+            "index": start_index + i,
+            "id": call.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+            "type": "function",
+            "function": {
+                "name": call["function"]["name"],
+                "arguments": call["function"]["arguments"],
+            },
+        }
+        for i, call in enumerate(chunk_tool_calls)
+    ]
+    return deltas, start_index + len(chunk_tool_calls)
+
+
 async def stream_upstream(
     url: str,
     headers: dict[str, str],
@@ -148,6 +171,8 @@ async def stream_upstream(
     done_seen = False
     last_progress_log = stream_start_time
     detected_tool_calls = []
+    # DSML 注入的 tool_calls index（跨 chunk 自增，见 _build_dsml_tool_call_deltas）
+    dsml_tool_index = 0
     # 【修复 C3】记录最后一个上游 chunk 的元数据，供流结束 flush 时复用，
     # 保证 final_chunk 补全 OpenAI ChatCompletionChunk 必需的顶层字段
     last_chunk_id: str = ""
@@ -301,6 +326,13 @@ async def stream_upstream(
                                 if "finish_reason" in choice and (choice["finish_reason"] == "" or choice["finish_reason"] is None):
                                     del choice["finish_reason"]
 
+                                # DSML 兜底：中途注入的 tool_calls 会被上游最终
+                                # finish_reason=stop 盖掉（客户端以最后一个为准），
+                                # 检测到文本工具调用时改写为 tool_calls
+                                if (choice.get("finish_reason") == "stop"
+                                        and dsml_buffer.should_emit_tool_calls()):
+                                    choice["finish_reason"] = "tool_calls"
+
                         # 【修复 Bug 2】原生流式 tool_calls name 缓存
                         # 首 chunk 带完整 name，后续 chunk name 为空但带 arguments 分片，
                         # 这里按 index 缓存 name 并回填（native_tool_calls 已在协议分支前提取）
@@ -345,22 +377,15 @@ async def stream_upstream(
                         # 【修复 Bug B2】仅当 chunk 不含原生 tool_calls 时，才使用 DSML 解析的工具调用
                         # DSML 用于兜底：处理上游以文本标记返回工具调用的场景
                         # 如果 chunk 已有原生 delta.tool_calls，原样透传，绝不覆盖
-                        if detected_tool_calls and dsml_buffer.should_emit_tool_calls() and not native_tool_calls:
+                        if chunk_tool_calls and dsml_buffer.should_emit_tool_calls() and not native_tool_calls:
                             if "choices" in chunk and len(chunk["choices"]) > 0:
                                 chunk["choices"][0]["finish_reason"] = "tool_calls"
-                                # 将检测到的工具调用转换为 OpenAI 格式
-                                chunk["choices"][0]["delta"]["tool_calls"] = [
-                                    {
-                                        "index": idx,
-                                        "id": f"call_{uuid.uuid4().hex[:24]}",
-                                        "type": "function",
-                                        "function": {
-                                            "name": tc["name"],
-                                            "arguments": json.dumps(tc["input"], ensure_ascii=False)
-                                        }
-                                    }
-                                    for idx, tc in enumerate(detected_tool_calls)
-                                ]
+                                # 解析器产出 {id, type, function:{name, arguments}} 格式，
+                                # 直接映射为 OpenAI 流式 tool_calls 分片（index 跨 chunk 自增）
+                                deltas, dsml_tool_index = _build_dsml_tool_call_deltas(
+                                    chunk_tool_calls, dsml_tool_index
+                                )
+                                chunk["choices"][0]["delta"]["tool_calls"] = deltas
 
                         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
 
@@ -392,18 +417,11 @@ async def stream_upstream(
                             if chunk_tool_calls and dsml_buffer.should_emit_tool_calls() and not native_tool_calls:
                                 if "choices" in chunk and len(chunk["choices"]) > 0:
                                     chunk["choices"][0]["finish_reason"] = "tool_calls"
-                                    chunk["choices"][0]["delta"]["tool_calls"] = [
-                                        {
-                                            "index": idx,
-                                            "id": f"call_{uuid.uuid4().hex[:24]}",
-                                            "type": "function",
-                                            "function": {
-                                                "name": tc["name"],
-                                                "arguments": json.dumps(tc["input"], ensure_ascii=False)
-                                            }
-                                        }
-                                        for idx, tc in enumerate(detected_tool_calls)
-                                    ]
+                                    # 解析器产出 function 格式（非 {name, input}），按实际结构取值
+                                    deltas, dsml_tool_index = _build_dsml_tool_call_deltas(
+                                        chunk_tool_calls, dsml_tool_index
+                                    )
+                                    chunk["choices"][0]["delta"]["tool_calls"] = deltas
 
                         # 使用 ResponsesStreamConverter 转换事件（此时 chunk 已经被清理）
                         events = responses_state.feed_chunk(chunk)
@@ -438,18 +456,10 @@ async def stream_upstream(
                             if chunk_tool_calls and dsml_buffer.should_emit_tool_calls() and not native_tool_calls:
                                 if "choices" in chunk and len(chunk["choices"]) > 0:
                                     chunk["choices"][0]["finish_reason"] = "tool_calls"
-                                    chunk["choices"][0]["delta"]["tool_calls"] = [
-                                        {
-                                            "index": idx,
-                                            "id": call.get("id", f"call_{uuid.uuid4().hex[:24]}"),
-                                            "type": "function",
-                                            "function": {
-                                                "name": call["function"]["name"],
-                                                "arguments": call["function"]["arguments"]
-                                            }
-                                        }
-                                        for idx, call in enumerate(chunk_tool_calls)
-                                    ]
+                                    deltas, dsml_tool_index = _build_dsml_tool_call_deltas(
+                                        chunk_tool_calls, dsml_tool_index
+                                    )
+                                    chunk["choices"][0]["delta"]["tool_calls"] = deltas
 
                         # 转换为 Anthropic 事件（此时 chunk 已经被清理）
                         events = anthropic_state.feed_chunk(chunk)

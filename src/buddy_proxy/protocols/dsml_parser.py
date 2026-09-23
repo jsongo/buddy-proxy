@@ -69,6 +69,10 @@ TOOL_MARKUP_NAMES = [
     ("tool_calls", "tool_calls", False),
     ("tool-calls", "tool_calls", True),
     ("toolcalls", "tool_calls", True),
+    # deepseek 等模型会把包装标签写成 <｜｜DSML｜｜ calls>（缺 tool_ 前缀）。
+    # dsml_only=False（裸 <calls> 也扣留）是刻意取舍：漏检 = 标记原文泄漏到
+    # 客户端（更糟），多扣留几行 prose 到 flush 只是延迟，内容不丢
+    ("calls", "tool_calls", False),
     ("invoke", "invoke", False),
     ("parameter", "parameter", False),
 ]
@@ -351,7 +355,11 @@ def match_tool_markup_name(text: str, start: int) -> Tuple[str, int, bool]:
     if has_dsml_prefix_at(text, idx):
         idx, _ = consume_dsml_prefix(text, idx)
         dsml_like = True
-    
+        # 模型常在前缀与标签名之间插空格（<｜｜DSML｜｜ calls>）。
+        # 不跳过会导致标签名解析为空 → 整段标记当普通文本泄漏给客户端。
+        while idx < len(text) and text[idx] in (" ", "\t", "\r", "\n", "　", "\xa0"):
+            idx += 1
+
     name_start = idx
     name_end = idx
     
@@ -928,12 +936,16 @@ class ToolCallStreamBuffer:
             if body.startswith(variant):
                 body = body[len(variant):]
                 break
+            if variant.startswith(body):
+                # 前缀本身跨 chunk 未收完（如 "<｜｜DS"）：先扣留，
+                # 等前缀收齐再判定，否则整段标记会当普通文本提前吐出
+                return True
         body = body.lstrip().lower()
         if not body:
             # 形如 "<" 或 "<｜｜DSML｜｜>" 且标签名尚未到达：仍可能是工具调用开头
             return True
         for opener in ("tool", "invoke", "tool_calls", "tool-calls",
-                       "toolcalls", "tool_call", "tool-call"):
+                       "toolcalls", "tool_call", "tool-call", "calls"):
             if opener.startswith(body) or body.startswith(opener):
                 return True
         return False
