@@ -24,7 +24,27 @@ CHECK_INTERVAL_S = 600
 RETRY_THROTTLE_S = 1800
 # 状态/额度缓存 TTL：管理页 30s 自动刷新，不能每次都打上游
 SNAPSHOT_TTL_S = 300
+# 失败结果缓存 TTL：短得多，让网络抖动几秒恢复后下一轮就能自愈
+FAILURE_TTL_S = 30
 DEFAULT_CHECKIN_TIME = "09:30"
+
+
+def _is_failure(data: Any) -> bool:
+    """判断 provider 返回/兜错的结果是否算「查询失败」，决定用不用短 TTL。
+
+    认三种形态：兜错字典（含 ``error``）、provider 直接在结果上标了失败
+    （``query_failed``/``unreachable``）、以及 items 里**混进了**失败说明条
+    （``trae.pat.quota._failure_notice`` 会把说明条插在首位，后面跟着各账号
+    缓存数据——这种「部分失败」同样要短缓存，好让网络恢复后尽快自愈）。
+    """
+    if not isinstance(data, dict):
+        return False
+    if data.get("error") or data.get("query_failed") or data.get("unreachable"):
+        return True
+    items = data.get("items")
+    if isinstance(items, list):
+        return any(isinstance(i, dict) and i.get("query_failed") for i in items)
+    return False
 
 
 def _today() -> str:
@@ -210,11 +230,19 @@ class BenefitsManager:
         }
 
     async def _cached(self, key: str, fn: Callable, *args):
-        """TTL 缓存的 to_thread 调用；上游抛错时返回错误结构而不是 500。"""
+        """TTL 缓存的 to_thread 调用；上游抛错时返回错误结构而不是 500。
+
+        失败结果只短缓存（``FAILURE_TTL_S``）：额度/打卡这类查询失败往往是网络
+        抖动（切 WiFi、VPN 重连），若按正常的 5 分钟缓存，用户会盯着一条不准确
+        的「网关不可达 / 查询失败」警告好几分钟——哪怕几秒后网就恢复了。成功
+        结果照常缓存 ``SNAPSHOT_TTL_S``。
+        """
         now = time.time()
         cached = self._cache.get(key)
-        if cached and now - cached[0] < SNAPSHOT_TTL_S:
-            return cached[1]
+        if cached:
+            ttl = FAILURE_TTL_S if _is_failure(cached[1]) else SNAPSHOT_TTL_S
+            if now - cached[0] < ttl:
+                return cached[1]
         try:
             data = await asyncio.to_thread(fn, *args)
         except Exception as exc:
