@@ -20,9 +20,10 @@
 （显式再导出 + ``__getattr__`` 兜底）。测试打在本包命名空间上的
 monkeypatch 接缝（``_post_chat`` / ``_stream_profile_events`` /
 ``_get_profile_credentials`` / ``_exchange`` / ``_exchange_env_ready`` /
-``_reload_pat_models`` / ``_refresh_locks`` / ``_quota_code_hits`` /
-``_channel_exhausted`` / ``PAT_MODELS`` / ``PAT_PLUS_MODELS`` /
-``PAT_PUBLIC_MODELS`` / ``PAT_MODEL_FUNCTIONS``，见 test_trae_pat_failover）
+``_gateway_reachable`` / ``_reload_pat_models`` / ``_refresh_locks`` /
+``_quota_code_hits`` / ``_channel_exhausted`` / ``PAT_MODELS`` /
+``PAT_PLUS_MODELS`` / ``PAT_PUBLIC_MODELS`` / ``PAT_MODEL_FUNCTIONS``，
+见 test_trae_pat_failover）
 依然生效：各子模块函数体内对这些名字经 ``_ns``（本包命名空间）调用期解析。
 """
 
@@ -60,7 +61,10 @@ from .cooldown import (  # noqa: F401
     _standard_pool_items,
 )
 from .status import fetch_pat_model_status  # noqa: F401
-from .quota import fetch_pat_ent_usage  # noqa: F401
+from .quota import (  # noqa: F401
+    _gateway_reachable,
+    fetch_pat_ent_usage,
+)
 from .chat import (  # noqa: F401
     _post_chat,
     _stream_profile_events,
