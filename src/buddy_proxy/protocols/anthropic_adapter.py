@@ -614,6 +614,12 @@ class AnthropicStreamConverter:
             "length": "max_tokens",
         }
         stop_reason = stop_reason_map.get(self.finish_reason or "stop", "end_turn")
+        # 只要发出了 tool_use 块，stop_reason 必须是 tool_use：
+        # 上游最终 chunk 的 finish_reason=stop 会覆盖中途注入的 tool_calls
+        # （非流式路径 chat_completion_to_anthropic_message 也是按 tool_calls
+        # 有无来定的，两条路径口径一致）
+        if self.tool_blocks:
+            stop_reason = "tool_use"
         
         # 映射usage
         usage_delta = {"input_tokens": 0, "output_tokens": 0}

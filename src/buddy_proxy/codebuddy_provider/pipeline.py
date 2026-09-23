@@ -301,6 +301,13 @@ async def stream_upstream(
                                 if "finish_reason" in choice and (choice["finish_reason"] == "" or choice["finish_reason"] is None):
                                     del choice["finish_reason"]
 
+                                # DSML 兜底：中途注入的 tool_calls 会被上游最终
+                                # finish_reason=stop 盖掉（客户端以最后一个为准），
+                                # 检测到文本工具调用时改写为 tool_calls
+                                if (choice.get("finish_reason") == "stop"
+                                        and dsml_buffer.should_emit_tool_calls()):
+                                    choice["finish_reason"] = "tool_calls"
+
                         # 【修复 Bug 2】原生流式 tool_calls name 缓存
                         # 首 chunk 带完整 name，后续 chunk name 为空但带 arguments 分片，
                         # 这里按 index 缓存 name 并回填（native_tool_calls 已在协议分支前提取）
@@ -345,21 +352,22 @@ async def stream_upstream(
                         # 【修复 Bug B2】仅当 chunk 不含原生 tool_calls 时，才使用 DSML 解析的工具调用
                         # DSML 用于兜底：处理上游以文本标记返回工具调用的场景
                         # 如果 chunk 已有原生 delta.tool_calls，原样透传，绝不覆盖
-                        if detected_tool_calls and dsml_buffer.should_emit_tool_calls() and not native_tool_calls:
+                        if chunk_tool_calls and dsml_buffer.should_emit_tool_calls() and not native_tool_calls:
                             if "choices" in chunk and len(chunk["choices"]) > 0:
                                 chunk["choices"][0]["finish_reason"] = "tool_calls"
-                                # 将检测到的工具调用转换为 OpenAI 格式
+                                # 解析器产出 {id, type, function:{name, arguments}} 格式，
+                                # 直接映射为 OpenAI 流式 tool_calls 分片
                                 chunk["choices"][0]["delta"]["tool_calls"] = [
                                     {
                                         "index": idx,
-                                        "id": f"call_{uuid.uuid4().hex[:24]}",
+                                        "id": call.get("id") or f"call_{uuid.uuid4().hex[:24]}",
                                         "type": "function",
                                         "function": {
-                                            "name": tc["name"],
-                                            "arguments": json.dumps(tc["input"], ensure_ascii=False)
+                                            "name": call["function"]["name"],
+                                            "arguments": call["function"]["arguments"]
                                         }
                                     }
-                                    for idx, tc in enumerate(detected_tool_calls)
+                                    for idx, call in enumerate(chunk_tool_calls)
                                 ]
 
                         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
@@ -392,17 +400,18 @@ async def stream_upstream(
                             if chunk_tool_calls and dsml_buffer.should_emit_tool_calls() and not native_tool_calls:
                                 if "choices" in chunk and len(chunk["choices"]) > 0:
                                     chunk["choices"][0]["finish_reason"] = "tool_calls"
+                                    # 解析器产出 function 格式（非 {name, input}），按实际结构取值
                                     chunk["choices"][0]["delta"]["tool_calls"] = [
                                         {
                                             "index": idx,
-                                            "id": f"call_{uuid.uuid4().hex[:24]}",
+                                            "id": call.get("id") or f"call_{uuid.uuid4().hex[:24]}",
                                             "type": "function",
                                             "function": {
-                                                "name": tc["name"],
-                                                "arguments": json.dumps(tc["input"], ensure_ascii=False)
+                                                "name": call["function"]["name"],
+                                                "arguments": call["function"]["arguments"]
                                             }
                                         }
-                                        for idx, tc in enumerate(detected_tool_calls)
+                                        for idx, call in enumerate(chunk_tool_calls)
                                     ]
 
                         # 使用 ResponsesStreamConverter 转换事件（此时 chunk 已经被清理）
