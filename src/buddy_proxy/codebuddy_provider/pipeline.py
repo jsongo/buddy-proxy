@@ -356,6 +356,10 @@ async def stream_upstream(
                             ((chunk.get("choices") or [{}])[0].get("delta") or {}).get("content") or ""
                         )
 
+                        # 每轮先置空：首 chunk 可能只有 role 没有 content，
+                        # 下面注入块在 if chunk_content: 外引用它，不初始化会 UnboundLocalError
+                        chunk_tool_calls = []
+
                         if chunk_content:
                             # 使用 DSML 缓冲区处理（清理标记，检测工具调用）
                             cleaned_content, chunk_tool_calls = dsml_buffer.add_chunk(chunk_content)
