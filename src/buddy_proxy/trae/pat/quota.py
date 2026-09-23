@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -39,6 +40,10 @@ log = logging.getLogger(__name__)
 _QUOTA_TIMEOUT_S = 6.0
 # 并发账号数上限：够快，又不至于一次打太多连接。
 _QUOTA_MAX_WORKERS = 6
+# 整轮查询上限：超过就先拿缓存渲染（未回的请求后台跑完写缓存，下轮生效）。
+# 单账号超时 6s × ceil(账号数/workers) 会随账号数线性涨（10 账号 12s、20 账号
+# 24s），这里给整轮封顶，让页面延迟不随账号数失控。
+_QUOTA_ROUND_DEADLINE_S = 8.0
 # 网关可达性探测总预算（DNS + 全部 TCP 尝试，不含 TLS）。
 # 注意是**总预算**而非每地址超时：解析出多地址时逐个尝试，若各自跑满超时，
 # 探测本身就会变成新的慢点（实测 2 地址 × 1.5s = 3s）。这里按整体 deadline 收口。
@@ -47,6 +52,19 @@ _QUOTA_PROBE_BUDGET_S = 1.2
 _GATEWAY_PROBE_TTL_S = 30.0
 # 探测结论缓存 {"key": gateway_url, "checked_at": float, "reachable": bool}
 _gateway_probe_cache: dict[str, Any] = {}
+# 常驻查询线程池：按并发上限惰性建一次，避免慢轮残留线程被反复新建
+_quota_pool_obj: concurrent.futures.ThreadPoolExecutor | None = None
+_quota_pool_lock = threading.Lock()
+
+
+def _quota_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """取常驻查询线程池（惰性创建，只建一次）。"""
+    global _quota_pool_obj
+    with _quota_pool_lock:
+        if _quota_pool_obj is None:
+            _quota_pool_obj = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_QUOTA_MAX_WORKERS, thread_name_prefix="pat-quota")
+        return _quota_pool_obj
 
 
 def _gateway_reachable(plus: str, budget: float = _QUOTA_PROBE_BUDGET_S) -> bool:
@@ -240,12 +258,16 @@ def fetch_pat_ent_usage() -> list[dict[str, Any]]:
     if len(profiles) == 1:
         results = [run(profiles[0])]
     else:
-        # 并发账号数封顶，避免一次打开过多连接；结果顺序由 profiles 决定
-        workers = min(_QUOTA_MAX_WORKERS, len(profiles))
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="pat-quota"
-        ) as pool:
-            results = list(pool.map(run, profiles))
+        # 复用一个常驻线程池（不是每轮新建）：每轮新建 + shutdown(wait=False)
+        # 会让「撞上整轮上限」的慢轮把线程留在后台继续跑，下一轮再新建一批，
+        # 线程数随轮次线性累积（实测 5 轮 7→27）。常驻池的上限天然封顶，
+        # 慢轮残留的线程占用名额，后续轮次自然排队而不会无限膨胀。
+        #
+        # 注意不能用 with / shutdown(wait=True)：那会 join 所有线程，把整轮
+        # 上限架空（实测慢请求下仍要等满 60s）。
+        pool = _quota_pool()
+        futures = [pool.submit(run, profile) for profile in profiles]
+        results = _collect_with_deadline(futures, profiles)
 
     all_items: list[dict[str, Any]] = []
     failures = 0
@@ -264,3 +286,35 @@ def fetch_pat_ent_usage() -> list[dict[str, Any]]:
         # query_failed 标记，前端用警告色区分。
         all_items.insert(0, _failure_notice(failures, len(profiles), gateway_ok))
     return all_items
+
+
+def _collect_with_deadline(
+    futures: list[concurrent.futures.Future], profiles: list[PatProfile]
+) -> list[tuple[list[dict[str, Any]], bool]]:
+    """收并发结果，整体不超过 ``_QUOTA_ROUND_DEADLINE_S``。
+
+    没有整轮上限时，最坏耗时是 ``ceil(账号数 / workers) × 单账号超时``：本机
+    10 账号 = 12s，20 账号就 24s——「网关 TCP 能连上、但接口层不响应」时（预检
+    挡不住这种）页面就得干等这么久。这里给整轮兜一个上限，超时未回的账号直接
+    用它的缓存顶上，先让页面出来；那些请求仍在后台跑完并写缓存，下一轮就能拿到。
+
+    结果顺序与 ``profiles`` 对齐（未回的用缓存），保证 UI 展示顺序稳定。
+    """
+    deadline = time.monotonic() + _QUOTA_ROUND_DEADLINE_S
+    results: list[tuple[list[dict[str, Any]], bool]] = []
+    for profile, future in zip(profiles, futures):
+        remaining = deadline - time.monotonic()
+        try:
+            results.append(future.result(timeout=max(0.0, remaining)))
+        except concurrent.futures.TimeoutError:
+            cached = _cached_quota(profile, "advanced")
+            log.warning("PAT 额度查询超过整轮上限，账号序号=%d 本轮沿用缓存", profile.index)
+            results.append((
+                [dict(item, label=f"{item['label']}·缓存") for item in cached] if cached else [],
+                False,
+            ))
+        except Exception as exc:  # 单账号内部已兜错，这里只兜线程池自身异常
+            log.warning("PAT 额度查询线程异常，账号序号=%d（%s）",
+                        profile.index, type(exc).__name__)
+            results.append(([], False))
+    return results

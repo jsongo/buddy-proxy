@@ -11,6 +11,7 @@ import io
 import json
 import os
 import stat
+import threading
 import time
 import urllib.error
 from typing import Any
@@ -1700,3 +1701,135 @@ def test_gateway_probe_respects_total_budget(monkeypatch):
     elapsed = time.monotonic() - t0
     # 总预算 0.3s：三个地址即便各跑满也只能用掉约 0.3s，不会到 0.9s
     assert elapsed < 0.6, f"探测未按总预算收口：{elapsed:.2f}s"
+
+
+# ---------------------------------------------------------------------------
+# 失败结果短缓存：网络抖动（切 WiFi / VPN 重连）几秒恢复后，下一轮就该自愈，
+# 不能把一条不准确的「网关不可达」警告挂满 5 分钟
+# ---------------------------------------------------------------------------
+
+def test_failure_result_uses_short_ttl(monkeypatch):
+    """失败结果只用 FAILURE_TTL_S；成功结果仍用 SNAPSHOT_TTL_S。"""
+    import asyncio
+
+    from buddy_proxy import benefits as benefits_mod
+    from buddy_proxy.benefits import (
+        SNAPSHOT_TTL_S, FAILURE_TTL_S, BenefitsManager, _is_failure,
+    )
+
+    assert FAILURE_TTL_S < SNAPSHOT_TTL_S
+
+    class _State:
+        providers: dict = {}
+
+    mgr = BenefitsManager.__new__(BenefitsManager)
+    mgr.history = None
+    mgr._state = _State()
+    mgr._task = None
+    mgr._last_attempt = {}
+    mgr._startup_seen = set()
+    mgr._cache = {}
+
+    calls: list[int] = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("offline")
+
+    # 第一次失败 → 进缓存
+    assert asyncio.run(mgr._cached("k", boom))["error"].startswith("offline")
+    assert len(calls) == 1
+    # FAILURE_TTL_S 内命中缓存，不再调用
+    assert asyncio.run(mgr._cached("k", boom))["error"]
+    assert len(calls) == 1
+    # 把缓存时间往前拨到超过 FAILURE_TTL_S、但没到 SNAPSHOT_TTL_S → 必须重试
+    ts, data = mgr._cache["k"]
+    mgr._cache["k"] = (ts - (FAILURE_TTL_S + 1), data)
+    assert asyncio.run(mgr._cached("k", boom))["error"]
+    assert len(calls) == 2, "失败结果没走短 TTL，网络恢复后要等 5 分钟才自愈"
+
+    # 成功结果：过了 FAILURE_TTL_S 仍应命中缓存（用满 SNAPSHOT_TTL_S）
+    ok_calls: list[int] = []
+
+    def good():
+        ok_calls.append(1)
+        return {"items": [{"label": "PAT #1", "used": 1, "total": 100}]}
+
+    assert asyncio.run(mgr._cached("ok", good))["items"]
+    assert len(ok_calls) == 1
+    ts, data = mgr._cache["ok"]
+    mgr._cache["ok"] = (ts - (FAILURE_TTL_S + 1), data)
+    assert asyncio.run(mgr._cached("ok", good))["items"]
+    assert len(ok_calls) == 1, "成功结果不该被短 TTL 影响"
+    assert _is_failure(data) is False
+
+
+def test_partial_quota_failure_marks_as_failure():
+    """网关不可达时 advanced 返回「说明条 + 各账号缓存」——这种部分失败也要
+    被认成失败，否则会按成功缓 5 分钟。"""
+    from buddy_proxy.benefits import _is_failure
+
+    real = {"items": [{"query_failed": True, "unreachable": True, "label": "PAT 额度网关不可达"},
+                      {"label": "PAT #1 · 周包（通用额度）·缓存", "used": 1, "total": 300}]}
+    assert _is_failure(real) is True
+    healthy = {"items": [{"label": "PAT #1 · 周包（通用额度）", "used": 1, "total": 300}]}
+    assert _is_failure(healthy) is False
+
+
+def test_quota_round_deadline_caps_latency(monkeypatch):
+    """整轮上限：网关可达但请求全挂时，不能让页面等满 ceil(N/w)×timeout。"""
+    from buddy_proxy.trae.pat import quota as pat_quota
+
+    monkeypatch.setenv(
+        "TRAE_PAT_BEARER_PROFILES",
+        _profiles(*[{"id": f"a{i}", "bearer": f"b{i}", "priority": i} for i in range(10)]),
+    )
+    pat_quota._gateway_probe_cache.clear()
+    monkeypatch.setattr(pat, "_gateway_reachable", lambda *a, **k: True)
+    _install_credentials(monkeypatch)
+    monkeypatch.setattr(pat_quota, "_QUOTA_TIMEOUT_S", 30.0)
+    monkeypatch.setattr(pat_quota, "_QUOTA_ROUND_DEADLINE_S", 0.4)
+
+    def hang(*a, **k):
+        time.sleep(10)
+        raise urllib.error.URLError("hang")
+
+    monkeypatch.setattr(pat_quota.urllib.request, "urlopen", hang)
+
+    t0 = time.monotonic()
+    items = pat.fetch_pat_ent_usage()
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 2.0, f"整轮上限没生效：{elapsed:.2f}s（应受 deadline 约束）"
+    assert items[0]["query_failed"] is True
+
+
+def test_quota_pool_is_reused_not_recreated(monkeypatch):
+    """常驻线程池：连续慢轮不得累积线程（每轮新建 + wait=False 会线性涨）。"""
+    from buddy_proxy.trae.pat import quota as pat_quota
+
+    monkeypatch.setenv(
+        "TRAE_PAT_BEARER_PROFILES",
+        _profiles(*[{"id": f"a{i}", "bearer": f"b{i}", "priority": i} for i in range(10)]),
+    )
+    pat_quota._gateway_probe_cache.clear()
+    monkeypatch.setattr(pat, "_gateway_reachable", lambda *a, **k: True)
+    _install_credentials(monkeypatch)
+    monkeypatch.setattr(pat_quota, "_QUOTA_TIMEOUT_S", 30.0)
+    monkeypatch.setattr(pat_quota, "_QUOTA_ROUND_DEADLINE_S", 0.3)
+    monkeypatch.setattr(pat_quota, "_quota_pool_obj", None)
+
+    def hang(*a, **k):
+        time.sleep(5)
+        raise urllib.error.URLError("hang")
+
+    monkeypatch.setattr(pat_quota.urllib.request, "urlopen", hang)
+
+    before = threading.active_count()
+    for _ in range(3):
+        pat.fetch_pat_ent_usage()
+    after = threading.active_count()
+
+    # 每轮新建会留 6 个线程/轮 → 3 轮涨 18 个；常驻池只多一次固定开销
+    assert after - before <= 8, f"线程在累积：{before} → {after}"
+    assert pat_quota._quota_pool() is pat_quota._quota_pool()
