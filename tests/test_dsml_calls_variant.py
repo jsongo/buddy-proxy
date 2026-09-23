@@ -110,3 +110,41 @@ def test_plain_tool_calls_still_works():
     calls = parse_tool_calls(s)
     assert len(calls) == 1
     assert calls[0]["function"]["name"] == "shell"
+
+
+def test_anthropic_finish_length_keeps_max_tokens():
+    # finish=length 截断语义优先，不能被 tool_blocks 提升成 tool_use
+    conv = AnthropicStreamConverter('deepseek-v4.1-flash')
+    conv.feed_chunk({'choices': [{
+        'finish_reason': 'tool_calls',
+        'delta': {'tool_calls': [{
+            'index': 0,
+            'id': 'call_abc',
+            'type': 'function',
+            'function': {'name': 'shell', 'arguments': '{"command":"ls"}'},
+        }]},
+    }]})
+    conv.feed_chunk({'choices': [{'finish_reason': 'length', 'delta': {}}]})
+    events = conv.finish()
+    msg_delta = [d for name, d in events if name == 'message_delta']
+    assert msg_delta, events
+    assert msg_delta[-1]['delta']['stop_reason'] == 'max_tokens'
+
+
+def test_dsml_injection_index_increments_across_chunks():
+    # 跨 chunk 注入必须自增 index，否则 Anthropic 转换器按 index 开槽会合并两次调用
+    from buddy_proxy.codebuddy_provider.pipeline import _build_dsml_tool_call_deltas
+
+    def _call(name):
+        return {
+            'id': f'call_{name}',
+            'type': 'function',
+            'function': {'name': name, 'arguments': '{}'},
+        }
+
+    d1, nxt = _build_dsml_tool_call_deltas([_call('a')], 0)
+    d2, nxt2 = _build_dsml_tool_call_deltas([_call('b')], nxt)
+    assert [d['index'] for d in d1] == [0]
+    assert [d['index'] for d in d2] == [1]
+    assert [d['function']['name'] for d in d2] == ['b']
+    assert nxt2 == 2

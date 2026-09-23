@@ -69,7 +69,9 @@ TOOL_MARKUP_NAMES = [
     ("tool_calls", "tool_calls", False),
     ("tool-calls", "tool_calls", True),
     ("toolcalls", "tool_calls", True),
-    # deepseek 等模型会把包装标签写成 <｜｜DSML｜｜ calls>（缺 tool_ 前缀）
+    # deepseek 等模型会把包装标签写成 <｜｜DSML｜｜ calls>（缺 tool_ 前缀）。
+    # dsml_only=False（裸 <calls> 也扣留）是刻意取舍：漏检 = 标记原文泄漏到
+    # 客户端（更糟），多扣留几行 prose 到 flush 只是延迟，内容不丢
     ("calls", "tool_calls", False),
     ("invoke", "invoke", False),
     ("parameter", "parameter", False),
