@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import functools
+import json
+import pathlib
 from typing import Any
 
 from fastapi import HTTPException
@@ -18,6 +21,41 @@ from buddy_proxy.core import settings as settings_mod
 
 from .observability import _instrument
 from .provider import _default_codebuddy
+
+
+@functools.lru_cache(maxsize=1)
+def _codebuddy_static_ids() -> frozenset[str]:
+    """CodeBuddy 静态表（models_config.json）的小写 id 集合（进程内缓存）。
+
+    刻意**不用** ``model_list.load_models_from_local_config()``：那个函数会经
+    ``diagnostic()`` 调 ``get_state()``（代理未初始化时抛 503），且它在路由热路径
+    上每次都要读文件 + 归一化全表。这里只读一次原始 JSON 并缓存。
+
+    兜底：读失败时返回空集——宁可不做这层保护，也不能让路由挂掉。
+    """
+    try:
+        config = pathlib.Path(__file__).resolve().parent.parent / "web" / "models_config.json"
+        data = json.loads(config.read_text("utf-8"))
+        return frozenset(
+            str(m["id"]).lower() for m in data.get("models", []) if m.get("id")
+        )
+    except Exception:  # noqa: BLE001 - 配置读不出来不该阻断路由
+        return frozenset()
+
+
+def _is_codebuddy_model(model: str) -> bool:
+    """该名字是否是 CodeBuddy 静态表里的模型 id（**大小写不敏感**）。
+
+    CodeBuddy 是默认兜底通道、不在 ``providers`` 里，别名轮无法通过「有没有别的
+    通道精确认领」判断归属，故直接查静态表。命中即视为该名字归 CodeBuddy，
+    其他通道不得认领——``auto`` 正是 CodeBuddy 的默认模型，而 Qoder 本地合成的
+    档位模型（TIER_MODELS）也叫 ``auto``，不挡住就会静默改道。
+
+    大小写不敏感是有意为之：上游普遍把 ``Auto``/``auto`` 当同一个模型，静态表里
+    同时存在 ``kimi-k3``/``glm-5.3`` 这些与 Qoder 显示名撞车的名字，严格区分大小写
+    会让 ``Kimi-K3`` 这类变体绕过保护、改道到 Qoder。
+    """
+    return bool(model) and model.lower() in _codebuddy_static_ids()
 
 
 def _resolved_model_id(provider: Any, model: str) -> str:
@@ -148,8 +186,19 @@ async def forward_chat(
     # 不能一轮搞定——多个通道可能"认识"同一个名字（qoder 的显示名 GLM-5.3 与
     # zcode 的模型名 glm-5.3 撞车），若让别名与精确匹配同等参与、按注册序先到
     # 先得，注册靠前的通道就会把别人的模型抢走。别名只能是兜底，不能是抢占。
+    #
+    # 别名轮（``allow_aliases=True``）额外跳过「名字就是 CodeBuddy 静态表 id」的
+    # 情况：CodeBuddy 是兜底通道、不在 ``providers`` 里，别名轮无从靠「别的通道
+    # 能否精确认领」判断归属。``auto`` 正是 CodeBuddy 的默认模型，而 Qoder 本地
+    # 合成的档位模型（TIER_MODELS）也叫 ``auto``，不挡住就会静默改道。
+    #
+    # ⚠️ 只挡别名轮，不挡精确轮：精确轮是各通道按自己发布的 id 认领，trae/zcode
+    # 等通道的模型名可能与静态表重合（两边都真有这个模型），让他们照常先认领，
+    # 与既有路由行为一致。
     if provider is None:
         for allow_aliases in (False, True):
+            if allow_aliases and _is_codebuddy_model(requested_model):
+                break  # 归 CodeBuddy 静态表，别名不得认领
             for p in providers.values():
                 try:
                     if p.accepts_model(requested_model, aliases=allow_aliases):
