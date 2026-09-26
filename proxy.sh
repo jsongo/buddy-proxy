@@ -9,7 +9,7 @@
 #   ./proxy.sh logs                              # 跟踪日志
 #   ./proxy.sh ui                                # 确保在跑并打开管理页 http://127.0.0.1:8787/ui
 #   ./proxy.sh login    [provider] [--no-browser] # 登录上游账号（默认 codebuddy；
-#                                                # provider: codebuddy(=workbuddy)/trae/zcode/doubao/mimo）
+#                                                # provider: codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder）
 #                                                # 登录成功后若网关在运行，需 restart 生效
 #
 # 支持环境变量（start 命令生效）：
@@ -30,9 +30,9 @@ mkdir -p "$LOG_DIR"
 PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 PROXY_PORT="${PROXY_PORT:-8787}"
 # 默认启用 ZCode（glm-* 编码通道，必须最先注册以免被 trae 截走）+ Trae（兜底通道）
-# + 豆包（CDP 直连）+ MiMo（小米桌面登录态）；可用 PROXY_EXTRA_ARGS 覆盖，
-# 或命令行追加参数（如 --default-provider codebuddy）
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --zcode --mimo --default-provider trae}"
+# + 豆包（CDP 直连）+ MiMo（小米桌面登录态）+ Qoder（千问/GLM/Kimi 等）；
+# 可用 PROXY_EXTRA_ARGS 覆盖，或命令行追加参数（如 --default-provider codebuddy）
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --zcode --mimo --qoder --default-provider trae}"
 
 # 优先使用项目自带 .venv（uv 已装好依赖），否则退回系统 python
 if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
@@ -245,7 +245,7 @@ cmd_login() {
     local extra=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|trae|zcode|doubao|mimo)
+            codebuddy|trae|zcode|doubao|mimo|qoder)
                 provider="$1" ;;
             workbuddy)
                 # workbuddy 是 codebuddy 的别名（登录模块内同样会归一）

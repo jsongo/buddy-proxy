@@ -126,11 +126,41 @@ def _model_groups(state: Any) -> list[dict[str, Any]]:
     return groups
 
 
+def _bare_model_id(model_id: str, provider_id: str) -> str:
+    """去掉通道前缀，返回**转发链路上真正使用的**模型名。
+
+    模型列表里的 ``m["id"]`` 带通道前缀（``qoder/qfmodel``），而 ``forward_chat``
+    解析 ``provider/model`` 后会把前缀剥掉再转发，``_reject_if_disabled`` 拿到的
+    也是裸名。所有「停用/限时窗口」的键都必须按裸名生成，否则永远命中不了。
+    """
+    prefix = f"{provider_id}/"
+    return model_id[len(prefix):] if provider_id and model_id.startswith(prefix) else model_id
+
+
+def _find_model(provider_id: str, model_id: str, state: Any) -> dict[str, Any] | None:
+    """在通道的模型列表里找 ``model_id``，返回条目（找不到返回 None）。
+
+    与 :func:`_normalize_model_ref` 共用同一套「id / 裸名」两种口径的匹配，
+    避免两处判断漂移。
+    """
+    for group in _model_groups(state):
+        if group["id"] != provider_id:
+            continue
+        for m in group["models"]:
+            if m["id"] == model_id or _bare_model_id(m["id"], provider_id) == model_id:
+                return m
+    return None
+
+
 def _validate_model(provider_id: str, model_id: str, state: Any) -> None:
-    """校验 (provider, model) 组合真实可用，否则 400。"""
+    """校验 (provider, model) 组合真实可用，否则 400。
+
+    接受两种口径：通道列表里的**带前缀 id**（``qoder/qfmodel``，管理页回传的
+    形态）与**裸模型名**（``qfmodel``，客户端实际发给代理的形态）。
+    """
     for group in _model_groups(state):
         if group["id"] == provider_id:
-            if any(m["id"] == model_id for m in group["models"]):
+            if _find_model(provider_id, model_id, state) is not None:
                 return
             raise HTTPException(
                 status_code=400,
@@ -148,6 +178,38 @@ def _model_exists_anywhere(model_id: str, state: Any) -> bool:
         any(m["id"] == model_id for m in group["models"])
         for group in _model_groups(state)
     )
+
+
+def _normalize_model_ref(provider: str, model: str, state: Any) -> tuple[str, str]:
+    """把管理页回传的模型引用归一成 ``(provider, 裸模型名)``。
+
+    管理页的模型列表里 ``m["id"]`` 带通道前缀（``qoder/qfmodel``），前端会按
+    ``provider=<通道id>`` + ``model=<带前缀id>`` 一起回传。若直接拼键就得到
+    ``qoder/qoder/qfmodel``，而转发侧一律用剥前缀后的裸名（``qoder/qfmodel``）
+    ——两边永远对不上，停用形同虚设。这里统一剥成裸名，保持与转发链路一致。
+
+    裸模型名（如 ``glm-4.7``）不受影响；``provider`` 为空时按原样返回，由调用方
+    补默认通道。
+    """
+    bare = (model or "").strip()
+    pid = (provider or "").strip()
+    if pid and bare.startswith(f"{pid}/"):
+        bare = _bare_model_id(bare, pid)
+    # 别名（显示名/大小写变体）归一成通道的规范 id，与转发链路同一口径
+    if pid:
+        for p in (getattr(state, "providers", {}) or {}).values():
+            if getattr(p, "id", None) != pid:
+                continue
+            resolve = getattr(p, "resolve_model", None)
+            if callable(resolve):
+                try:
+                    resolved = resolve(bare)
+                    if isinstance(resolved, str) and resolved:
+                        return pid, resolved
+                except Exception:  # noqa: BLE001 - 归一失败按原名落键
+                    pass
+            break
+    return pid, bare
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +330,78 @@ async def ui_benefits(request: Request):
         return {"providers": [], "calendar": [], "auto_checkin": False,
                 "checkin_time": "09:30", "checkin_enabled_providers": []}
     return await manager.snapshot()
+
+
+@app.get("/ui/api/qoder/auth")
+async def ui_qoder_auth(request: Request):
+    """Qoder 登录/鉴权状态 + 账号信息（供管理页鉴权面板展示）。
+
+    纯本地读取，不触网：返回区域、账号、token 过期时间与来源，前端据此
+    提示「未登录 / 即将过期 / 正常」，并可给出重新登录的命令。
+    """
+    _ensure_local(request)
+    state = get_state()
+    provider = getattr(state, "providers", {}).get("qoder")
+    if provider is None:
+        return {"enabled": False, "authenticated": False}
+
+    try:
+        from ..qoder.credentials import auth_state_path, load_state, resolve_credential
+        from ..qoder.config import REGIONS
+
+        region = provider.region()
+        info: dict[str, Any] = {
+            "enabled": True,
+            "region": region.key,
+            "region_label": region.label,
+            "regions": sorted(REGIONS),
+            "endpoint": region.infer_base,
+            "state_file": str(auth_state_path()),
+            "login_command": "buddy login qoder",
+        }
+    except Exception as exc:  # noqa: BLE001 - 状态面板不该因读取失败而 500
+        return {"enabled": True, "authenticated": False, "error": str(exc)[:200]}
+
+    try:
+        cred = resolve_credential(region)
+    except Exception:
+        cred = None
+
+    saved = load_state()
+    # 内存凭据里的 plan 是额度接口回填的，可能比状态文件新（同一进程内）。
+    live_plan = getattr(cred, "plan", "") if cred else ""
+    now_ms = int(time.time() * 1000)
+    expires_at = (cred.expires_at_ms if cred else 0) or int(saved.get("expires_at_ms") or 0)
+    info.update({
+        "authenticated": cred is not None,
+        "uid": (cred.uid if cred else "") or saved.get("uid") or "",
+        "name": (cred.name if cred else "") or saved.get("name") or "",
+        "email": (cred.email if cred else "") or saved.get("email") or "",
+        "plan": live_plan or saved.get("plan") or "",
+        "source": cred.source if cred else "",
+        "expires_at_ms": expires_at or None,
+        "expires_in_days": (
+            round((expires_at - now_ms) / 86400000, 1) if expires_at else None
+        ),
+        "expired": bool(expires_at and expires_at <= now_ms),
+        "has_refresh_token": bool(
+            (cred.refresh_token if cred else "") or saved.get("refresh_token")
+        ),
+        "updated_at_ms": saved.get("updated_at_ms"),
+    })
+    return info
+
+
+@app.post("/ui/api/qoder/models/refresh")
+async def ui_qoder_models_refresh(request: Request):
+    """从上游刷新 Qoder 模型目录（管理页「刷新模型」按钮）。"""
+    _ensure_local(request)
+    state = get_state()
+    provider = getattr(state, "providers", {}).get("qoder")
+    if provider is None:
+        raise HTTPException(status_code=503, detail={"error": {"message": "qoder 通道未启用"}})
+    models = await provider.refresh_models(force=True)
+    return {"ok": True, "count": len(models), "models": models}
 
 
 @app.post("/ui/api/checkin")
@@ -412,6 +546,7 @@ async def ui_settings_post(request: Request):
         if raw:
             if "/" in raw:
                 provider_id, model_id = raw.split("/", 1)
+                provider_id, model_id = _normalize_model_ref(provider_id, model_id, state)
                 _validate_model(provider_id, model_id, state)
                 # 指定了通道的默认模型顺带把兜底通道对齐（显式前缀路由优先级一致）
                 update["default_provider"] = provider_id
@@ -469,6 +604,7 @@ async def ui_model_toggle(request: Request):
     model = (body.get("model") or "").strip()
     if not model:
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
+    provider, model = _normalize_model_ref(provider, model, state)
     # 校验组合真实存在，避免写入无效键
     _validate_model(provider or "codebuddy", model, state)
 
@@ -504,6 +640,7 @@ async def ui_model_schedule(request: Request):
     model = (body.get("model") or "").strip()
     if not model:
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
+    provider, model = _normalize_model_ref(provider, model, state)
     _validate_model(provider or "codebuddy", model, state)
 
     key = settings_mod.model_key(provider, model)

@@ -28,9 +28,15 @@ import sys
 PROVIDER_ALIASES: dict[str, str] = {
     "workbuddy": "codebuddy",
     "cb": "codebuddy",
+    # Qoder 常被敲成 quoder/qodor/qder（用户拼写变体），一并归一。
+    "quoder": "qoder",
+    "qodor": "qoder",
+    "qder": "qoder",
+    "qodercn": "qoder",
+    "qoder-cn": "qoder",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder")
 
 
 def _login_codebuddy(open_browser: bool = True) -> int:
@@ -283,12 +289,79 @@ def _login_mimo(**_kwargs) -> int:
     return 1
 
 
+def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
+    """Qoder 登录：官方 device flow（PKCE），全球版/CN 版通用。
+
+    流程：打印（并尝试打开）授权链接 → 用户在浏览器里确认 → 轮询换回
+    ``dt-`` device token，写入 ``~/.buddy-proxy/qoder_auth.json``。
+
+    区域由 ``QODER_REGION`` 决定（``cn`` 默认 / ``global``），CN 与全球版
+    账号不通用，连错域会 401。
+    """
+    import asyncio
+
+    from buddy_proxy.qoder.config import REGIONS, default_region_key, resolve_region
+    from buddy_proxy.qoder.credentials import (
+        AuthError,
+        auth_state_path,
+        poll_device_flow,
+        start_device_flow,
+    )
+
+    if os.environ.get("QODER_TOKEN", "").strip():
+        print("[!] 检测到环境变量 QODER_TOKEN 已设置——它会优先于登录结果生效。")
+        print("    如需改用登录态，请先 unset QODER_TOKEN。")
+
+    region = resolve_region()
+    print(f"[Qoder] 区域: {region.label} ({region.key})  端点: {region.infer_base}")
+    print(f"        可用 QODER_REGION 切换区域：{', '.join(REGIONS)}")
+
+    flow = start_device_flow(region)
+    print()
+    print("[Qoder] 请在浏览器中打开下面的链接，并用 Qoder 账号完成授权：")
+    print()
+    print(f"    {flow.auth_url}")
+    print()
+    if open_browser:
+        try:
+            import webbrowser
+
+            webbrowser.open(flow.auth_url)
+            print("[Qoder] 已尝试自动打开浏览器…")
+        except Exception as exc:  # noqa: BLE001 - 打不开浏览器不算失败
+            print(f"[Qoder] 自动打开浏览器失败（{exc}），请手动复制上面的链接。")
+    print("[Qoder] 等待授权中（最多 10 分钟，Ctrl-C 可取消）…")
+
+    ticks = {"n": 0}
+
+    def _tick() -> None:
+        ticks["n"] += 1
+        if ticks["n"] % 6 == 0:
+            print(f"    …仍在等待授权（已等待约 {ticks['n'] * 5} 秒）")
+
+    try:
+        cred = asyncio.run(poll_device_flow(flow, on_tick=_tick))
+    except KeyboardInterrupt:
+        print("\n[Qoder] 已取消。")
+        return 1
+    except AuthError as exc:
+        print(f"\n[X] Qoder 登录失败: {exc}")
+        return 1
+
+    print()
+    print(f"[OK] Qoder 登录成功：{cred.describe()}")
+    print(f"     状态文件: {auth_state_path()}")
+    print("     启动代理时加 --qoder（或 QODER_ENABLED=1）即可启用该通道。")
+    return 0
+
+
 _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
     "zcode": _login_zcode,
     "doubao": _login_doubao,
     "mimo": _login_mimo,
+    "qoder": _login_qoder,
 }
 
 
@@ -298,7 +371,7 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo，默认 codebuddy")
+                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder)，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae 登录不自动打开浏览器，只打印链接")
     args = parser.parse_args()

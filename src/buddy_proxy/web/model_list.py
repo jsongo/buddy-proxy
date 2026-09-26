@@ -110,7 +110,11 @@ def normalize_model_format(remote_model: dict[str, Any]) -> dict[str, Any]:
         "tags": remote_model.get("tags", []),
         "modelType": remote_model.get("modelType"),
         "credits": remote_model.get("credits"),
-        "provider": remote_model.get("provider"),
+        # 缺省即 CodeBuddy 静态表。这里**不能**写成裸 ``.get("provider")``：
+        # 得到 ``None`` 也是「键存在」，会让下游 ``setdefault("provider",
+        # "codebuddy")`` 失效，模型在 /v1/models 里带着 ``provider: null``
+        # 出去（客户端据此判不出通道）。
+        "provider": remote_model.get("provider") or "codebuddy",
     }
 
 
