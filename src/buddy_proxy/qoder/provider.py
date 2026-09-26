@@ -118,20 +118,31 @@ class QoderProvider(BaseProvider):
         """把显示名/大小写变体归一成上游 key。"""
         return self._catalog.resolve_key(model)
 
-    def accepts_model(self, model: str) -> bool:
+    def accepts_model(self, model: str, aliases: bool = True) -> bool:
         """目录别名（显示名/大小写变体）也要能被自动路由命中。
 
-        Qoder 的目录 key 是内部代号（``qfmodel``），而客户端常直接发显示名
+        Qoder 的目录 key 是内部代号（``qfmodel``），客户端常直接发显示名
         （``Qwen3.8-Flash``）——只比 id 会漏配，请求掉进兜底通道后被上游拒成
-        「模型不存在」。这里用 catalog 的别名表兜住：归一后仍等于原值（说明
-        catalog 不认识它）才判否，保留前向兼容。
+        「模型不存在」。
+
+        ``aliases=False``（路由第一轮）只做 id 精确匹配，**不认别名**：catalog
+        的别名表里有 ``GLM-5.3`` → ``gmodel``，而 ``glm-5.3`` 同时是 zcode 的
+        模型名。若第一轮就认别名，注册更靠前的本通道会把 zcode 的模型抢走——
+        虽然 qoder 恰好也能服务它，但路由归属被静默改变，很难排查。
         """
         want = (model or "").strip()
         if not want:
             return False
         if super().accepts_model(want):
             return True
-        return self._catalog.resolve_key(want) != want
+        if not aliases:
+            return False
+        key = self._catalog.resolve_key(want)
+        if key == want:
+            return False  # catalog 不认识这个名字，不认领
+        # 仅当归一结果确实在本通道目录内时才认领
+        return any(str(m.get("key") or "") == key
+                   for m in (self._catalog._models or Catalog.fallback()))
 
     # -- 额度 ---------------------------------------------------------------
 

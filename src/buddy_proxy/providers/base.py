@@ -65,13 +65,17 @@ class BaseProvider(abc.ABC):
         """返回 provider 健康状态（合并进 /health）。"""
         return {"id": self.id, "name": self.name}
 
-    def accepts_model(self, model: str) -> bool:
+    def accepts_model(self, model: str, aliases: bool = True) -> bool:
         """客户端传来的 ``model`` 是否属于本通道（用于自动路由）。
 
-        默认只认 ``models()`` 里的 id 精确匹配（含剥掉 ``provider/`` 前缀的裸名）。
-        目录里存在**别名**的通道（如 Qoder 同时接受显示名 ``Qwen3.8-Flash`` 与
-        内部 key ``qfmodel``）应覆写本方法，否则别名请求会漏配、掉进兜底通道并
-        被上游以「模型不存在」拒掉。
+        ``aliases=False`` 时只认 ``models()`` 里的 id 精确匹配（含剥掉
+        ``provider/`` 前缀的裸名）；``aliases=True`` 时允许把**别名**也算进来。
+
+        基类没有别名概念，两个取值等价。目录里存在别名的通道（如 Qoder 同时
+        接受显示名 ``Qwen3.8-Flash`` 与内部 key ``qfmodel``）应覆写本方法，并
+        在 ``aliases=False`` 时**只**做 id 匹配——路由侧会先用 ``False`` 跑一遍
+        全部通道，都没命中才用 ``True`` 兜底。这样别名永远不会抢走别的通道
+        按 id 精确匹配就能认领的模型。
         """
         want = (model or "").strip()
         if not want:

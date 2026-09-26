@@ -999,9 +999,11 @@ class PrefixedAliasProvider(BaseProvider):
                 return canonical
         return model
 
-    def accepts_model(self, model: str) -> bool:
+    def accepts_model(self, model: str, aliases: bool = True) -> bool:
         if super().accepts_model(model):
             return True
+        if not aliases:
+            return False
         want = (model or "").strip()
         return bool(want) and self.resolve_model(want) != want
 
@@ -1096,6 +1098,60 @@ def test_accepts_model_default_rejects_unknown(prefixed_env):
     """accepts_model 不能把无关模型也认领走。"""
     assert prefixed_env.provider.accepts_model("totally-other-model") is False
     assert prefixed_env.provider.accepts_model("") is False
+
+
+def test_alias_does_not_steal_exact_match_from_other_channel():
+    """别名只做兜底，绝不能抢走别的通道按 id 精确匹配就能认领的模型。
+
+    回归（真实场景）：qoder 目录里 GLM-5.3 的显示名与 zcode 的模型名
+    ``glm-5.3`` 撞车，且 qoder 注册更靠前。若别名与精确匹配同轮参与，
+    ``glm-5.3`` 会被 qoder 抢走、路由归属静默改变。
+    """
+    from buddy_proxy.providers.base import BaseProvider
+
+    class AliasProvider(BaseProvider):
+        """只通过别名认识 glm-5.3（自己的 id 是别的名字）。"""
+
+        id = "aliasprov"
+        name = "Alias Provider"
+
+        def models(self):
+            return [{"id": "aliasprov/internal-glm"}]
+
+        def ensure_auth(self):
+            pass
+
+        def resolve_model(self, model):
+            return "internal-glm" if model.strip().lower() == "glm-5.3" else model
+
+        def accepts_model(self, model, aliases=True):
+            if super().accepts_model(model):
+                return True
+            return aliases and self.resolve_model(model) != model
+
+        async def forward(self, body, protocol, original=None):  # pragma: no cover
+            raise NotImplementedError
+
+    class ExactProvider(BaseProvider):
+        """按 id 精确提供 glm-5.3 的通道。"""
+
+        id = "exactprov"
+        name = "Exact Provider"
+
+        def models(self):
+            return [{"id": "glm-5.3"}]
+
+        def ensure_auth(self):
+            pass
+
+        async def forward(self, body, protocol, original=None):  # pragma: no cover
+            raise NotImplementedError
+
+    alias, exact = AliasProvider(), ExactProvider()
+    # 别名轮：别家不认；但精确轮 exactprov 认 → 必须先跑完精确轮
+    assert alias.accepts_model("glm-5.3", aliases=False) is False
+    assert exact.accepts_model("glm-5.3", aliases=False) is True
+    assert alias.accepts_model("glm-5.3", aliases=True) is True
 
 
 def test_base_accepts_model_handles_bare_and_prefixed():

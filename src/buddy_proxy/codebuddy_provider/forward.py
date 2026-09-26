@@ -142,15 +142,23 @@ async def forward_chat(
                 stream=bool(body.get("stream")),
             )
 
-    # 2) 自动匹配模型 id（含剥前缀裸名与 provider 自有别名，见 accepts_model）
+    # 2) 自动匹配模型 id（仅在未显式指定前缀时；前缀路由的结果不能被覆盖）
+    #
+    # 分两轮：**先全部按 id 精确匹配**（含剥前缀裸名），都未命中再退回别名。
+    # 不能一轮搞定——多个通道可能"认识"同一个名字（qoder 的显示名 GLM-5.3 与
+    # zcode 的模型名 glm-5.3 撞车），若让别名与精确匹配同等参与、按注册序先到
+    # 先得，注册靠前的通道就会把别人的模型抢走。别名只能是兜底，不能是抢占。
     if provider is None:
-        for p in providers.values():
-            try:
-                if p.accepts_model(requested_model):
-                    provider = p
-                    break
-            except Exception:  # noqa: BLE001 - 单个通道判断失败不该阻断路由
-                continue
+        for allow_aliases in (False, True):
+            for p in providers.values():
+                try:
+                    if p.accepts_model(requested_model, aliases=allow_aliases):
+                        provider = p
+                        break
+                except Exception:  # noqa: BLE001 - 单个通道判断失败不该阻断路由
+                    continue
+            if provider is not None:
+                break
 
     if provider is not None:
         # 非默认 provider（Trae/豆包等）：由各自 forward 决定协议支持范围。
