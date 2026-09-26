@@ -60,7 +60,7 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
      "is_vl": True, "price_factor": 0.02, "max_input_tokens": 1000000},
     {"key": "gm51model", "display_name": "GLM-5.2", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.6, "max_input_tokens": 180000},
-    {"key": "mmodel", "display_name": "MiniMax-M3", "is_reasoning": True,
+    {"key": "mmodel", "display_name": "MiniMax-M2.7", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.2, "max_input_tokens": 180000},
     {"key": "cmodel", "display_name": "Cantus", "is_reasoning": True,
      "is_vl": True, "price_factor": 4.0, "max_input_tokens": 180000},
@@ -68,15 +68,16 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
      "is_vl": True, "price_factor": 8.0, "max_input_tokens": 180000},
 )
 
-#: 档位模型（Auto/Ultimate/... 由平台路由，不绑定具体底层模型）。
+#: 档位模型（由平台路由，不绑定具体底层模型）。
+#:
+#: 实测（2026-09）：上游**只有 `auto` 这一个档位**——9 个场景（chat/developer/
+#: assistant/inline/quest/qwork/experts/qwake/app）的目录里都只有 `auto`。
+#: 早期版本按客户端 UI 的印象合成过 ultimate/performance/efficient，但上游
+#: 不认这三个名字，调用会 502「Unsupported model "performance"」。故只保留
+#: `auto`；将来上游若真给出别的档位，会在目录里自然出现，不必在这里补。
 TIER_MODELS: tuple[dict[str, Any], ...] = (
-    {"key": "auto", "display_name": "Auto", "price_factor": 0.5, "max_input_tokens": 200000},
-    {"key": "ultimate", "display_name": "Ultimate", "is_reasoning": True,
-     "price_factor": 2.0, "max_input_tokens": 1000000},
-    {"key": "performance", "display_name": "Performance", "is_reasoning": True,
-     "price_factor": 1.1, "max_input_tokens": 1000000},
-    {"key": "efficient", "display_name": "Efficient", "price_factor": 0.3,
-     "max_input_tokens": 200000},
+    {"key": "auto", "display_name": "Auto", "is_reasoning": True, "is_vl": True,
+     "price_factor": 0.5, "max_input_tokens": 200000},
 )
 
 #: 旧模型：仅用于兼容调用，**不在模型列表里展示**（列表太长反而找不到要用的）。
@@ -118,13 +119,16 @@ MODEL_IDS: dict[str, str] = {
     "qmodel": "qwen3.7-plus",
     "q37fmodel": "qwen3.7-flash",
     "dmodel": "deepseek-v4-pro",
-    "dfmodel": "deepseek-v4-flash",
+    # 上游把 4.1-Flash 这份权重叫 ``DeepSeek-Flash``（不带版本号）；用户按版本
+    # 称呼它，故对外 id 用带版本号的名字，和 CodeBuddy 通道的
+    # ``deepseek-v4.1-flash`` 对齐，两边叫法一致。
+    "dfmodel": "deepseek-v4.1-flash",
     "gmodel": "glm-5.3",
     "gfmodel": "glm-5.3-flash",
     "gm51model": "glm-5.2",
     "kmodel_latest": "kimi-k3",
     "kmodel": "kimi-k2.8-preview",
-    "mmodel": "minimax-m3",
+    "mmodel": "minimax-m2.7",
     "cmodel": "cantus",
     "smodel": "sonus",
 }

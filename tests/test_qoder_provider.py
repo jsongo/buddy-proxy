@@ -327,10 +327,16 @@ def test_catalog_parse_skips_disabled_and_byok():
 
 
 def test_catalog_parse_adds_tier_models():
-    """上游 chat 场景不含档位模型，需本地补齐。"""
+    """上游 chat 场景不含档位模型，需本地补齐 ``auto``。
+
+    实测上游**只有 `auto` 这一个档位**（9 个场景的目录里都只有它）。早期版本
+    合成过 ultimate/performance/efficient，但上游不认——调用会 502
+    「Unsupported model "performance"」，故只保留 `auto`。
+    """
     keys = [m["key"] for m in _catalog()._parse({"chat": []})]
-    for tier in ("auto", "ultimate", "performance", "efficient"):
-        assert tier in keys
+    assert "auto" in keys
+    for bogus in ("ultimate", "performance", "efficient"):
+        assert bogus not in keys
 
 
 def test_entry_always_returns_dict():
@@ -366,7 +372,7 @@ def test_hidden_keys_are_not_listed_but_still_callable():
     catalog = _catalog()
     listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
     for legacy in ("qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "glm-5.2",
-                   "kimi-k2.8-preview", "cantus", "sonus", "deepseek-v4-flash"):
+                   "kimi-k2.8-preview", "cantus", "sonus", "deepseek-v4.1-flash"):
         assert legacy not in listed, f"{legacy} 不该出现在模型列表里"
         # 隐藏 ≠ 停用：仍然解析得到上游 key（点名可调）
         assert catalog.resolve_key(legacy) != legacy
@@ -377,7 +383,7 @@ def test_hidden_keys_do_not_hide_the_models_we_want():
     catalog = _catalog()
     listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
     for wanted in ("qwen3.8-max", "qwen3.8-flash", "glm-5.3", "glm-5.3-flash",
-                   "kimi-k3", "deepseek-v4-pro", "minimax-m3"):
+                   "kimi-k3", "deepseek-v4-pro", "minimax-m2.7"):
         assert wanted in listed, f"{wanted} 被误隐藏"
 
 

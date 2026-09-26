@@ -141,12 +141,12 @@ class QoderProvider(BaseProvider):
             return True
         if not aliases:
             return False
+        entries = self._catalog._models or Catalog.fallback()
+        # ``resolve_key`` 对「已经是上游 key」与「认不出」两种输入都原样返回，
+        # 单看 ``key == want`` 无法区分——只能直接查目录：归一结果确实存在，
+        # 才认领；否则（真正的未知模型）放行给别人。
         key = self._catalog.resolve_key(want)
-        if key == want:
-            return False  # catalog 不认识这个名字，不认领
-        # 仅当归一结果确实在本通道目录内时才认领
-        return any(str(m.get("key") or "") == key
-                   for m in (self._catalog._models or Catalog.fallback()))
+        return any(str(m.get("key") or "") == key for m in entries)
 
     # -- 额度 ---------------------------------------------------------------
 

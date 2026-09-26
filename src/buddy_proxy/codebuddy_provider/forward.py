@@ -44,18 +44,20 @@ def _codebuddy_static_ids() -> frozenset[str]:
 
 
 def _is_codebuddy_model(model: str) -> bool:
-    """该名字是否是 CodeBuddy 静态表里的模型 id（**大小写不敏感**）。
+    """该名字是否是 CodeBuddy 静态表里的模型 id。
 
-    CodeBuddy 是默认兜底通道、不在 ``providers`` 里，别名轮无法通过「有没有别的
-    通道精确认领」判断归属，故直接查静态表。命中即视为该名字归 CodeBuddy，
-    其他通道不得认领——``auto`` 正是 CodeBuddy 的默认模型，而 Qoder 本地合成的
-    档位模型（TIER_MODELS）也叫 ``auto``，不挡住就会静默改道。
+    用途只有一个：在**别名轮**挡住「别的通道想用别名认领一个本该归 CodeBuddy
+    的名字」——``auto`` 正是 CodeBuddy 的默认模型，Qoder 的档位模型也叫 ``auto``，
+    不挡就会静默改道；CodeBuddy 是兜底通道、不在 ``providers`` 里，别名轮无从
+    靠「有没有别的通道精确认领」判断归属，故直接查静态表。
 
-    大小写不敏感是有意为之：上游普遍把 ``Auto``/``auto`` 当同一个模型，静态表里
-    同时存在 ``kimi-k3``/``glm-5.3`` 这些与 Qoder 显示名撞车的名字，严格区分大小写
-    会让 ``Kimi-K3`` 这类变体绕过保护、改道到 Qoder。
+    只按**原样**比对，不做小写化：静态表里的 id 本身就是小写，而 ``Qwen3.8-Max``
+    / ``Kimi-K3`` 这类**官方显示名**虽然小写化后与静态表撞车，但它们确实是通道
+    目录里真实存在的模型名（Qoder 的 display_name 就是这么写的）。把它们也挡掉
+    会让「按官方文档写模型名」直接 502，代价远大于收益——真正需要防的是裸名
+    ``auto`` 被别名改道，而那种输入本来就没有大小写变体。
     """
-    return bool(model) and model.lower() in _codebuddy_static_ids()
+    return model in _codebuddy_static_ids()
 
 
 def _resolved_model_id(provider: Any, model: str) -> str:

@@ -343,8 +343,7 @@ def test_two_round_routing_prefers_exact_match_over_alias(tmp_path, monkeypatch)
 # --- 别名不得抢走 CodeBuddy 静态表的模型名 ---------------------------------
 
 
-@pytest.mark.parametrize("name", ["auto", "Auto", "AUTO"])
-def test_codebuddy_static_name_not_claimed_by_alias(name):
+def test_codebuddy_static_name_not_claimed_by_alias():
     """``auto`` 是 CodeBuddy 的默认模型，别名通道不得认领。
 
     回归：Qoder 的档位模型（本地合成的 TIER_MODELS）也叫 ``auto``，别名表因此
@@ -354,10 +353,25 @@ def test_codebuddy_static_name_not_claimed_by_alias(name):
     """
     from buddy_proxy.codebuddy_provider.forward import _is_codebuddy_model
 
-    assert _is_codebuddy_model(name) is True
-    # 大小写不敏感：上游把 Auto/auto 当同一个模型
+    assert _is_codebuddy_model("auto") is True
     assert _is_codebuddy_model("not-a-codebuddy-model") is False
     assert _is_codebuddy_model("") is False
+
+
+@pytest.mark.parametrize("name", ["Auto", "AUTO", "Qwen3.8-Max", "GLM-5.3", "Kimi-K3"])
+def test_codebuddy_guard_does_not_block_display_names(name):
+    """守卫只按**原样**比对，不挡通道目录里的官方显示名。
+
+    回归：守卫曾做小写化比对，于是 ``Qwen3.8-Max``/``Kimi-K3`` 这些小写化后与
+    静态表撞车的**官方 display_name** 被一并挡掉，别名轮不再认领 → 请求掉进
+    CodeBuddy 兜底通道 → 上游 502「model [Qwen3.8-Max] service info not found」。
+    按官方文档写模型名是正常用法，不该失败。
+
+    需要防的是裸名 ``auto`` 被别名改道，而那种输入本来就没有大小写变体。
+    """
+    from buddy_proxy.codebuddy_provider.forward import _is_codebuddy_model
+
+    assert _is_codebuddy_model(name) is False
 
 
 def test_codebuddy_guard_applies_only_to_alias_round():
