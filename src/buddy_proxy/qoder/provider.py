@@ -30,7 +30,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.providers.base import BaseProvider
 
-from .catalog import Catalog, to_openai_model
+from .catalog import Catalog, is_hidden, to_openai_model
 from .config import COSY_VERSION, Region, resolve_region, with_cached_endpoints
 from .cosy import sign
 from .credentials import AuthError, Credential, ensure_credential
@@ -98,9 +98,13 @@ class QoderProvider(BaseProvider):
     # -- 模型 ---------------------------------------------------------------
 
     def models(self) -> Sequence[dict[str, Any]]:
-        """同步返回模型列表（用兜底目录；异步刷新见 ``refresh_models``）。"""
+        """同步返回模型列表（用兜底目录；异步刷新见 ``refresh_models``）。
+
+        旧模型（:data:`catalog.HIDDEN_KEYS`）只列表不展示——列表太长反而找不到
+        要用的那几个。隐藏 ≠ 停用：直接点名仍可调用，只是不列出来。
+        """
         entries = self._catalog._models or Catalog.fallback()
-        return [to_openai_model(e, self.id) for e in entries]
+        return [to_openai_model(e, self.id) for e in entries if not is_hidden(e)]
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
         """从上游刷新目录（供管理页「刷新模型」与转发前预热用）。"""
@@ -112,7 +116,7 @@ class QoderProvider(BaseProvider):
             entries = Catalog.fallback()
         else:
             entries = await self._catalog.fetch(cred, force=force)
-        return [to_openai_model(e, self.id) for e in entries]
+        return [to_openai_model(e, self.id) for e in entries if not is_hidden(e)]
 
     def resolve_model(self, model: str) -> str:
         """把显示名/大小写变体归一成上游 key。"""
@@ -342,12 +346,28 @@ class QoderProvider(BaseProvider):
             )
 
         if want_stream:
+            # Anthropic 客户端（Claude Code 的 /v1/messages）不能收 OpenAI chunk：
+            # 上游没有 Anthropic 原生端点，必须在这里把 OpenAI SSE 转成
+            # message_start / content_block_delta / message_stop 事件流。
+            # 不转的话 Claude Code 收到 200 却拿不到事件，报
+            # 「Streaming response ended before any complete data was received」。
+            if protocol == "anthropic":
+                from ..protocols.anthropic_adapter import AnthropicStreamConverter
+                stream: AsyncIterator[bytes] = _to_anthropic_stream(
+                    self._stream(resp, client, model), model, AnthropicStreamConverter,
+                )
+            else:
+                stream = self._stream(resp, client, model)
             return StreamingResponse(
-                self._stream(resp, client, model),
+                stream,
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return JSONResponse(await self._collect(resp, client, model))
+        payload = await self._collect(resp, client, model)
+        if protocol == "anthropic":
+            from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
+            return JSONResponse(chat_completion_to_anthropic_message(payload, original))
+        return JSONResponse(payload)
 
     # -- 出站体构造 ---------------------------------------------------------
 
@@ -563,6 +583,78 @@ class QoderProvider(BaseProvider):
 # ---------------------------------------------------------------------------
 # 模块级辅助
 # ---------------------------------------------------------------------------
+
+
+async def _to_anthropic_stream(
+    openai_stream: AsyncIterator[bytes],
+    model: str,
+    converter_cls: Any,
+) -> AsyncIterator[bytes]:
+    """OpenAI chat chunk SSE 流 -> Anthropic Messages 事件流。
+
+    ``openai_stream`` 是本 provider 已拆掉 COSY 外壳的 OpenAI SSE 字节流。
+    转换器复用 ``anthropic_adapter.AnthropicStreamConverter``（与 trae/mimo
+    同一个），因此 reasoning_content -> thinking 块、tool_calls -> tool_use
+    块的行为与其它通道一致。
+
+    转换途中任何异常都**先收尾再抛**：``feed_chunk`` 对畸形 chunk 会抛，
+    不兜的话客户端拿到「内容块悬空、没有 message_stop」的残流，比直接报错
+    更难排查。
+    """
+    converter = converter_cls(model)
+
+    def _emit(event_name: str, payload: dict[str, Any]) -> str:
+        return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _close_open() -> list[str]:
+        try:
+            return [_emit(n, p) for n, p in converter.close_open_blocks()]
+        except Exception:  # noqa: BLE001 - 收尾失败不能盖掉原错误
+            return []
+
+    def _abort(msg: str) -> list[str]:
+        out = _close_open()
+        out.append(_emit("error", {"type": "error",
+                                   "error": {"type": "api_error", "message": msg}}))
+        return out
+
+    buffer = ""
+    try:
+        async for raw in openai_stream:
+            text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+            buffer += text
+            # 按 SSE 帧切：只处理完整的 ``data: ...\n\n``，最后一段留在 buffer。
+            while "\n\n" in buffer:
+                frame, buffer = buffer.split("\n\n", 1)
+                for line in frame.splitlines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    if not isinstance(chunk, dict):
+                        continue
+                    if chunk.get("error"):
+                        err = chunk["error"]
+                        msg = str(err.get("message", err)) if isinstance(err, dict) else str(err)
+                        for event in _abort(msg):
+                            yield event
+                        return
+                    for name, payload in converter.feed_chunk(chunk):
+                        yield _emit(name, payload)
+        for name, payload in converter.finish():
+            yield _emit(name, payload)
+    except Exception as exc:  # noqa: BLE001 - 上游畸形数据不该让客户端只收到半截流
+        log.warning("qoder anthropic 流中断: %s: %s", type(exc).__name__, exc)
+        for event in _abort(f"{type(exc).__name__}: {exc}"):
+            yield event
+        return
+    yield "data: [DONE]\n\n"
 
 
 def _unwrap(payload: str) -> tuple[str | None, str | None, bool]:

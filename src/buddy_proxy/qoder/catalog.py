@@ -79,6 +79,78 @@ TIER_MODELS: tuple[dict[str, Any], ...] = (
      "max_input_tokens": 200000},
 )
 
+#: 旧模型：仅用于兼容调用，**不在模型列表里展示**（列表太长反而找不到要用的）。
+#:
+#: 判定按**上游 key**——对外 id 与 key 一一对应，用 key 更稳（不会因改名漏掉）。
+#: 隐藏 ≠ 停用：客户端直接点名仍可调用，只是 /v1/models 与管理页不列出来。
+#: 想恢复展示：把 key 从本集合里删掉即可。
+HIDDEN_KEYS: frozenset[str] = frozenset({
+    "qmodel_latest",   # Qwen3.7-Max
+    "qmodel",          # Qwen3.7-Plus
+    "q37fmodel",       # Qwen3.7-Flash
+    "gm51model",       # GLM-5.2
+    "kmodel",          # Kimi-K2.8-Preview
+    "dfmodel",         # DeepSeek-Flash（旧显示名，已被 V4 系列取代）
+    "cmodel",          # Cantus
+    "smodel",          # Sonus
+})
+
+
+def is_hidden(entry: dict[str, Any]) -> bool:
+    """该条目是否属于「旧模型，不展示」。"""
+    return str(entry.get("key") or "").strip() in HIDDEN_KEYS
+
+
+#: 上游 key -> 对外模型 id（小写真实名）。
+#:
+#: 上游目录只给 ``key``（内部代号，如 ``qmodel_38max``）与 ``display_name``
+#: （``Qwen3.8-Max``）——前者看不懂、后者大小写混杂难记。对外统一用小写真实名，
+#: 由本表映射；未登记的新模型回落到 ``display_name`` 的小写形态（见
+#: :func:`public_model_id`），因此上游上新模型不必改这里。
+#:
+#: 冲突说明：其中若干名字（``qwen3.8-max``/``glm-5.3``/``kimi-k3``/…）与
+#: CodeBuddy 静态表同名——同一批模型两边都有，裸名调用由 ``forward_chat``
+#: 的路由决定归属；要强制走本通道请写 ``qoder/<id>``。
+MODEL_IDS: dict[str, str] = {
+    "qmodel_38max": "qwen3.8-max",
+    "qfmodel": "qwen3.8-flash",
+    "qmodel_latest": "qwen3.7-max",
+    "qmodel": "qwen3.7-plus",
+    "q37fmodel": "qwen3.7-flash",
+    "dmodel": "deepseek-v4-pro",
+    "dfmodel": "deepseek-v4-flash",
+    "gmodel": "glm-5.3",
+    "gfmodel": "glm-5.3-flash",
+    "gm51model": "glm-5.2",
+    "kmodel_latest": "kimi-k3",
+    "kmodel": "kimi-k2.8-preview",
+    "mmodel": "minimax-m3",
+    "cmodel": "cantus",
+    "smodel": "sonus",
+}
+
+
+def public_model_id(entry: dict[str, Any]) -> str:
+    """目录条目 -> 对外模型 id（小写真实名）。
+
+    优先查 :data:`MODEL_IDS`；未登记的新模型把 ``display_name`` 小写化后使用
+    （上游 display_name 本来就是人读的名字，比内部代号友好）。
+    """
+    key = str(entry.get("key") or "").strip()
+    if key in MODEL_IDS:
+        return MODEL_IDS[key]
+    display = str(entry.get("display_name") or "").strip()
+    return display.lower() if display else key
+
+
+def _canonical_id_slug(name: str) -> str:
+    """对外 id 的归一键：转小写、点号保留、空格转连字符。
+
+    与 ``_normalize``（去掉全部非字母数字）不同——这里要保留 ``qwen3.8-max``
+    里的点与连字符，因为对外 id 本身就是给人看的。
+    """
+    return str(name).strip().lower().replace("_", "-").replace(" ", "-")
+
 
 class Catalog:
     """模型目录（带 TTL 缓存 + 上游失败兜底）。"""
@@ -97,7 +169,12 @@ class Catalog:
         self._rebuild_aliases(list(FALLBACK_MODELS) + list(TIER_MODELS))
 
     def _rebuild_aliases(self, models: list[dict[str, Any]]) -> None:
-        """key / display_name / 归一形态 三者都指向同一个 key。"""
+        """上游 key / display_name / 对外 id 三者都指向同一个 key。
+
+        三种写法都要能解析：对外 id（``qwen3.8-flash``，推荐给用户）、
+        display_name（``Qwen3.8-Flash``，官方文档里的写法）、内部 key
+        （``qfmodel``，老客户端/脚本里可能已在用）。
+        """
         self._aliases = {}
         for m in models:
             key = str(m.get("key") or "").strip()
@@ -107,6 +184,12 @@ class Catalog:
             display = str(m.get("display_name") or "").strip()
             if display:
                 self._aliases[_normalize(display)] = key
+            # 对外 id：既按 _normalize 口径（去符号）登记，也按 slug 口径
+            # （保留 ``.``/``-``）登记，两种输入都能命中。
+            public = public_model_id(m)
+            if public:
+                self._aliases[_normalize(public)] = key
+                self._aliases.setdefault(_canonical_id_slug(public), key)
 
     def entry(self, model: str) -> dict[str, Any]:
         """按 key/显示名取目录原始条目；找不到时返回最小可用条目。
@@ -122,18 +205,30 @@ class Catalog:
         return {"key": key, "display_name": key}
 
     def resolve_key(self, model: str) -> str:
-        """把用户给的名字（显示名/大小写变体/key）归一成上游 key。
+        """把用户给的名字归一成上游 key。
 
-        上游对大小写不敏感，但 ``X-Model-Key`` 与 body 里的 ``model`` 必须
-        自洽，因此这里统一成 catalog 里的规范 key；未知名字原样返回，交给
-        上游报错（保留前向兼容：新模型不用改代码就能用）。
+        接受四种写法（大小写均不敏感）：对外 id（``qwen3.8-flash``）、
+        display_name（``Qwen3.8-Flash``）、内部 key（``qfmodel``）、以及
+        ``qoder/`` 前缀形态。上游对大小写不敏感，但 ``X-Model-Key`` 与 body 里的
+        ``model`` 必须自洽，故这里统一成 catalog 的规范 key；未知名字原样返回，
+        交给上游报错（保留前向兼容：新模型不用改代码就能用）。
         """
         raw = (model or "").strip()
         if not raw:
             return raw
+        # 允许带 "qoder/" 前缀调用（客户端从 /v1/models 复制粘贴的形态）
+        if "/" in raw:
+            prefix, _, rest = raw.partition("/")
+            if prefix == "qoder" and rest:
+                raw = rest
         if raw in self._aliases.values():
-            return raw
-        return self._aliases.get(_normalize(raw), raw)
+            return raw  # 已经是上游 key
+        hit = self._aliases.get(raw.lower())
+        if hit is None:
+            hit = self._aliases.get(_canonical_id_slug(raw))
+        if hit is None:
+            hit = self._aliases.get(_normalize(raw))
+        return hit if hit is not None else raw
 
     # -- 拉取 ---------------------------------------------------------------
 
@@ -216,9 +311,15 @@ def _normalize(name: str) -> str:
 
 
 def to_openai_model(entry: dict[str, Any], provider_id: str) -> dict[str, Any]:
-    """目录条目 -> OpenAI ``/v1/models`` 元素（带 buddy-proxy 扩展字段）。"""
+    """目录条目 -> OpenAI ``/v1/models`` 元素（带 buddy-proxy 扩展字段）。
+
+    ``id`` 用**对外小写真实名**（``qoder/qwen3.8-flash``）而不是上游内部代号
+    （``qoder/qfmodel``）——后者看不出是什么模型。上游 key 仍放在 ``upstream_key``
+    里供排障对照，调用时两种写法都接受（见 :meth:`Catalog.resolve_key`）。
+    """
     key = str(entry.get("key") or "")
     display = str(entry.get("display_name") or key)
+    public = public_model_id(entry) or key
     price = entry.get("price_factor")
     tags: list[str] = []
     if entry.get("is_reasoning"):
@@ -228,13 +329,14 @@ def to_openai_model(entry: dict[str, Any], provider_id: str) -> dict[str, Any]:
     if entry.get("is_free"):
         tags.append("free")
     model = {
-        "id": f"{provider_id}/{key}",
+        "id": f"{provider_id}/{public}",
         "object": "model",
         "owned_by": provider_id,
         "name": display,
         "description": display,
         "provider": provider_id,
         "vendor": provider_id,
+        "upstream_key": key,
         "max_input": entry.get("max_input_tokens"),
         "context_window": entry.get("max_input_tokens"),
         "reasoning": bool(entry.get("is_reasoning")),

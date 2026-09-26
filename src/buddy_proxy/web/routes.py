@@ -111,6 +111,9 @@ async def list_models():
                 **({"credits": m["credits"]} if m.get("credits") is not None else {}),
                 **({"max_input": m["max_input"]} if m.get("max_input") is not None else {}),
                 **({"reasoning": m["reasoning"]} if "reasoning" in m else {}),
+                # 上游内部代号（如 Qoder 的 qfmodel）：对外 id 是人读的小写真实名
+                # （qoder/qwen3.8-flash），排障时要能对回上游目录，故一并透传。
+                **({"upstream_key": m["upstream_key"]} if m.get("upstream_key") else {}),
                 # 能力字段必须透传：漏传会让 /v1/models 把这些通道的模型
                 # 一律报成纯文本，客户端据此误剥图片（见列表下方 input_modalities）
                 **({"images": bool(m["images"])} if "images" in m else {}),
@@ -146,6 +149,9 @@ async def list_models():
             "input_modalities": ["text", "image"] if m.get("images") else ["text"],
             "supports_images": bool(m.get("images")),
             "supports_tool_call": bool(m.get("tool_call")),
+            # 上游内部代号（Qoder 的 qfmodel 等）：对外 id 是人读的小写真实名，
+            # 排障时要能对回上游目录。无此概念的通道不出现该字段。
+            **({"upstream_key": m["upstream_key"]} if m.get("upstream_key") else {}),
         }
         for m in data
     ]

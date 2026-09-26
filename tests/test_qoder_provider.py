@@ -10,12 +10,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 
 import pytest
 
-from buddy_proxy.qoder.catalog import Catalog, to_openai_model
+from buddy_proxy.qoder.catalog import (
+    HIDDEN_KEYS,
+    Catalog,
+    is_hidden,
+    public_model_id,
+    to_openai_model,
+)
 from buddy_proxy.qoder.config import REGIONS, Region, resolve_region
 from buddy_proxy.qoder.cosy import (
     _rsa_public_numbers,
@@ -32,6 +39,90 @@ from buddy_proxy.qoder.credentials import (
     _to_ms,
     auth_state_path,
 )
+from buddy_proxy.qoder.provider import _to_anthropic_stream
+
+
+# --- Anthropic 协议（/v1/messages） ----------------------------------------
+
+
+async def _aiter(items):
+    for item in items:
+        yield item
+
+
+async def _collect(agen) -> list[str]:
+    return [piece async for piece in agen]
+
+
+def _anth_text(chunks: list[bytes], model: str = "qwen3.8-flash") -> str:
+    """跑一遍 OpenAI chunk 流 -> Anthropic 事件流，返回拼好的文本。"""
+    from buddy_proxy.protocols.anthropic_adapter import AnthropicStreamConverter
+
+    return "".join(asyncio.run(_collect(_to_anthropic_stream(
+        _aiter(chunks), model, AnthropicStreamConverter))))
+
+
+def _chunk(delta: dict, finish: str | None = None) -> bytes:
+    payload = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "model": "qfmodel",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }
+    return f"data: {json.dumps(payload)}\n\n".encode()
+
+
+def test_anthropic_stream_emits_message_events():
+    """OpenAI chunk 流要变成 Anthropic 事件流，而不是原样透传。
+
+    不转的话 Claude Code 收 200 却拿不到事件，报
+    「Streaming response ended before any complete data was received」。
+    """
+    chunks = [
+        _chunk({"role": "assistant", "content": ""}),
+        _chunk({"content": "PONG"}),
+        _chunk({}, "stop"),
+        b"data: [DONE]\n\n",
+    ]
+    text = _anth_text(chunks)
+    assert "event: message_start" in text
+    assert "event: content_block_delta" in text
+    assert "event: message_stop" in text
+    assert "PONG" in text
+    # 绝不能把 OpenAI chunk 原样漏给 Anthropic 客户端
+    assert '"object": "chat.completion.chunk"' not in text
+    assert text.strip().endswith("data: [DONE]")
+
+
+def test_anthropic_stream_aborts_cleanly_on_error_frame():
+    """带内错误要收尾 + 补 error 事件，不能留悬空内容块。"""
+    text = _anth_text([
+        _chunk({"content": "partial"}),
+        b'data: {"error": {"message": "boom"}}\n\n',
+    ])
+    assert "event: error" in text
+    assert "boom" in text
+    assert "event: content_block_stop" in text  # 已开的块要收尾
+
+
+def test_anthropic_stream_handles_split_frames():
+    """SSE 帧可能被切在任意位置，必须按帧边界攒够再解析。"""
+    payload = _chunk({"content": "AB"})
+    half = len(payload) // 2
+    text = _anth_text([payload[:half], payload[half:]])
+    assert "AB" in text
+
+
+def test_anthropic_stream_survives_malformed_chunk():
+    """畸形 chunk 不能让客户端只收到半截流。"""
+    text = _anth_text([
+        _chunk({"content": "ok"}),
+        b'data: {"choices":[{"delta":"NOT_A_DICT"}]}\n\n',
+    ])
+    assert "event: message_start" in text
+    assert "event: content_block_stop" in text
+
+
 
 # --- body 编码 -------------------------------------------------------------
 
@@ -255,7 +346,8 @@ def test_to_openai_model_shape():
          "is_vl": True, "is_free": True, "price_factor": 0.2, "max_input_tokens": 180000},
         "qoder",
     )
-    assert model["id"] == "qoder/qmodel_38max"
+    assert model["id"] == "qoder/qwen3.8-max"
+    assert model["upstream_key"] == "qmodel_38max"
     assert model["owned_by"] == "qoder"
     assert model["name"] == "Qwen3.8-Max"
     assert model["credits"] == 0.2
@@ -267,6 +359,55 @@ def test_to_openai_model_shape():
 def test_to_openai_model_without_price_factor():
     model = to_openai_model({"key": "x", "display_name": "X"}, "qoder")
     assert "credits" not in model
+
+
+def test_hidden_keys_are_not_listed_but_still_callable():
+    """旧模型不展示（列表太长找不到要用的），但直接点名仍要能调通。"""
+    catalog = _catalog()
+    listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
+    for legacy in ("qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "glm-5.2",
+                   "kimi-k2.8-preview", "cantus", "sonus", "deepseek-v4-flash"):
+        assert legacy not in listed, f"{legacy} 不该出现在模型列表里"
+        # 隐藏 ≠ 停用：仍然解析得到上游 key（点名可调）
+        assert catalog.resolve_key(legacy) != legacy
+
+
+def test_hidden_keys_do_not_hide_the_models_we_want():
+    """新模型（千问3.8 / GLM-5.3 / Kimi-K3 等）必须留在列表里。"""
+    catalog = _catalog()
+    listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
+    for wanted in ("qwen3.8-max", "qwen3.8-flash", "glm-5.3", "glm-5.3-flash",
+                   "kimi-k3", "deepseek-v4-pro", "minimax-m3"):
+        assert wanted in listed, f"{wanted} 被误隐藏"
+
+
+def test_hidden_keys_are_all_real_catalog_keys():
+    """HIDDEN_KEYS 里的 key 必须真实存在，避免改名后留下死配置。"""
+    keys = {str(e.get("key")) for e in Catalog.fallback()}
+    assert HIDDEN_KEYS <= keys
+
+
+def test_to_openai_model_public_id_for_unmapped_key():
+    """未登记的新模型回落成 display_name 小写，不用改代码就能露出。"""
+    model = to_openai_model({"key": "zzmodel", "display_name": "Zeta-9.9"}, "qoder")
+    assert model["id"] == "qoder/zeta-9.9"
+    assert model["upstream_key"] == "zzmodel"
+
+
+def test_public_model_ids_are_lowercase_and_unique():
+    """对外 id 必须全小写（用户要求「都小写」），且不重复。"""
+    ids = [public_model_id(e) for e in Catalog.fallback()]
+    assert all(i == i.lower() for i in ids)
+    assert len(ids) == len(set(ids))
+    assert "qwen3.8-max" in ids
+    assert "qwen3.8-flash" in ids
+
+
+def test_resolve_model_accepts_public_id():
+    """对外 id（含 ``qoder/`` 前缀形态）也要能解析回上游 key。"""
+    assert _catalog().resolve_key("qwen3.8-flash") == "qfmodel"
+    assert _catalog().resolve_key("qoder/qwen3.8-flash") == "qfmodel"
+    assert _catalog().resolve_key("qoder/qmodel_38max") == "qmodel_38max"
 
 
 # --- 区域 ------------------------------------------------------------------
@@ -352,6 +493,33 @@ def test_auth_state_path_honours_env(monkeypatch, tmp_path):
 
 
 # --- provider：额度映射与出站信封 -----------------------------------------
+
+
+def _provider() -> object:
+    from buddy_proxy.qoder.provider import QoderProvider
+
+    return QoderProvider(
+        Region("cn", "Qoder CN", "https://a", "https://b", "https://c", ".qoder-cn")
+    )
+
+
+def test_models_hide_legacy_but_keep_current():
+    """列表只列当前模型；旧模型隐藏（隐藏 ≠ 停用，点名仍可调）。"""
+    ids = [m["id"] for m in _provider().models()]
+    assert "qoder/qwen3.8-max" in ids
+    assert "qoder/qwen3.8-flash" in ids
+    assert "qoder/glm-5.3" in ids
+    assert "qoder/kimi-k3" in ids
+    assert "qoder/qwen3.7-max" not in ids
+    assert "qoder/glm-5.2" not in ids
+    assert "qoder/cantus" not in ids
+
+
+def test_models_does_not_list_openai_style_ids():
+    """对外 id 不能是上游内部代号（qmodel_38max 这种看不懂的名字）。"""
+    ids = [m["id"] for m in _provider().models()]
+    for internal in ("qoder/qmodel_38max", "qoder/qfmodel", "qoder/gmodel"):
+        assert internal not in ids
 
 
 def test_quota_prefers_addon_when_user_quota_empty():
