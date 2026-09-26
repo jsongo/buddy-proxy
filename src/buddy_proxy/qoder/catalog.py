@@ -91,10 +91,11 @@ HIDDEN_KEYS: frozenset[str] = frozenset({
     "q37fmodel",       # Qwen3.7-Flash
     "gm51model",       # GLM-5.2
     "kmodel",          # Kimi-K2.8-Preview
-    "dfmodel",         # DeepSeek-Flash（旧显示名，已被 V4 系列取代）
     "cmodel",          # Cantus
     "smodel",          # Sonus
 })
+#: 注意：``dfmodel``（上游显示名 ``DeepSeek-Flash``，即用户口中的 4.1-Flash）
+#: **不隐藏**——它是最常用的模型之一，名字看着旧不代表模型旧。
 
 
 def is_hidden(entry: dict[str, Any]) -> bool:

@@ -372,7 +372,7 @@ def test_hidden_keys_are_not_listed_but_still_callable():
     catalog = _catalog()
     listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
     for legacy in ("qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "glm-5.2",
-                   "kimi-k2.8-preview", "cantus", "sonus", "deepseek-v4.1-flash"):
+                   "kimi-k2.8-preview", "cantus", "sonus"):
         assert legacy not in listed, f"{legacy} 不该出现在模型列表里"
         # 隐藏 ≠ 停用：仍然解析得到上游 key（点名可调）
         assert catalog.resolve_key(legacy) != legacy
@@ -383,7 +383,7 @@ def test_hidden_keys_do_not_hide_the_models_we_want():
     catalog = _catalog()
     listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
     for wanted in ("qwen3.8-max", "qwen3.8-flash", "glm-5.3", "glm-5.3-flash",
-                   "kimi-k3", "deepseek-v4-pro", "minimax-m2.7"):
+                   "kimi-k3", "deepseek-v4-pro", "deepseek-v4.1-flash", "minimax-m2.7"):
         assert wanted in listed, f"{wanted} 被误隐藏"
 
 
