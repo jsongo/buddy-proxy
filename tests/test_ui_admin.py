@@ -955,3 +955,168 @@ def test_reject_if_disabled_uses_model_key_alias(env, monkeypatch):
     with pytest.raises(HTTPException) as caught:
         _reject_if_disabled(state, "workbuddy", "other-model")
     assert caught.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 带前缀 id 的通道（Qoder 形态）：停用/时段键与转发链路必须同口径
+#
+# 背景（2026-09 实测）：Qoder 的 models() 给的 id 带通道前缀（qoder/qfmodel），
+# 而 forward_chat 剥前缀后转发，_reject_if_disabled 拿到的是裸名。管理页又把
+# 带前缀的 id 原样回传，于是拼出 qoder/qoder/qfmodel——写入的键永远命中不了，
+# 「停用」在界面上显示成功、实际完全失效。以下测试锁死三个口径：
+#   1. 管理页回传带前缀 id → 落键为单前缀
+#   2. 裸名/显示名/大小写变体都能自动路由到该通道（不掉进兜底）
+#   3. 停用后所有别名写法一律 403
+# ---------------------------------------------------------------------------
+class PrefixedAliasProvider(BaseProvider):
+    """模拟 Qoder：目录 id 带前缀，且接受显示名/大小写别名。"""
+
+    id = "prefixed"
+    name = "Prefixed Alias Provider"
+
+    _ALIASES = {
+        "flashx": "flashx", "qwen3.8-flash": "flashx",
+        "glm53": "glm53",
+    }
+
+    def __init__(self):
+        self.calls = []
+
+    def models(self):
+        return [
+            {"id": "prefixed/flashx", "description": "Qwen3.8-Flash"},
+            {"id": "prefixed/glm53", "description": "GLM-5.3"},
+        ]
+
+    def ensure_auth(self):
+        pass
+
+    def resolve_model(self, model: str) -> str:
+        norm = "".join(ch for ch in str(model).lower() if ch.isalnum())
+        for key, canonical in self._ALIASES.items():
+            if norm in ("".join(c for c in key.lower() if c.isalnum()),) or \
+               norm == "".join(c for c in canonical.lower() if c.isalnum()):
+                return canonical
+        return model
+
+    def accepts_model(self, model: str) -> bool:
+        if super().accepts_model(model):
+            return True
+        want = (model or "").strip()
+        return bool(want) and self.resolve_model(want) != want
+
+    async def forward(self, body, protocol, original=None):
+        self.calls.append(dict(body))
+        return JSONResponse({
+            "id": "chatcmpl-prefixed", "model": body.get("model"),
+            "choices": [{"message": {"role": "assistant", "content": "pong"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+
+@pytest.fixture()
+def prefixed_env(tmp_path, monkeypatch):
+    prov = PrefixedAliasProvider()
+    state = _make_state({"prefixed": prov}, tmp_path)
+    monkeypatch.setattr(st, "proxy_state", state)
+    return SimpleNamespace(state=state, provider=prov, client=TestClient(m.app))
+
+
+def test_prefixed_toggle_key_has_single_prefix(prefixed_env):
+    """管理页回传带前缀 id 时，落键必须只有一层前缀。
+
+    回归：曾写出 ``prefixed/prefixed/flashx``，与转发侧 ``prefixed/flashx``
+    对不上，停用静默失效。
+    """
+    r = prefixed_env.client.post(
+        "/ui/api/model-toggle",
+        json={"provider": "prefixed", "model": "prefixed/flashx", "disabled": True})
+    assert r.status_code == 200
+    assert r.json()["model"] == "prefixed/flashx"
+    assert prefixed_env.state.disabled_models == {"prefixed/flashx"}
+    assert settings_mod.load_settings()["disabled_models"] == ["prefixed/flashx"]
+
+
+def test_prefixed_toggle_accepts_bare_name(prefixed_env):
+    """裸名同样落同一把键（客户端实际发的形态）。"""
+    r = prefixed_env.client.post(
+        "/ui/api/model-toggle",
+        json={"provider": "prefixed", "model": "flashx", "disabled": True})
+    assert r.status_code == 200
+    assert r.json()["model"] == "prefixed/flashx"
+
+
+@pytest.mark.parametrize("model", ["flashx", "prefixed/flashx", "Qwen3.8-Flash",
+                                   "qwen3.8-flash", "QWEN3.8-FLASH"])
+def test_prefixed_aliases_auto_route(prefixed_env, model):
+    """别名不该掉进兜底通道：必须命中 prefixed 通道。"""
+    r = prefixed_env.client.post(
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200, (model, r.text)
+    assert prefixed_env.provider.calls, f"{model} 未被路由到 prefixed 通道"
+
+
+@pytest.mark.parametrize("model", ["flashx", "prefixed/flashx", "Qwen3.8-Flash",
+                                   "qwen3.8-flash"])
+def test_prefixed_disable_blocks_all_aliases(prefixed_env, model):
+    """停用后所有别名写法一律 403（别名绕过会让人以为停用失效）。"""
+    prefixed_env.client.post(
+        "/ui/api/model-toggle",
+        json={"provider": "prefixed", "model": "prefixed/flashx", "disabled": True})
+    r = prefixed_env.client.post(
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403, (model, r.status_code, r.text)
+
+
+def test_prefixed_disable_does_not_leak_to_other_models(prefixed_env):
+    prefixed_env.client.post(
+        "/ui/api/model-toggle",
+        json={"provider": "prefixed", "model": "prefixed/flashx", "disabled": True})
+    r = prefixed_env.client.post(
+        "/v1/chat/completions",
+        json={"model": "GLM-5.3", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize("model", ["glm53", "GLM-5.3", "prefixed/glm53"])
+def test_prefixed_schedule_blocks_all_aliases(prefixed_env, monkeypatch, model):
+    """限时窗口同样要按归一后的键命中所有别名写法。"""
+    prefixed_env.state.model_schedules = {"prefixed/glm53": [["00:00", "00:01"]]}
+    monkeypatch.setattr(settings_mod, "model_schedule_open", lambda w: False)
+    r = prefixed_env.client.post(
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403, (model, r.status_code, r.text)
+
+
+def test_accepts_model_default_rejects_unknown(prefixed_env):
+    """accepts_model 不能把无关模型也认领走。"""
+    assert prefixed_env.provider.accepts_model("totally-other-model") is False
+    assert prefixed_env.provider.accepts_model("") is False
+
+
+def test_base_accepts_model_handles_bare_and_prefixed():
+    """基类默认实现：id 精确匹配 + 剥前缀裸名，不认别名。"""
+    from buddy_proxy.providers.base import BaseProvider
+
+    class P(BaseProvider):
+        id = "p"
+        name = "P"
+
+        def models(self):
+            return [{"id": "p/m1"}, {"id": "bare2"}]
+
+        def ensure_auth(self):
+            pass
+
+        async def forward(self, body, protocol, original=None):  # pragma: no cover
+            raise NotImplementedError
+
+    p = P()
+    assert p.accepts_model("p/m1") is True
+    assert p.accepts_model("m1") is True
+    assert p.accepts_model("bare2") is True
+    assert p.accepts_model("nope") is False

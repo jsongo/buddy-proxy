@@ -45,7 +45,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder)
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 
 # one-time install: put buddy on your PATH so it works from anywhere
@@ -71,7 +71,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ./proxy.sh status         # show PID and listening address
 ./proxy.sh logs           # tail -F the log file
 ./proxy.sh ui             # ensure it's running, then open the admin UI
-./proxy.sh login codebuddy  # upstream login (also: trae / zcode / doubao / mimo)
+./proxy.sh login codebuddy  # upstream login (also: trae / zcode / doubao / mimo / qoder)
 
 # customize host / port / args
 ./proxy.sh start -p 9000 -H 0.0.0.0

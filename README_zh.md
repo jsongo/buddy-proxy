@@ -52,7 +52,7 @@ uv run python -m buddy_proxy --login --desensitize
 ```bash
 ./buddy start              # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # 登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo）
+./buddy login [provider]   # 登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder）
 ./buddy ui                 # 仅打开管理页（必要时先启动）
 
 # 一次性安装：把 buddy 放进 PATH，之后任意目录敲 buddy 即可
@@ -419,7 +419,7 @@ providers:
 --default-model MODEL     默认启用模型（如 zcode/glm-5.3）；请求未带 model 时使用，
                           首次启动写入设置文件，此后以 ~/.buddy-proxy/settings.json 为准
 --default-provider NAME   兜底通道：模型名未命中任何 provider 时转发到哪个通道
-                          （codebuddy/zcode/trae/doubao/mimo，默认 codebuddy）
+                          （codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy）
 --trae                    启用 Trae provider（解密 Trae IDE 登录态）
 --zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）

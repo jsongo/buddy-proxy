@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import time
@@ -244,7 +245,12 @@ class BenefitsManager:
             if now - cached[0] < ttl:
                 return cached[1]
         try:
-            data = await asyncio.to_thread(fn, *args)
+            if inspect.iscoroutinefunction(fn):
+                # 已经是异步实现（如 Qoder 的实时额度查询）：直接 await，
+                # 不再塞进线程池——那里拿到的是协程对象而不是结果。
+                data = await fn(*args)
+            else:
+                data = await asyncio.to_thread(fn, *args)
         except Exception as exc:
             data = {"error": str(exc)[:300]}
         self._cache[key] = (now, data)

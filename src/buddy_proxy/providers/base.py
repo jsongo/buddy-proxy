@@ -65,6 +65,28 @@ class BaseProvider(abc.ABC):
         """返回 provider 健康状态（合并进 /health）。"""
         return {"id": self.id, "name": self.name}
 
+    def accepts_model(self, model: str) -> bool:
+        """客户端传来的 ``model`` 是否属于本通道（用于自动路由）。
+
+        默认只认 ``models()`` 里的 id 精确匹配（含剥掉 ``provider/`` 前缀的裸名）。
+        目录里存在**别名**的通道（如 Qoder 同时接受显示名 ``Qwen3.8-Flash`` 与
+        内部 key ``qfmodel``）应覆写本方法，否则别名请求会漏配、掉进兜底通道并
+        被上游以「模型不存在」拒掉。
+        """
+        want = (model or "").strip()
+        if not want:
+            return False
+        prefix = f"{self.id}/"
+        for m in self.models():
+            mid = m.get("id")
+            if not isinstance(mid, str):
+                continue
+            if mid == want:
+                return True
+            if mid.startswith(prefix) and mid[len(prefix):] == want:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # 可选能力：打卡 / 额度（/ui 管理页消费；不支持时返回 None）
     # 全部为同步方法（上游是 urllib/httpx 同步调用），调用方用

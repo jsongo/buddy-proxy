@@ -20,6 +20,24 @@ from .observability import _instrument
 from .provider import _default_codebuddy
 
 
+def _resolved_model_id(provider: Any, model: str) -> str:
+    """把请求里的模型名归一成**停用/时段配置使用的键名**。
+
+    Qoder 之类的通道接受别名（显示名 ``Qwen3.8-Flash`` / 内部 key ``qfmodel``），
+    两者必须落到同一把键上，否则「停用了却还能用别名调通」。通道没提供
+    ``resolve_model`` 时原样返回（多数通道的 id 就是上游名）。
+    """
+    resolve = getattr(provider, "resolve_model", None)
+    if callable(resolve):
+        try:
+            resolved = resolve(model)
+            if isinstance(resolved, str) and resolved:
+                return resolved
+        except Exception:  # noqa: BLE001 - 归一失败不阻断转发
+            pass
+    return model
+
+
 def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
     """命中管理页停用或「不在可用时段」的 (provider, model) 组合时返回 403 拒绝转发。
 
@@ -124,18 +142,24 @@ async def forward_chat(
                 stream=bool(body.get("stream")),
             )
 
-    # 2) 自动匹配模型 id
+    # 2) 自动匹配模型 id（含剥前缀裸名与 provider 自有别名，见 accepts_model）
     if provider is None:
         for p in providers.values():
-            if any(m.get("id") == requested_model for m in p.models()):
-                provider = p
-                break
+            try:
+                if p.accepts_model(requested_model):
+                    provider = p
+                    break
+            except Exception:  # noqa: BLE001 - 单个通道判断失败不该阻断路由
+                continue
 
     if provider is not None:
         # 非默认 provider（Trae/豆包等）：由各自 forward 决定协议支持范围。
         # Trae 已支持 anthropic 协议（/v1/messages 客户端如 Claude Code 可直连）；
         # 豆包等仅 openai 协议透传（doubao2api 只支持 OpenAI chat completions）。
-        _reject_if_disabled(state, provider.id, requested_model)
+        # 停用/时段键按 provider 归一后的 id 生成，与转发链路口径一致
+        # （别名请求如「Qwen3.8-Flash」也要能被停用规则命中）。
+        gate_model = _resolved_model_id(provider, requested_model)
+        _reject_if_disabled(state, provider.id, gate_model)
         diagnostic("provider_route", provider=provider.id, model=requested_model, protocol=protocol)
         provider.ensure_auth()
         return await _instrument(
