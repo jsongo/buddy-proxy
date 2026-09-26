@@ -207,9 +207,9 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 
 ## 模型列表
 
-模型目录由 `src/buddy_proxy/web/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **39 个模型**，分属两个通道；`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
+模型目录由 `src/buddy_proxy/web/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **43 个模型**，分属两个通道；`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
 
-**CodeBuddy 通道**（12 个）——直接用模型名，无前缀：
+**CodeBuddy 通道**（16 个）——直接用模型名，无前缀：
 
 | id | name | credits |
 |---|---|---|
@@ -217,14 +217,23 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 | `default` | Default | x2.20 |
 | `glm-5.3` | GLM-5.3 | x0.79 |
 | `glm-5.3-flash` | GLM-5.3-Flash | x0.06 |
+| `glm-5.3-flashx` | GLM-5.3-FlashX | x0.14 |
+| `glm-5.2` | GLM-5.2（夜间折扣） | x0.79 |
+| `glm-5.1` | GLM-5.1 | x0.79 |
+| `glm-5v-turbo` | GLM-5v-Turbo（读图） | x0.71 |
 | `hy3` | Hy3（限时免费） | x0.00 |
 | `hy4-preview` | Hy4 preview | x0.29 |
 | `minimax-m3` | MiniMax-M3 | x0.25 |
 | `kimi-k3` | Kimi-K3 | x1.62 |
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
-| `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | — |
+| `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | x0.11 |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
+
+> 关于 `glm-*`：裸名会落到注册顺序里第一个声明它的通道（**zcode**，它提供
+> `glm-5.3` / `glm-5.3-flash`）。唯独 `glm-5.3-flashx` 在 zcode 上被拒为
+> `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限`，而 **CodeBuddy 能正常服务**
+> ——这一个请显式写 `codebuddy/glm-5.3-flashx`。
 
 **Trae PAT 通道**（27 个）——以 `traepat/<id>` 寻址。若某个 id 被多个通道声明，裸名会落到**注册顺序里第一个声明它的通道**（通常是个人 `trae` 通道，如果启用了），**不是** CodeBuddy——CodeBuddy 的 `models()` 返回空列表，只能经「未命中兜底」或显式 `codebuddy/` 前缀抵达。所以要用本通道时请始终带 `traepat/` 前缀。此处的 credits 是该通道自己的量表：
 
@@ -554,7 +563,7 @@ uv run python -m buddy_proxy --desensitize --mimo
 | `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
 | `qoder/kimi-k3` | `kmodel_latest` | |
 | `qoder/deepseek-v4-pro` | `dmodel` | |
-| `qoder/minimax-m3` | `mmodel` | |
+| `qoder/minimax-m2.7` | `mmodel` | 上游显示名即 MiniMax-M2.7 |
 | `qoder/auto` / `ultimate` / `performance` / `efficient` | 同名 | 平台路由档位 |
 
 旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K2.8-Preview、Cantus、Sonus、DeepSeek-Flash）

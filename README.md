@@ -88,9 +88,9 @@ The script:
 
 ## Models
 
-The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **39 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
+The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **43 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
 
-**CodeBuddy channel** (12) — bare model ids, no prefix:
+**CodeBuddy channel** (16) — bare model ids, no prefix:
 
 | id | name | credits |
 |---|---|---|
@@ -98,14 +98,20 @@ The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — 
 | `default` | Default | x2.20 |
 | `glm-5.3` | GLM-5.3 | x0.79 |
 | `glm-5.3-flash` | GLM-5.3-Flash | x0.06 |
+| `glm-5.3-flashx` | GLM-5.3-FlashX | x0.14 |
+| `glm-5.2` | GLM-5.2 (夜间折扣) | x0.79 |
+| `glm-5.1` | GLM-5.1 | x0.79 |
+| `glm-5v-turbo` | GLM-5v-Turbo (vision) | x0.71 |
 | `hy3` | Hy3 (限时免费) | x0.00 |
 | `hy4-preview` | Hy4 preview | x0.29 |
 | `minimax-m3` | MiniMax-M3 | x0.25 |
 | `kimi-k3` | Kimi-K3 | x1.62 |
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
-| `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | — |
+| `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | x0.11 |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
+
+> Note on `glm-*`: the bare name resolves to whichever channel claims it first in registration order (**zcode**, which serves `glm-5.3` / `glm-5.3-flash`). For `glm-5.3-flashx` the zcode subscription reports `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限` while **CodeBuddy serves it fine** — so use the explicit `codebuddy/glm-5.3-flashx` prefix for that one.
 
 **Trae PAT channel** (27) — addresses as `traepat/<id>`. A bare id that several channels declare resolves to whichever one claims it first in registration order (the personal `trae` channel, if enabled) — **not** to CodeBuddy, whose `models()` is empty and is therefore only reached by the no-match fallback or an explicit `codebuddy/` prefix. So always use the `traepat/` prefix when you mean this channel. Credit values here are the channel's own scale:
 
@@ -261,7 +267,7 @@ The client talks to Qoder's **COSY-signed** face (`/algo/api/v2/service/pro/sse/
 | `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
 | `qoder/kimi-k3` | `kmodel_latest` | |
 | `qoder/deepseek-v4-pro` | `dmodel` | |
-| `qoder/minimax-m3` | `mmodel` | |
+| `qoder/minimax-m2.7` | `mmodel` | 上游显示名即 MiniMax-M2.7 |
 | `qoder/auto` / `ultimate` / `performance` / `efficient` | same | platform-routed tiers |
 
 Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.

@@ -197,8 +197,8 @@ def _record_standard_pool_4031(profile: PatProfile, extra: Any) -> None:
             "label": label,
             "used": round(float(used), 2),
             "total": round(float(quota), 2),
-            "remaining": round(quota - used, 2),
-            "percent": round(used / quota * 100),
+            "remaining": round(float(quota) - float(used), 2),
+            "percent": round(float(used) / float(quota) * 100),
             "reset_ts": int(reset) if reset else None,
             "source": "4031",
         }
