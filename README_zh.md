@@ -17,7 +17,7 @@
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）与**小米 MiMo**（API key，或复用 MiMo 桌面登录态），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）与 **Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi），统一经 `/v1/models` 列出、按模型名路由
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
 ---
@@ -454,7 +454,7 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 
 ## Provider 接口一览
 
-四种 provider 统一注册到 `providers/` 包的抽象层，`forward_chat` 按模型名路由；
+各 provider 统一注册到 `providers/` 包的抽象层，`forward_chat` 按模型名路由；
 模型名未命中任何 provider 时转发到兜底通道（`--default-provider`，默认 codebuddy）。
 
 ### 1. CodeBuddy Provider（`codebuddy_provider/`）
@@ -531,6 +531,39 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 
 ```bash
 uv run python -m buddy_proxy --desensitize --mimo
+```
+
+### 6. Qoder Provider（`qoder/` 子包）
+
+阿里 **Qoder** IDE（国际版 qoder.com / 国内版 qoder.com.cn），以 `qoder/<id>` 寻址。
+
+| 接口 | 说明 |
+| --- | --- |
+| 聊天面 | `/algo/api/v2/service/pro/sse/agent_chat_generation`（官方 IDE 同一个端点，也是**唯一**提供 Qwen3.8 的入口） |
+| 签名 | **COSY 签名纯 Python 复刻**（无额外依赖、不打包官方 wasm）：`Authorization: Bearer COSY.<payload>.<sig>` + 必需的 `Cosy-User` 头，body 走 Qoder 私有字母表编码。国际版与国内版**都要签名**，区域只影响**取 token 的方式** |
+| 凭据 | `buddy login qoder`（设备码流程 PKCE S256，可选区域）；也支持 `QODER_TOKEN` 等环境变量 |
+| 额度 | 管理页额度面板：订阅额度 + 加油包（含套餐等级、到期时间） |
+| **Anthropic（`/v1/messages`）** | 上游无 Anthropic 原生端点，故**响应反向转换**为 Anthropic 事件（`message_start`/`content_block_delta`/`message_stop`，推理内容转 `thinking` 块），供 Claude Code 使用 |
+
+**模型名对外统一为「小写真实名」**（上游内部代号 `qmodel_38max` 这类名字看不出是什么模型）：
+
+| 对外 id | 上游 key | 备注 |
+| --- | --- | --- |
+| `qoder/qwen3.8-max` | `qmodel_38max` | 推理 + 读图 |
+| `qoder/qwen3.8-flash` | `qfmodel` | 推理 + 读图 |
+| `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
+| `qoder/kimi-k3` | `kmodel_latest` | |
+| `qoder/deepseek-v4-pro` | `dmodel` | |
+| `qoder/minimax-m3` | `mmodel` | |
+| `qoder/auto` / `ultimate` / `performance` / `efficient` | 同名 | 平台路由档位 |
+
+旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K2.8-Preview、Cantus、Sonus、DeepSeek-Flash）
+**不列在列表里但仍可点名调用**——列表少一点，反而好找要用的。三种写法都接受：
+对外 id、官方显示名（`Qwen3.8-Flash`）、上游内部 key（`qfmodel`）；内部 key 会在
+`/v1/models` 里以 `upstream_key` 回显，便于排障对照。
+
+```bash
+uv run python -m buddy_proxy --desensitize --qoder
 ```
 
 ## 免责声明

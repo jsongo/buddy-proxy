@@ -17,7 +17,7 @@
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Multi-account** — isolated session files for work / personal accounts
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) and **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login) and **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi); all listed by `/v1/models` and routed by model name
 - **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
 ---
@@ -240,6 +240,35 @@ MiMo is OpenAI-shaped upstream, so requests are forwarded as-is — **except** A
 The admin UI shows a quota panel with two rows: **weekly quota used** (the upstream reports *remaining* percent, which the UI converts to used) and **plan validity** (days elapsed out of the plan term). Note the two are different periods: the quota window is **7 days anchored at the subscription start**, while the plan term is usually **30 days**.
 
 > `--mimo` is only needed when you want this channel; without it the provider is not registered and `mimo/...` model names fall through to the fallback provider.
+
+## Qoder provider (optional)
+
+Alibaba's **Qoder** IDE (qoder.com global / qoder.com.cn CN), exposed under the `qoder/` prefix:
+
+```bash
+uv run python -m buddy_proxy --desensitize --qoder
+uv run buddy login qoder     # device flow (PKCE S256); picks the region interactively
+```
+
+The client talks to Qoder's **COSY-signed** face (`/algo/api/v2/service/pro/sse/agent_chat_generation`) — the same endpoint the official IDE uses, and the only one serving the Qwen3.8 models. Signing is reimplemented in pure Python (no extra dependencies, no vendored wasm): `Authorization: Bearer COSY.<payload>.<sig>` plus the mandatory `Cosy-User` header, with the request body in Qoder's custom-alphabet encoding. Global and CN both need signing — the region only changes *how the token is obtained*.
+
+**Model names are lowercase real names**, not the upstream codenames:
+
+| Model id | Upstream key | Notes |
+|---|---|---|
+| `qoder/qwen3.8-max` | `qmodel_38max` | reasoning + vision |
+| `qoder/qwen3.8-flash` | `qfmodel` | reasoning + vision |
+| `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
+| `qoder/kimi-k3` | `kmodel_latest` | |
+| `qoder/deepseek-v4-pro` | `dmodel` | |
+| `qoder/minimax-m3` | `mmodel` | |
+| `qoder/auto` / `ultimate` / `performance` / `efficient` | same | platform-routed tiers |
+
+Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.
+
+Anthropic clients (`/v1/messages`, e.g. Claude Code) are supported: the proxy converts the OpenAI-shaped upstream stream into `message_start` / `content_block_delta` / `message_stop` events, including `thinking` blocks from the model's reasoning output.
+
+> `--qoder` is only needed when you want this channel; without it the provider is not registered and `qoder/...` model names fall through to the fallback provider.
 
 ## Connect clients
 
