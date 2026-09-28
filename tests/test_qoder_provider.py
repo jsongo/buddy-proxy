@@ -568,6 +568,37 @@ def test_find_token_accepts_when_only_avatar_exists():
     assert _find_token({"user": {"avatar": "dt-avataruid-thumbnail"}}) == ""
 
 
+def test_find_token_shape_heuristic_rejects_url_like_values():
+    """形态兜底：带后缀/路径/空格的 ``dt-`` 串不是令牌。
+
+    键名黑名单挡不住全部（换成 ``userPic`` / ``gravatar`` 这类没进名单的
+    键名就漏了），所以按值形态再筛一道。
+    """
+    from buddy_proxy.qoder.credentials import _looks_like_token
+
+    assert _looks_like_token("dt-realtokenvalue12345") is True
+    assert _looks_like_token("dt-real-token") is True
+    # 文件后缀 / 路径 / 空白 → 是资源名或 URL
+    assert _looks_like_token("dt-abc.def.ghi.png") is False
+    assert _looks_like_token("dt-a/b/c/d/e/f/g/h") is False
+    assert _looks_like_token("dt-a b c d e f g h") is False
+    # 过短
+    assert _looks_like_token("dt-x") is False
+    assert _looks_like_token("dt-1") is False
+    # 前缀不对
+    assert _looks_like_token("at-x") is False
+
+
+def test_find_token_denylist_covers_common_avatar_keys():
+    """常见的头像字段名（含未在黑名单里的 `gravatar`/`userPic`）都不该被取。"""
+    long_avatar = "dt-avataruid-thumbnailxyz123456"  # 够长，只能靠键名挡
+    for key in ("avatar", "avatarUrl", "thumbnail", "userPic", "gravatar", "coverImage"):
+        assert _find_token({key: long_avatar}) == "", f"{key} 不该被当成令牌"
+        assert _find_token({key: long_avatar, "tok": "dt-realtokenvalue12345"}) == (
+            "dt-realtokenvalue12345"
+        ), f"{key} 在场时仍应找到真令牌"
+
+
 def test_persist_never_overwrites_good_token_with_empty(monkeypatch, tmp_path):
     """空 token / 空 refresh_token 不能覆盖已有的好值。
 

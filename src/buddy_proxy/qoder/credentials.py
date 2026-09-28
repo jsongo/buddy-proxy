@@ -214,15 +214,49 @@ def _from_desktop(region: Region) -> Credential | None:
 #: 明显不是访问令牌的键：头像/缩略图一类的 URL 也可能以 ``dt-`` 开头
 #: （桌面端把头像存在 ``dt-avataruid-thumbnail`` 这类资源名上），按值前缀
 #: 盲扫会把它们当成 token 写进状态文件，表现为「登录了但一调就 401」。
-_TOKEN_KEY_DENYLIST = ("avatar", "thumbnail", "icon", "image", "photo", "logo", "url")
+_TOKEN_KEY_DENYLIST = (
+    "avatar", "thumbnail", "icon", "image", "photo", "logo", "url",
+    "pic", "gravatar", "head", "face", "banner", "cover",
+)
+
+#: device token ``dt-`` 之后的**最少**字符数。真实令牌是不透明长串；比这短的
+#: （如 ``dt-1``、``dt-x``）几乎一定是别的东西。取 8 是**保守**值——宁可放进
+#: 一个可疑值让后续 401 暴露问题，也不要卡掉真令牌（`dt-real-token` 就是 10）。
+_MIN_TOKEN_BODY = 8
+
+
+def _looks_like_token(value: str) -> bool:
+    """粗判 ``dt-`` 开头的串是否**像**一个访问令牌。
+
+    键名黑名单挡不住全部——换成 ``userPic`` / ``gravatar`` 这类没进名单的
+    键名就漏了。所以再按值的形态筛一道：令牌是单段不透明编码，而头像/资源名
+    要么带文件后缀（``-thumbnail.png``）、要么带路径或空格。
+
+    注意 ``-`` **不算**否定信号：``dt-avataruid-thumbnail`` 和
+    ``dt-real-token`` 都含 ``-``，只能靠键名黑名单区分——所以真正的防线是
+    黑名单，这里只兜「明显是路径/文件名/过短」这几种。
+    """
+    if not value.startswith("dt-"):
+        return False
+    body = value[3:]
+    if len(body) < _MIN_TOKEN_BODY:
+        return False
+    # 文件后缀/路径或空白 → 是 URL/资源名，不是令牌
+    if "." in body or "/" in body or any(c.isspace() for c in body):
+        return False
+    return True
 
 
 def _find_token(node: object, _depth: int = 0) -> str:
-    """在嵌套结构里找第一个 ``dt-`` 开头的字符串（跳过头像/图片类字段）。"""
+    """在嵌套结构里找第一个像访问令牌的 ``dt-`` 字符串。
+
+    两道筛：键名黑名单（跳过头像/图片类字段）+ 形态判断
+    （:func:`_looks_like_token`）。
+    """
     if _depth > 6:
         return ""
     if isinstance(node, str):
-        return node if node.startswith("dt-") else ""
+        return node if _looks_like_token(node) else ""
     if isinstance(node, dict):
         for key, value in node.items():
             name = str(key).lower()
