@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -116,10 +117,21 @@ def save_state(data: dict) -> Path:
     """写状态文件（0600，含 token）。"""
     path = auth_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    # 先建 tmp 再写内容：``write_text`` 会以默认 0644 创建文件，内容（token）
+    # 在 ``chmod`` 之前就已落盘，同机其它用户在那个窗口里读得到。
+    # ``os.open`` 直接带 0600 建文件，窗口就不存在了。
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        tmp.replace(path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
     return path
 
 
@@ -199,14 +211,23 @@ def _from_desktop(region: Region) -> Credential | None:
     return None
 
 
+#: 明显不是访问令牌的键：头像/缩略图一类的 URL 也可能以 ``dt-`` 开头
+#: （桌面端把头像存在 ``dt-avataruid-thumbnail`` 这类资源名上），按值前缀
+#: 盲扫会把它们当成 token 写进状态文件，表现为「登录了但一调就 401」。
+_TOKEN_KEY_DENYLIST = ("avatar", "thumbnail", "icon", "image", "photo", "logo", "url")
+
+
 def _find_token(node: object, _depth: int = 0) -> str:
-    """在嵌套结构里找第一个以 ``dt-`` 开头的字符串。"""
+    """在嵌套结构里找第一个 ``dt-`` 开头的字符串（跳过头像/图片类字段）。"""
     if _depth > 6:
         return ""
     if isinstance(node, str):
         return node if node.startswith("dt-") else ""
     if isinstance(node, dict):
-        for value in node.values():
+        for key, value in node.items():
+            name = str(key).lower()
+            if any(bad in name for bad in _TOKEN_KEY_DENYLIST):
+                continue
             found = _find_token(value, _depth + 1)
             if found:
                 return found
@@ -292,6 +313,13 @@ def resolve_credential(region: Region | None = None) -> Credential:
     )
 
 
+#: 单飞锁：并发请求同时发现 token 过期时，只让第一个去刷新。
+#: 上游的 refresh 是**一次性**的——第二个请求拿着同一个 refresh_token 再打过去
+#: 会被判重放并可能把整条链作废，表现就是「偶发地突然失效」。锁只护住刷新
+#: 这一段（网络往返），不覆盖整个请求生命周期。
+_refresh_lock = threading.Lock()
+
+
 async def ensure_credential(region: Region | None = None) -> Credential:
     """取凭据，临近过期时自动刷新并回写状态文件。"""
     cred = resolve_credential(region)
@@ -306,20 +334,30 @@ async def ensure_credential(region: Region | None = None) -> Credential:
 
 
 async def refresh_credential(cred: Credential, region: Region | None = None) -> Credential:
-    """用 refresh token 换新 device token，并回写状态文件。"""
-    reg = with_cached_endpoints(region or resolve_region(cred.region))
-    if not cred.refresh_token:
-        raise AuthError("缺少 refresh_token，无法刷新；请重新 `buddy login qoder`")
-    payload = {"refresh_token": cred.refresh_token}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                reg.device_refresh_url(),
-                json=payload,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
-            )
-    except httpx.HTTPError as exc:
-        raise AuthError(f"刷新请求失败: {exc}") from exc
+    """用 refresh token 换新 device token，并回写状态文件。
+
+    并发场景下**先抢锁再重读状态**：等锁的请求进来时，前面那个多半已经刷新
+    完并落盘了，此时直接复用新 token 返回，不再拿旧 refresh_token 打第二次
+    （重放会被上游判重）。锁是同步锁——刷新是 IO 等待，持锁期间不跑事件循环，
+    ``await`` 只发生在锁外。
+    """
+    with _refresh_lock:
+        fresh = _reload_if_rotated(cred)
+        if fresh is not None:
+            return fresh
+        reg = with_cached_endpoints(region or resolve_region(cred.region))
+        if not cred.refresh_token:
+            raise AuthError("缺少 refresh_token，无法刷新；请重新 `buddy login qoder`")
+        payload = {"refresh_token": cred.refresh_token}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    reg.device_refresh_url(),
+                    json=payload,
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                )
+        except httpx.HTTPError as exc:
+            raise AuthError(f"刷新请求失败: {exc}") from exc
     if resp.status_code != 200:
         raise AuthError(f"刷新失败 HTTP {resp.status_code}: {resp.text[:200]}")
     data = _parse_token_response(resp.json(), cred)
@@ -328,6 +366,33 @@ async def refresh_credential(cred: Credential, region: Region | None = None) -> 
     _persist(data)
     log.info("qoder token 已刷新 (%s)", data.describe())
     return data
+
+
+def _reload_if_rotated(cred: Credential) -> Credential | None:
+    """锁内检查：状态文件里的 token 已被别的请求换过就复用它。
+
+    判据是 token 本身不同且新 token 未过期——只有真的换过才走这条捷径，
+    否则（等锁期间没人动过）返回 ``None``，调用方照常发刷新请求。
+    """
+    state = load_state()
+    token = str(state.get("token") or "")
+    if not token or token == cred.token:
+        return None
+    fresh = Credential(
+        token=token,
+        uid=str(state.get("uid") or cred.uid),
+        machine_id=str(state.get("machine_id") or cred.machine_id),
+        refresh_token=str(state.get("refresh_token") or cred.refresh_token),
+        expires_at_ms=int(state.get("expires_at_ms") or 0),
+        name=str(state.get("name") or ""),
+        email=str(state.get("email") or ""),
+        region=cred.region,
+        source="state",
+    )
+    if fresh.is_expired():
+        return None
+    log.debug("qoder token 已由并发请求刷新，复用新值 (%s)", fresh.describe())
+    return fresh
 
 
 def _parse_token_response(body: dict, base: Credential | None = None) -> Credential:
@@ -373,14 +438,17 @@ def _to_ms(value: object) -> int:
 
 
 def _persist(cred: Credential) -> None:
-    """把凭据写进状态文件（合并已有字段，避免丢账号信息）。"""
+    """把凭据写进状态文件（合并已有字段，避免丢账号信息）。
+
+    ``token`` / ``refresh_token`` 只在**非空**时覆盖：刷新失败、解析残缺或
+    device flow 中断时拿到的空串若照写，会把原来那份能用的凭据**抹掉**
+    ——用户看到的是「突然要重新登录」。空值一律保留旧值。
+    """
     state = load_state()
     state.update(
         {
-            "token": cred.token,
             "uid": cred.uid,
             "machine_id": cred.machine_id,
-            "refresh_token": cred.refresh_token,
             "expires_at_ms": cred.expires_at_ms,
             "name": cred.name,
             "email": cred.email,
@@ -389,6 +457,10 @@ def _persist(cred: Credential) -> None:
             "updated_at_ms": int(time.time() * 1000),
         }
     )
+    if cred.token:
+        state["token"] = cred.token
+    if cred.refresh_token:
+        state["refresh_token"] = cred.refresh_token
     save_state(state)
 
 
