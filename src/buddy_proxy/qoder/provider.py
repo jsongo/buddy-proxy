@@ -30,7 +30,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.providers.base import BaseProvider
 
-from .catalog import Catalog, is_hidden, to_openai_model
+from .catalog import Catalog, is_hidden, public_model_id, to_openai_model
+
+#: 同时属于 CodeBuddy 静态表、且应优先归 CodeBuddy 的名字。
+#: 目前只有档位模型 ``auto``（CodeBuddy 的默认模型）。这些名字在本通道的精确
+#: 轮里让开，只在显式 ``qoder/`` 前缀下才由本通道服务。
+CODEBUDDY_OWNED_IDS: frozenset[str] = frozenset({"auto"})
 from .config import COSY_VERSION, Region, resolve_region, with_cached_endpoints
 from .cosy import sign
 from .credentials import AuthError, Credential, ensure_credential
@@ -54,6 +59,10 @@ _PASSTHROUGH_FIELDS = (
     "seed",
     "user",
     "parallel_tool_calls",
+    # 代理自身会写入 messages，但没有谁规定 system 只能在 messages 里。
+    # 上游有多个取 system 文本的位置，这里一并透传，避免出现「客户端设了
+    # 系统提示词、上游却看不到」的那种「根本没生效」。
+    "system",
 )
 
 #: 上游首字节超时（边缘「收下不回应」时快速失败）。
@@ -129,19 +138,41 @@ class QoderProvider(BaseProvider):
         （``Qwen3.8-Flash``）——只比 id 会漏配，请求掉进兜底通道后被上游拒成
         「模型不存在」。
 
-        ``aliases=False``（路由第一轮）只做 id 精确匹配，**不认别名**：catalog
-        的别名表里有 ``GLM-5.3`` → ``gmodel``，而 ``glm-5.3`` 同时是 zcode 的
-        模型名。若第一轮就认别名，注册更靠前的本通道会把 zcode 的模型抢走——
-        虽然 qoder 恰好也能服务它，但路由归属被静默改变，很难排查。
+        ``aliases=False``（路由第一轮）**只认本通道自己发布的 id**（裸名形态，
+        即 :data:`catalog.MODEL_IDS` 的值）：``qwen3.8-flash`` / ``glm-5.3`` 等。
+
+        为什么第一轮不能直接调基类 ``accepts_model``：基类把「剥前缀裸名与请求
+        名相等」也算精确命中，而 Qoder 的裸名里有 ``auto``、``glm-5.3``、
+        ``glm-5.3-flash`` —— 前一个是 CodeBuddy 静态表的默认模型，后两个是 zcode
+        按 id 发布的模型名。它们对 Qoder 而言**只是别名**（上游叫 ``gmodel`` /
+        ``gfmodel``），让它们在精确轮命中就会把别人的模型抢走：实测 ``auto`` 被
+        路由到 qoder 并真的走通了（CodeBuddy 的默认模型静默改道）。所以精确轮
+        只比对**本通道 id 集合**，其余一律留给别名轮兜底。
         """
         want = (model or "").strip()
         if not want:
             return False
-        if super().accepts_model(want):
+        # ``auto`` 归 CodeBuddy：**两个轮次都让开**。别名轮的
+        # ``_is_codebuddy_model`` 守卫是精确大小写的（它必须如此，免得
+        # ``Qwen3.8-Max`` 这类官方显示名被误挡），所以 ``Auto`` / ``AUTO``
+        # 漏得过去；而 ``auto`` 无论如何都该是 CodeBuddy 的默认模型，
+        # 交给别名轮去认领没有正当理由。显式 ``qoder/auto`` 走前缀路由，
+        # 不经过本方法。
+        if want.lower() in CODEBUDDY_OWNED_IDS:
+            return False
+        entries = self._catalog._models or Catalog.fallback()
+        # 隐藏模型（旧模型）也放进精确集合：它们只是不出现在列表里，点名仍可调。
+        # 但档位模型 ``auto`` 是**例外**——它同时是 CodeBuddy 静态表的默认模型，
+        # 归 CodeBuddy。``_is_codebuddy_model`` 那道守卫按设计只在**别名轮**生效，
+        # 挡不住精确轮；这里必须自己让开，否则 ``auto`` 会被静默改道到本通道
+        # （实测确实发生了：provider_route 显示 qoder 服务了 auto）。
+        # 点名 ``qoder/auto`` 仍走前缀路由，不受影响。
+        exact_ids = {(public_model_id(e) or "").strip() for e in entries}
+        exact_ids.discard("")
+        if want in exact_ids:
             return True
         if not aliases:
             return False
-        entries = self._catalog._models or Catalog.fallback()
         # ``resolve_key`` 对「已经是上游 key」与「认不出」两种输入都原样返回，
         # 单看 ``key == want`` 无法区分——只能直接查目录：归一结果确实存在，
         # 才认领；否则（真正的未知模型）放行给别人。

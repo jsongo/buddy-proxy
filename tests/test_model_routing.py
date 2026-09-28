@@ -385,3 +385,93 @@ def test_codebuddy_guard_applies_only_to_alias_round():
     src = inspect.getsource(fwd.forward_chat)
     # 守卫必须在 allow_aliases 为真的分支里
     assert "if allow_aliases and _is_codebuddy_model(requested_model):" in src
+
+
+# --- 真实通道：Qoder 不得在精确轮抢走属于别人的名字 -------------------------
+#
+# 上面几组用的都是**替身**通道（AliasOnly / Exact / PrefixedAliasProvider），
+# 正好漏掉了真正出问题的那条路径：真实 QoderProvider 的 ``models()`` 里带着
+# ``qoder/auto`` / ``qoder/glm-5.3`` 这类 id，基类 ``accepts_model`` 会把它们
+# 剥前缀后当成"精确匹配"，于是 **精确轮** 就命中——而别名轮的 CodeBuddy 守卫
+# 根本管不到精确轮。这些测试用真实 provider 把这条路径锁死。
+
+
+def _real_qoder():
+    from buddy_proxy.qoder.config import REGIONS
+    from buddy_proxy.qoder.provider import QoderProvider
+
+    return QoderProvider(next(iter(REGIONS.values())))
+
+
+def test_real_qoder_yields_auto_to_codebuddy():
+    """``auto`` 必须在**两个轮次**都让开，归 CodeBuddy。
+
+    回归（2026-09-28 实测）：Qoder 的档位模型 id 就是 ``auto``，基类
+    ``accepts_model`` 在精确轮就认领了它，请求被静默改道到 qoder
+    （``provider_route: {"provider": "qoder", "model": "Auto"}`` 是实测日志）。
+    ``auto`` 是 CodeBuddy 的默认模型名，没带 model 的请求会被补成它——改道会
+    让一整类请求跑到别的通道、按别的通道计费。
+    """
+    q = _real_qoder()
+    for name in ("auto", "Auto", "AUTO"):
+        assert q.accepts_model(name, aliases=False) is False, f"{name} 不该在精确轮被 qoder 认领"
+        assert q.accepts_model(name, aliases=True) is False, f"{name} 不该在别名轮被 qoder 认领"
+
+
+def test_real_qoder_and_zcode_overlap_is_resolved_by_registration_order():
+    """``glm-5.3`` 两边都真的把它当自己的 id —— 归属由注册顺序决定。
+
+    这条**不是**拿来断言「谁该赢」的（两边都名正言顺：zcode 的模型名就叫
+    ``glm-5.3``，qoder 的 public id 也是 ``glm-5.3``，上游叫 ``gmodel``）。
+    它锁的是**这个重叠是已知且稳定的**：zcode 注册在前（231 < 259）所以赢。
+    哪天注册顺序变了、或有人「顺手」改掉这个顺序，这条会响。
+
+    真正必须归 CodeBuddy 的只有 ``auto``（见下一条）——那是**语义**问题，
+    不是顺序问题。
+    """
+    q = _real_qoder()
+    for name in ("glm-5.3", "glm-5.3-flash"):
+        assert q.accepts_model(name, aliases=False) is True, (
+            f"{name} 是 qoder 目录里真实存在的 public id，精确轮认领是对的"
+        )
+
+
+def test_real_qoder_still_exactly_claims_its_own_ids():
+    """修完不能过度收紧：qoder 自己的 id 仍要在精确轮被认领。"""
+    q = _real_qoder()
+    for name in ("qwen3.8-flash", "qwen3.8-max", "qwen3.7-max", "kimi-k3", "minimax-m2.7"):
+        assert q.accepts_model(name, aliases=False) is True, f"{name} 应被 qoder 精确认领"
+
+
+def test_real_qoder_still_claims_official_display_names_via_alias():
+    """官方显示名仍走别名轮兜底（按官方文档写模型名是正常用法）。"""
+    q = _real_qoder()
+    for name in ("Qwen3.8-Max", "Kimi-K3"):
+        assert q.accepts_model(name, aliases=False) is False
+        assert q.accepts_model(name, aliases=True) is True
+
+
+def test_real_qoder_glm_ids_route_to_zcode_not_qoder(tmp_path, monkeypatch):
+    """整链验证：真实 qoder + zcode 并存时，``glm-5.3`` 归 zcode。"""
+    from buddy_proxy.codebuddy_provider.forward import _is_codebuddy_model as fwd_is_cb
+    from buddy_proxy.providers.zcode import ZcodeProvider
+
+    z, q = ZcodeProvider(), _real_qoder()
+    state = _make_state({z.id: z, q.id: q}, tmp_path)
+    monkeypatch.setattr(st, "proxy_state", state)
+
+    def _route(model):
+        """复刻 forward_chat 的两轮匹配（不含前缀路由）。"""
+        for allow_alias in (False, True):
+            if allow_alias and fwd_is_cb(model):
+                return "codebuddy"
+            for p in state.providers.values():
+                if p.accepts_model(model, aliases=allow_alias):
+                    return p.id
+        return "codebuddy"
+
+    assert _route("glm-5.3") == "zcode"
+    assert _route("glm-5.3-flash") == "zcode"
+    assert _route("auto") == "codebuddy"
+    assert _route("Auto") == "codebuddy"
+    assert _route("qwen3.8-flash") == "qoder"
