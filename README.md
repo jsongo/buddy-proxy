@@ -17,7 +17,7 @@
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Multi-account** — isolated session files for work / personal accounts
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) and **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login) and **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi); all listed by `/v1/models` and routed by model name
 - **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
 ---
@@ -45,7 +45,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder)
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 
 # one-time install: put buddy on your PATH so it works from anywhere
@@ -71,7 +71,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ./proxy.sh status         # show PID and listening address
 ./proxy.sh logs           # tail -F the log file
 ./proxy.sh ui             # ensure it's running, then open the admin UI
-./proxy.sh login codebuddy  # upstream login (also: trae / zcode / doubao / mimo)
+./proxy.sh login codebuddy  # upstream login (also: trae / zcode / doubao / mimo / qoder)
 
 # customize host / port / args
 ./proxy.sh start -p 9000 -H 0.0.0.0
@@ -88,9 +88,9 @@ The script:
 
 ## Models
 
-The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **39 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
+The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **43 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
 
-**CodeBuddy channel** (12) — bare model ids, no prefix:
+**CodeBuddy channel** (16) — bare model ids, no prefix:
 
 | id | name | credits |
 |---|---|---|
@@ -98,14 +98,20 @@ The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — 
 | `default` | Default | x2.20 |
 | `glm-5.3` | GLM-5.3 | x0.79 |
 | `glm-5.3-flash` | GLM-5.3-Flash | x0.06 |
+| `glm-5.3-flashx` | GLM-5.3-FlashX | x0.14 |
+| `glm-5.2` | GLM-5.2 (夜间折扣) | x0.79 |
+| `glm-5.1` | GLM-5.1 | x0.79 |
+| `glm-5v-turbo` | GLM-5v-Turbo (vision) | x0.71 |
 | `hy3` | Hy3 (限时免费) | x0.00 |
 | `hy4-preview` | Hy4 preview | x0.29 |
 | `minimax-m3` | MiniMax-M3 | x0.25 |
 | `kimi-k3` | Kimi-K3 | x1.62 |
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
-| `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | — |
+| `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | x0.11 |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
+
+> Note on `glm-*`: the bare name resolves to whichever channel claims it first in registration order (**zcode**, which serves `glm-5.3` / `glm-5.3-flash`). For `glm-5.3-flashx` the zcode subscription reports `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限` while **CodeBuddy serves it fine** — so use the explicit `codebuddy/glm-5.3-flashx` prefix for that one.
 
 **Trae PAT channel** (27) — addresses as `traepat/<id>`. A bare id that several channels declare resolves to whichever one claims it first in registration order (the personal `trae` channel, if enabled) — **not** to CodeBuddy, whose `models()` is empty and is therefore only reached by the no-match fallback or an explicit `codebuddy/` prefix. So always use the `traepat/` prefix when you mean this channel. Credit values here are the channel's own scale:
 
@@ -240,6 +246,35 @@ MiMo is OpenAI-shaped upstream, so requests are forwarded as-is — **except** A
 The admin UI shows a quota panel with two rows: **weekly quota used** (the upstream reports *remaining* percent, which the UI converts to used) and **plan validity** (days elapsed out of the plan term). Note the two are different periods: the quota window is **7 days anchored at the subscription start**, while the plan term is usually **30 days**.
 
 > `--mimo` is only needed when you want this channel; without it the provider is not registered and `mimo/...` model names fall through to the fallback provider.
+
+## Qoder provider (optional)
+
+Alibaba's **Qoder** IDE (qoder.com global / qoder.com.cn CN), exposed under the `qoder/` prefix:
+
+```bash
+uv run python -m buddy_proxy --desensitize --qoder
+uv run buddy login qoder     # device flow (PKCE S256); picks the region interactively
+```
+
+The client talks to Qoder's **COSY-signed** face (`/algo/api/v2/service/pro/sse/agent_chat_generation`) — the same endpoint the official IDE uses, and the only one serving the Qwen3.8 models. Signing is reimplemented in pure Python (no extra dependencies, no vendored wasm): `Authorization: Bearer COSY.<payload>.<sig>` plus the mandatory `Cosy-User` header, with the request body in Qoder's custom-alphabet encoding. Global and CN both need signing — the region only changes *how the token is obtained*.
+
+**Model names are lowercase real names**, not the upstream codenames:
+
+| Model id | Upstream key | Notes |
+|---|---|---|
+| `qoder/qwen3.8-max` | `qmodel_38max` | reasoning + vision |
+| `qoder/qwen3.8-flash` | `qfmodel` | reasoning + vision |
+| `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
+| `qoder/kimi-k3` | `kmodel_latest` | |
+| `qoder/deepseek-v4-pro` | `dmodel` | |
+| `qoder/minimax-m2.7` | `mmodel` | 上游显示名即 MiniMax-M2.7 |
+| `qoder/auto` / `ultimate` / `performance` / `efficient` | same | platform-routed tiers |
+
+Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.
+
+Anthropic clients (`/v1/messages`, e.g. Claude Code) are supported: the proxy converts the OpenAI-shaped upstream stream into `message_start` / `content_block_delta` / `message_stop` events, including `thinking` blocks from the model's reasoning output.
+
+> `--qoder` is only needed when you want this channel; without it the provider is not registered and `qoder/...` model names fall through to the fallback provider.
 
 ## Connect clients
 

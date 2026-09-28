@@ -191,9 +191,13 @@ def main():
     parser.add_argument("--mimo", action="store_true", default=os.getenv("MIMO_ENABLED", "") == "1",
                         help="启用 MiMo provider（小米 MiMo 桌面端；"
                              "凭据取 MIMO_API_KEY 或复用桌面端小米账号登录态）")
+    parser.add_argument("--qoder", action="store_true", default=os.getenv("QODER_ENABLED", "") == "1",
+                        help="启用 Qoder provider（Qwen3.8-Max/Flash、DeepSeek、GLM、Kimi 等；"
+                             "凭据跑 `buddy login qoder` 或设 QODER_TOKEN，"
+                             "用 QODER_REGION=cn|global 切区域）")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
-                             "（codebuddy/zcode/trae/doubao/mimo，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
+                             "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
     args = parser.parse_args()
     args.log_file = args.log_file.expanduser()
     # provider 别名归一：workbuddy 是 codebuddy 的旧称，用户配置/命令行都可能敲
@@ -243,6 +247,20 @@ def main():
         print("[MiMo] Enabled (Xiaomi MiMo Desktop)")
     else:
         print("[MiMo] Disabled (pass --mimo or MIMO_ENABLED=1 to enable)")
+
+    if args.qoder:
+        from buddy_proxy.qoder.provider import QoderProvider
+
+        qoder = QoderProvider()
+        try:
+            qoder.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("qoder provider 认证未就绪: %s", exc.detail)
+        providers[qoder.id] = qoder
+        logger.info("Qoder provider enabled (%s)", qoder.health().get("base_url"))
+        print(f"[Qoder] Enabled ({qoder.region().label})")
+    else:
+        print("[Qoder] Disabled (pass --qoder or QODER_ENABLED=1 to enable)")
 
     if args.doubao:
         doubao = DoubaoProvider()

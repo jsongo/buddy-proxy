@@ -955,3 +955,5 @@ def test_reject_if_disabled_uses_model_key_alias(env, monkeypatch):
     with pytest.raises(HTTPException) as caught:
         _reject_if_disabled(state, "workbuddy", "other-model")
     assert caught.value.status_code == 403
+
+

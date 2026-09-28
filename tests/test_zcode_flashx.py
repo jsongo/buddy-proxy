@@ -9,10 +9,14 @@
 同时锁死两条实测结论：
 1. 该端点 model 名**大小写不敏感**（四种写法都解析到 GLM-5.3-FlashX，乱名才
    报 1211 模型不存在）——故大小写不能作为校验手段，只能靠断言锁住字面量。
-2. ``codebuddy`` / ``traepat`` 通道**没有**这个模型：前者 11102
-   ``service info not found``，后者不在 PAT 目录（目录由 models_config.json
-   的 provider=="traepat" 条目生成）。因此不要把它写进 models_config.json——
-   那会把模型标成 codebuddy 通道，与实测矛盾。
+2. ``traepat`` 通道**没有**这个模型（不在 PAT 目录，目录由 models_config.json
+   的 provider=="traepat" 条目生成）。
+
+关于 ``codebuddy`` 通道：**2026-09-27 复查改判**。当日实测 ``codebuddy`` 通道对该
+模型返回 11102 ``service info not found``，故只登记在 zcode；现已开放——实测
+``codebuddy/glm-5.3-flashx`` 连续多次 200 且返回真实 ``usage``，而 zcode 通道
+反被拒为 1311「套餐暂未开放」。所以现在**应该**把它写进 models_config.json
+（无 provider 字段 → 归 CodeBuddy 静态表）。
 """
 from __future__ import annotations
 
@@ -66,22 +70,26 @@ def test_canonical_rewrite_applied_on_anthropic_passthrough():
     assert MODEL_NAME_CANONICAL.get("glm-5.3-flashx", "glm-5.3-flashx") == "GLM-5.3-FlashX"
 
 
-def test_codebuddy_channel_does_not_claim_flashx():
-    """models_config.json 不得把 flashx 标进 codebuddy 静态表。
+def test_codebuddy_channel_now_claims_flashx():
+    """``glm-5.3-flashx`` 已进入 CodeBuddy 静态表（2026-09-27 复查改判）。
 
-    实测 codebuddy 通道对该模型返回 11102 service info not found；若写进
-    静态表（无 provider 字段 → 默认 codebuddy），/v1/models 会对外宣称
-    「codebuddy 通道可用」，客户端按目录选择后必炸。
+    原判定（2026-09-19）：codebuddy 通道对该模型返回 11102
+    ``service info not found``，故只登记在 zcode、不写进 models_config.json。
+    **该结论已过期**——CodeBuddy 侧现已开放，实测 ``codebuddy/glm-5.3-flashx``
+    连续多次 200 并返回真实 ``usage``；反倒是 zcode 通道被拒为 1311
+    「当前订阅套餐暂未开放GLM-5.3-FlashX权限」。
+
+    因此本条改为锁「静态表里确实登记了它」：漏登记会让客户端在目录里看不到
+    这个**确实可用**的模型。
     """
     from buddy_proxy.web import model_list
 
     config_file = model_list.pathlib.Path(model_list.__file__).parent / "models_config.json"
     data = json.loads(config_file.read_text("utf-8"))
-    for m in data.get("models", []):
-        assert m.get("id") != "glm-5.3-flashx", (
-            "flashx 不应写进 models_config.json：它只在 zcode 通道注册，"
-            "写进静态表会被标成 codebuddy 通道（实测该通道无此模型）"
-        )
+    entries = [m for m in data.get("models", []) if m.get("id") == "glm-5.3-flashx"]
+    assert entries, "flashx 应登记进 models_config.json（CodeBuddy 通道实测可用）"
+    # 无 ``provider`` 字段 → 归 CodeBuddy 静态表
+    assert any(m.get("provider") is None for m in entries)
 
 
 def test_normalize_model_format_keeps_flashx_fields():

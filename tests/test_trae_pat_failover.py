@@ -786,6 +786,40 @@ def test_quota_items_distinguish_daily_model_families(monkeypatch):
     assert len(labels) == len(set(labels))
 
 
+def test_quota_items_missing_usage_is_unknown_not_zero(monkeypatch):
+    """只回了包容量、没回用量时，不能按 0 算。
+
+    按 0 算会让 /ui 渲染成「剩 300 / 300 · 已用 0%」——把未知说成满血。
+    正确口径：percent 留 None（UI 显示「已用未知」），remaining 仍给包容量。
+    """
+    _configure_two(monkeypatch)
+    profile = pat.ensure_pat_config()[0]
+    data = {"user_entitlement_pack_list": [
+        {"entitlement_base_info": {"entitlement_id": "free_weekly_x",
+                                   "quota": {"basic_usage_limit": 300}}},
+    ]}
+    (item,) = pat._quota_items(data, profile, True)
+    assert item["total"] == 300
+    assert item["remaining"] == 300
+    assert item["used"] is None
+    assert item["percent"] is None
+
+
+def test_quota_items_zero_usage_is_a_real_zero(monkeypatch):
+    """真回 0 时仍要显示 0%（别把「确实没花」也吞成未知）。"""
+    _configure_two(monkeypatch)
+    profile = pat.ensure_pat_config()[0]
+    data = {"user_entitlement_pack_list": [
+        {"entitlement_base_info": {"entitlement_id": "free_weekly_x",
+                                   "quota": {"basic_usage_limit": 300}},
+         "usage": {"basic_usage_amount": 0}},
+    ]}
+    (item,) = pat._quota_items(data, profile, True)
+    assert item["used"] == 0
+    assert item["remaining"] == 300
+    assert item["percent"] == 0
+
+
 def test_model_function_override_used_in_payload(monkeypatch):
     """目录里带 function 覆盖的模型，payload 的 function 字段用覆盖值。"""
     _configure_two(monkeypatch)

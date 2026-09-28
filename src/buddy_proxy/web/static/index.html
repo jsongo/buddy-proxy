@@ -778,7 +778,11 @@ function quotaItemHtml(it) {
   const color = pct >= 85 ? 'var(--err)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)';
   let rem = it.remaining;
   if (rem == null && it.used != null && it.total != null) rem = it.total - it.used;
-  const hasNums = rem != null || it.total != null;
+  // 只有「分子分母都拿到」才算有数：只见 total 时（例如额度网关只回包容量、
+  // 还没回用量）下面的 ``percent`` 实际是 0，报出来就是「剩 300 / 300 · 已用
+  // 0%」这种把未知当零的假象。有 rem 走正常文案，没 rem 就说「已用未知」。
+  const hasNums = rem != null;
+  const hasVolume = hasNums && it.total != null;
   const fmtReset = it.reset_ts ? new Date(it.reset_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'}) : '';
   // 已过重置时刻的 standard 池：后端不再给用量（那份快照是撞码时采集的，必然接近
   // 满额，池重置后不会有新数据来覆盖），这里明确说明「待下一次撞码确认」，
@@ -791,7 +795,9 @@ function quotaItemHtml(it) {
   const noticeText = (!hasNums && !pending && typeof it.remaining === 'string') ? it.remaining : '';
   const notice = it.unreachable === true || it.query_failed === true;
   const nums = hasNums
-    ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
+    ? (hasVolume
+        ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
+        : `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> · 已用未知</span>`)
     : (pending
         ? `<span class="mono muted" title="standard 池无主动查询接口，用量仅在账号撞 4031 时被动采集；重置后成功请求不带账单事件，故用量待下次撞码确认">已于 ${fmtReset || '—'} 重置 · 用量待确认</span>`
         : (notice
@@ -799,7 +805,7 @@ function quotaItemHtml(it) {
             : '<span class="mono"></span>'));
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
-  const bar = hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
+  const bar = hasVolume && hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
   return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${reset}</span>${nums}</div>${bar}</div>`;
 }
 

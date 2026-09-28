@@ -148,7 +148,7 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
         quota = base.get("quota") or {}
         usage = pack.get("usage") or {}
         limit = quota.get("basic_usage_limit")
-        used = usage.get("basic_usage_amount") or 0
+        used_raw = usage.get("basic_usage_amount")
         if not isinstance(limit, (int, float)) or limit <= 0:
             continue
         entitlement_id = str(base.get("entitlement_id") or "pack")
@@ -169,9 +169,21 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
         if multi:
             label = f"PAT #{profile.index + 1} · {label[4:]}"
         end_time = base.get("end_time") or 0
-        items.append({"label": label, "used": round(used, 2), "total": limit,
-                      "remaining": round(limit - used, 2),
-                      "percent": round(used / limit * 100),
+        # ``used`` 缺失时**不能**按 0 算：那是「未知」，不是「没花」。
+        # 只回了包容量、还没回用量时（网关偶发只给半拉数据），按 0 算会渲染成
+        # 「剩 300 / 300 · 已用 0%」——把未知说成满血，比不显示更误导。
+        # 此时只给 remaining（total），percent 留 None，UI 会显示「已用未知」。
+        if isinstance(used_raw, (int, float)):
+            used: float | None = round(float(used_raw), 2)
+            remaining: float | None = round(limit - used, 2)
+            percent: int | None = round(used / limit * 100)
+        else:
+            used = None
+            remaining = limit
+            percent = None
+        items.append({"label": label, "used": used, "total": limit,
+                      "remaining": remaining,
+                      "percent": percent,
                       "reset_ts": int(end_time) if end_time else None})
     return items
 

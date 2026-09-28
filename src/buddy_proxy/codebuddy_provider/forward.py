@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import functools
+import json
+import pathlib
 from typing import Any
 
 from fastapi import HTTPException
@@ -18,6 +21,61 @@ from buddy_proxy.core import settings as settings_mod
 
 from .observability import _instrument
 from .provider import _default_codebuddy
+
+
+@functools.lru_cache(maxsize=1)
+def _codebuddy_static_ids() -> frozenset[str]:
+    """CodeBuddy 静态表（models_config.json）的小写 id 集合（进程内缓存）。
+
+    刻意**不用** ``model_list.load_models_from_local_config()``：那个函数会经
+    ``diagnostic()`` 调 ``get_state()``（代理未初始化时抛 503），且它在路由热路径
+    上每次都要读文件 + 归一化全表。这里只读一次原始 JSON 并缓存。
+
+    兜底：读失败时返回空集——宁可不做这层保护，也不能让路由挂掉。
+    """
+    try:
+        config = pathlib.Path(__file__).resolve().parent.parent / "web" / "models_config.json"
+        data = json.loads(config.read_text("utf-8"))
+        return frozenset(
+            str(m["id"]).lower() for m in data.get("models", []) if m.get("id")
+        )
+    except Exception:  # noqa: BLE001 - 配置读不出来不该阻断路由
+        return frozenset()
+
+
+def _is_codebuddy_model(model: str) -> bool:
+    """该名字是否是 CodeBuddy 静态表里的模型 id。
+
+    用途只有一个：在**别名轮**挡住「别的通道想用别名认领一个本该归 CodeBuddy
+    的名字」——``auto`` 正是 CodeBuddy 的默认模型，Qoder 的档位模型也叫 ``auto``，
+    不挡就会静默改道；CodeBuddy 是兜底通道、不在 ``providers`` 里，别名轮无从
+    靠「有没有别的通道精确认领」判断归属，故直接查静态表。
+
+    只按**原样**比对，不做小写化：静态表里的 id 本身就是小写，而 ``Qwen3.8-Max``
+    / ``Kimi-K3`` 这类**官方显示名**虽然小写化后与静态表撞车，但它们确实是通道
+    目录里真实存在的模型名（Qoder 的 display_name 就是这么写的）。把它们也挡掉
+    会让「按官方文档写模型名」直接 502，代价远大于收益——真正需要防的是裸名
+    ``auto`` 被别名改道，而那种输入本来就没有大小写变体。
+    """
+    return model in _codebuddy_static_ids()
+
+
+def _resolved_model_id(provider: Any, model: str) -> str:
+    """把请求里的模型名归一成**停用/时段配置使用的键名**。
+
+    Qoder 之类的通道接受别名（显示名 ``Qwen3.8-Flash`` / 内部 key ``qfmodel``），
+    两者必须落到同一把键上，否则「停用了却还能用别名调通」。通道没提供
+    ``resolve_model`` 时原样返回（多数通道的 id 就是上游名）。
+    """
+    resolve = getattr(provider, "resolve_model", None)
+    if callable(resolve):
+        try:
+            resolved = resolve(model)
+            if isinstance(resolved, str) and resolved:
+                return resolved
+        except Exception:  # noqa: BLE001 - 归一失败不阻断转发
+            pass
+    return model
 
 
 def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
@@ -124,18 +182,43 @@ async def forward_chat(
                 stream=bool(body.get("stream")),
             )
 
-    # 2) 自动匹配模型 id
+    # 2) 自动匹配模型 id（仅在未显式指定前缀时；前缀路由的结果不能被覆盖）
+    #
+    # 分两轮：**先全部按 id 精确匹配**（含剥前缀裸名），都未命中再退回别名。
+    # 不能一轮搞定——多个通道可能"认识"同一个名字（qoder 的显示名 GLM-5.3 与
+    # zcode 的模型名 glm-5.3 撞车），若让别名与精确匹配同等参与、按注册序先到
+    # 先得，注册靠前的通道就会把别人的模型抢走。别名只能是兜底，不能是抢占。
+    #
+    # 别名轮（``allow_aliases=True``）额外跳过「名字就是 CodeBuddy 静态表 id」的
+    # 情况：CodeBuddy 是兜底通道、不在 ``providers`` 里，别名轮无从靠「别的通道
+    # 能否精确认领」判断归属。``auto`` 正是 CodeBuddy 的默认模型，而 Qoder 本地
+    # 合成的档位模型（TIER_MODELS）也叫 ``auto``，不挡住就会静默改道。
+    #
+    # ⚠️ 只挡别名轮，不挡精确轮：精确轮是各通道按自己发布的 id 认领，trae/zcode
+    # 等通道的模型名可能与静态表重合（两边都真有这个模型），让他们照常先认领，
+    # 与既有路由行为一致。
     if provider is None:
-        for p in providers.values():
-            if any(m.get("id") == requested_model for m in p.models()):
-                provider = p
+        for allow_aliases in (False, True):
+            if allow_aliases and _is_codebuddy_model(requested_model):
+                break  # 归 CodeBuddy 静态表，别名不得认领
+            for p in providers.values():
+                try:
+                    if p.accepts_model(requested_model, aliases=allow_aliases):
+                        provider = p
+                        break
+                except Exception:  # noqa: BLE001 - 单个通道判断失败不该阻断路由
+                    continue
+            if provider is not None:
                 break
 
     if provider is not None:
         # 非默认 provider（Trae/豆包等）：由各自 forward 决定协议支持范围。
         # Trae 已支持 anthropic 协议（/v1/messages 客户端如 Claude Code 可直连）；
         # 豆包等仅 openai 协议透传（doubao2api 只支持 OpenAI chat completions）。
-        _reject_if_disabled(state, provider.id, requested_model)
+        # 停用/时段键按 provider 归一后的 id 生成，与转发链路口径一致
+        # （别名请求如「Qwen3.8-Flash」也要能被停用规则命中）。
+        gate_model = _resolved_model_id(provider, requested_model)
+        _reject_if_disabled(state, provider.id, gate_model)
         diagnostic("provider_route", provider=provider.id, model=requested_model, protocol=protocol)
         provider.ensure_auth()
         return await _instrument(
