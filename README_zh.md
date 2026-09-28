@@ -556,6 +556,20 @@ uv run python -m buddy_proxy --desensitize --mimo
 | 额度 | 管理页额度面板：订阅额度 + 加油包（含套餐等级、到期时间） |
 | **Anthropic（`/v1/messages`）** | 上游无 Anthropic 原生端点，故**响应反向转换**为 Anthropic 事件（`message_start`/`content_block_delta`/`message_stop`，推理内容转 `thinking` 块），供 Claude Code 使用 |
 
+**两条上游怪癖**在 `_build_upstream` 出站前归一化（不这么干整个请求会被拒；两条都是
+Qoder 专属，公共转换器保持不动）：
+
+- **`developer` role 在反序列化阶段就被拒** → 改写成 `system`。
+- **带 `tool_calls` 的 assistant，`content` 不能是 `null`**。Anthropic 的纯 tool_use
+  回合转出来正是 `content: null`，于是**用过工具**的会话全挂、而裸问一句能成。上游对
+  这个的报错文案**误导**——它说 `Messages with role 'tool' must be a response to a
+  preceding message with 'tool_calls'`，害人往 tool 配对代码里白查——所以这里改写成 `""`。
+
+上游带内错误把真因放在 `details` 字段里（顶层 `message` 只有一句 `Error in upstream
+response`）；`_describe_upstream_error` 会把它挖出来，并且失败按 Anthropic 的
+`{"type":"error","error":{...}}` 形状返回，好让 Claude Code 认出这是终止性错误、而不是
+对着同一个请求重试十次。
+
 **模型名对外统一为「小写真实名」**（上游内部代号 `qmodel_38max` 这类名字看不出是什么模型）：
 
 | 对外 id | 上游 key | 备注 |
