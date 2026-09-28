@@ -857,14 +857,21 @@ def _normalize_message(message: Any) -> Any:
        上游会拒单——而且**报错文案误导**：它说「role 'tool' 必须回应带
        tool_calls 的消息」，害得往 tool 配对方向排查。实际把它改成 ``""``
        即可通过（``assistant content=""`` 实测 200）。
+    3. **``tool_calls`` 只能挂在 ``assistant`` 上**。``system`` 带 ``tool_calls``
+       一样被那句误导文案拒掉（实测：``system`` + ``content:""`` 仍 ❌，
+       ``assistant`` + ``content:""`` ✅）——因为其后的 ``tool`` 没有
+       ``assistant`` 可配对。所以 ``developer`` 转 ``system`` 时要把
+       ``tool_calls`` 摘掉（系统消息本就不该发起工具调用，摘掉不丢信息）。
 
-    这两条只影响本通道：其它 provider 共用同一个转换器，不能在那里改。
+    这三条只影响本通道：其它 provider 共用同一个转换器，不能在那里改。
     """
     if not isinstance(message, dict):
         return message
     out = message
     if out.get("role") == "developer":
-        out = {**out, "role": "system"}
+        # role 改成 system，同时摘掉不可能属于系统消息的 tool_calls
+        out = {k: v for k, v in out.items() if k != "tool_calls"}
+        out["role"] = "system"
     if out.get("role") == "assistant" and out.get("tool_calls") and out.get("content") is None:
         out = {**out, "content": ""}
     return out

@@ -259,6 +259,45 @@ def test_developer_role_becomes_system():
     assert out[0]["content"] == "be terse"
 
 
+def test_developer_tool_calls_are_dropped():
+    """``developer`` 带 ``tool_calls`` 时必须连 ``tool_calls`` 一起摘掉。
+
+    ``tool_calls`` 只能挂在 ``assistant`` 上：转成 ``system`` 后仍带着它，
+    其后的 ``tool`` 就没有 ``assistant`` 可配对，上游照旧拒单（实测
+    ``system`` + ``content:""`` + ``tool_calls`` 仍 ❌，``assistant`` 同形 ✅）。
+    """
+    out = _upstream_messages([
+        {"role": "developer", "content": "be terse",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "user", "content": "hi"},
+    ])
+    assert out[0]["role"] == "system"
+    assert "tool_calls" not in out[0], "system 消息不能携带 tool_calls"
+    assert out[0]["content"] == "be terse", "摘 tool_calls 不该顺手丢掉正文"
+
+
+def test_developer_without_tool_calls_keeps_content():
+    """没有 ``tool_calls`` 的 ``developer`` 只改 role，其它字段原样。"""
+    out = _upstream_messages([{"role": "developer", "content": "x", "name": "n"}])
+    assert out[0] == {"role": "system", "content": "x", "name": "n"}
+
+
+def test_assistant_content_fix_is_scoped_to_tool_calls():
+    """``content: null`` 只在**带 tool_calls 的 assistant** 上改写。
+
+    普通 assistant（无 tool_calls）的 ``content: null`` 是合法的，改成 ``""``
+    反而会凭空多出一条空回复——不能一刀切。
+    """
+    out = _upstream_messages([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None},
+        {"role": "tool", "tool_call_id": "orphan", "content": "x"},
+    ])
+    # 孤儿 tool 会被配对逻辑转成 user，不影响这里对 assistant 的断言
+    assert next(m for m in out if m.get("role") == "assistant")["content"] is None
+
+
 def test_plain_messages_are_untouched():
     """没有 tool_calls 的消息不该被改写（避免误伤普通对话）。"""
     out = _upstream_messages([
