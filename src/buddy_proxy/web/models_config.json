@@ -215,6 +215,54 @@
       "vendor": "f"
     },
     {
+      "credits": "x0.77 credits",
+      "descriptionEn": "A multimodal model, good for daily use.",
+      "descriptionZh": "多模态模型,适合日常任务",
+      "id": "kimi-k2.8-preview",
+      "maxAllowedSize": 256000,
+      "maxInputTokens": 256000,
+      "maxOutputTokens": 32000,
+      "name": "Kimi-K2.8-Preview",
+      "onlyReasoning": true,
+      "reasoning": {
+        "effort": "medium",
+        "summary": "auto"
+      },
+      "relatedModels": {
+        "lite": "kimi-k2.8-preview",
+        "reasoning": "kimi-k2.8-preview"
+      },
+      "supportsImages": true,
+      "supportsReasoning": true,
+      "supportsToolCall": true,
+      "temperature": 1,
+      "vendor": "f"
+    },
+    {
+      "credits": "x0.52 credits",
+      "descriptionEn": "A multimodal model, good for daily use.",
+      "descriptionZh": "多模态模型,适合日常任务",
+      "id": "kimi-k2.6",
+      "maxAllowedSize": 256000,
+      "maxInputTokens": 256000,
+      "maxOutputTokens": 32000,
+      "name": "Kimi-K2.6",
+      "onlyReasoning": true,
+      "reasoning": {
+        "effort": "medium",
+        "summary": "auto"
+      },
+      "relatedModels": {
+        "lite": "kimi-k2.6",
+        "reasoning": "kimi-k2.6"
+      },
+      "supportsImages": true,
+      "supportsReasoning": true,
+      "supportsToolCall": true,
+      "temperature": 1,
+      "vendor": "f"
+    },
+    {
       "descriptionEn": "DeepSeek flagship model with native image input, supporting 1M context window",
       "descriptionZh": "DeepSeek 旗舰模型,原生支持图片输入,支持 1M 上下文窗口",
       "id": "deepseek-v4.1-flash",

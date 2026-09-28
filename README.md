@@ -88,9 +88,9 @@ The script:
 
 ## Models
 
-The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **43 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
+The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **45 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
 
-**CodeBuddy channel** (16) — bare model ids, no prefix:
+**CodeBuddy channel** (18) — bare model ids, no prefix:
 
 | id | name | credits |
 |---|---|---|
@@ -106,7 +106,9 @@ The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — 
 | `hy4-preview` | Hy4 preview | x0.29 |
 | `minimax-m3` | MiniMax-M3 | x0.25 |
 | `kimi-k3` | Kimi-K3 | x1.62 |
+| `kimi-k2.8-preview` | Kimi-K2.8-Preview | x0.77 |
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
+| `kimi-k2.6` | Kimi-K2.6 | x0.52 |
 | `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | x0.11 |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
