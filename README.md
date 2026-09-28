@@ -276,6 +276,26 @@ Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Cantus, Sonus, DeepSee
 
 Anthropic clients (`/v1/messages`, e.g. Claude Code) are supported: the proxy converts the OpenAI-shaped upstream stream into `message_start` / `content_block_delta` / `message_stop` events, including `thinking` blocks from the model's reasoning output.
 
+Three upstream quirks are normalised per-message in `_build_upstream` before sending (all
+would otherwise reject the whole request, and all are Qoder-specific — the shared converter
+is left alone):
+
+- **`developer` role is rejected at deserialisation** — rewritten to `system`, and its
+  `tool_calls` (if any) dropped: `tool_calls` may only hang off an `assistant` message, so a
+  `system` message carrying them poisons the `tool` reply that follows.
+- **A message carrying `tool_calls` may not have `content: null`.** Anthropic's tool_use-only
+  turn converts to exactly that, so any session that had *used a tool* failed while a plain
+  question succeeded. The upstream's error for this is misleading — it reports
+  `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`,
+  which sends you hunting in the tool-pairing code — so it is rewritten to `""` here.
+  The rewrite keys off `tool_calls` rather than the role, and runs *before* the `tool_calls`
+  are stripped above; a plain `content: null` assistant turn is legal and left untouched.
+
+Upstream in-band errors carry the real cause in a `details` field (`message` alone is just
+`Error in upstream response`); `_describe_upstream_error` surfaces it, and failures are
+returned in Anthropic's `{"type":"error","error":{...}}` shape so Claude Code recognises them
+as terminal instead of retrying ten times.
+
 ### Daily activity credits (check-in)
 
 Qoder runs a **daily "claim 100 Credits" campaign** (the popup the desktop app opens on

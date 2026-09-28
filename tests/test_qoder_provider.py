@@ -42,7 +42,7 @@ from buddy_proxy.qoder.credentials import (
     auth_state_path,
     save_state,
 )
-from buddy_proxy.qoder.provider import _to_anthropic_stream
+from buddy_proxy.qoder.provider import _to_anthropic_stream, _unwrap, _upstream_error
 
 
 # --- Anthropic 协议（/v1/messages） ----------------------------------------
@@ -125,6 +125,205 @@ def test_anthropic_stream_survives_malformed_chunk():
     assert "event: message_start" in text
     assert "event: content_block_stop" in text
 
+
+# --- 上游带内错误：必须带出真实原因 ----------------------------------------
+
+
+def _error_frame(message: str, details: object = None, code: str = "provider_error") -> str:
+    """上游错误帧（实测形态：``message`` 是废话，``details`` 才是原因）。"""
+    body: dict[str, object] = {"code": code, "message": message}
+    if details is not None:
+        body["details"] = details
+    return json.dumps({"headers": {}, "body": json.dumps(body),
+                       "statusCodeValue": 400})
+
+
+def test_unwrap_surfaces_details_as_the_real_reason():
+    """``details.error.message`` 是真因，不能被丢。
+
+    只取顶层 ``message`` 会让「模型不存在」「参数非法」「渠道拦截」全都退化成
+    同一句 ``Error in upstream response``——线上根本没法定位（这个坑踩过）。
+    """
+    frame = _error_frame(
+        "Error in upstream response",
+        json.dumps({"error": {"message": "model [dfmodel] service info not found"}}),
+    )
+    _, err, _ = _unwrap(frame)
+    assert err is not None
+    assert "model [dfmodel] service info not found" in err
+    assert "provider_error" in err
+
+
+def test_unwrap_surfaces_channel_block_reason():
+    """渠道校验拦截（11128）必须能看出是被风控挡了，而不是笼统的上游错误。"""
+    frame = _error_frame(
+        "Error in upstream response",
+        json.dumps({"error": {"message": "Illegal API invocation from an unapproved channel"}}),
+    )
+    _, err, _ = _unwrap(frame)
+    assert "unapproved channel" in err
+
+
+def test_unwrap_tolerates_non_json_details():
+    """``details`` 偶尔是纯文本，不能因此丢掉整条错误。"""
+    _, err, _ = _unwrap(_error_frame("boom", "plain text reason"))
+    assert err is not None and "plain text reason" in err
+
+
+def test_unwrap_accepts_details_as_object():
+    """``details`` 也可能已经是对象（未二次编码）。"""
+    _, err, _ = _unwrap(_error_frame("boom", {"error": {"message": "nested reason"}}))
+    assert err is not None and "nested reason" in err
+
+
+def test_unwrap_leaves_normal_chunks_alone():
+    """正常 chunk 不能被误判成错误帧。"""
+    ok = json.dumps({"body": json.dumps({"choices": [{"delta": {"content": "hi"}}]})})
+    inner, err, done = _unwrap(ok)
+    assert err is None and not done and inner is not None
+
+
+def test_upstream_error_is_anthropic_shaped():
+    """Anthropic 客户端只认 ``{"type":"error","error":{...}}``。
+
+    返回 ``{"detail": ...}`` 时 Claude Code 认不出这是终止性错误，会对着同一
+    请求重试到上限（线上表现为 ``Retrying in 15s · attempt 7/10``）。
+    """
+    exc = _upstream_error("model [dfmodel] service info not found")
+    assert exc.status_code == 502
+    detail = exc.detail
+    assert detail["type"] == "error"
+    assert detail["error"]["type"] == "api_error"
+    assert "service info not found" in detail["error"]["message"]
+
+
+# --- 消息上游适配（Qoder 专属） --------------------------------------------
+
+#: Anthropic 的 tool_use-only 回合 → OpenAI 形状：content 为 null。
+_TOOL_TURN = [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": None,
+     "tool_calls": [{"id": "tu1", "type": "function",
+                     "function": {"name": "Bash", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "tu1", "content": "out"},
+]
+
+
+def _upstream_messages(messages):
+    """把 messages 过一遍 Qoder 的出站适配，取出真正发给上游的形态。"""
+    from buddy_proxy.qoder.provider import QoderProvider
+
+    upstream = QoderProvider()._build_upstream(
+        {"messages": messages, "stream": True}, "dfmodel"
+    )
+    return upstream["messages"]
+
+
+def test_tool_turn_assistant_content_is_not_null():
+    """带 tool_calls 的 assistant，``content`` 必须是字符串而不是 null。
+
+    上游（deepseek 系）对 ``content: null`` 直接拒单，且**报错文案误导**成
+    「role 'tool' 必须回应带 tool_calls 的消息」，让人往配对方向白查。实测
+    改成 ``""`` 即通过——所以这里锁死为空串。
+    """
+    out = _upstream_messages(_TOOL_TURN)
+    assistant = next(m for m in out if m.get("role") == "assistant")
+    assert assistant["content"] == "", "content 为 null 会被上游拒单"
+    assert assistant["tool_calls"], "tool_calls 不能被丢掉"
+
+
+def test_tool_turn_pairing_survives_adaptation():
+    """适配不能破坏 tool_calls 与 tool 结果的配对，也不能改动顺序。"""
+    out = _upstream_messages(_TOOL_TURN)
+    assert [m["role"] for m in out] == ["user", "assistant", "tool"]
+    assert out[2]["tool_call_id"] == "tu1"
+
+
+def test_assistant_text_is_preserved():
+    """有正文的 assistant 不能被误改成空串。"""
+    out = _upstream_messages([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello", "tool_calls": [
+            {"id": "tu1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+    ])
+    assert next(m for m in out if m.get("role") == "assistant")["content"] == "hello"
+
+
+def test_developer_role_becomes_system():
+    """``developer`` 在上游反序列化阶段整请求被拒，必须转 ``system``。"""
+    out = _upstream_messages([
+        {"role": "developer", "content": "be terse"},
+        {"role": "user", "content": "hi"},
+    ])
+    assert out[0]["role"] == "system"
+    assert out[0]["content"] == "be terse"
+
+
+def test_developer_tool_calls_are_dropped():
+    """``developer`` 带 ``tool_calls`` 时必须连 ``tool_calls`` 一起摘掉。
+
+    ``tool_calls`` 只能挂在 ``assistant`` 上：转成 ``system`` 后仍带着它，
+    其后的 ``tool`` 就没有 ``assistant`` 可配对，上游照旧拒单（实测
+    ``system`` + ``content:""`` + ``tool_calls`` 仍 ❌，``assistant`` 同形 ✅）。
+    """
+    out = _upstream_messages([
+        {"role": "developer", "content": "be terse",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "user", "content": "hi"},
+    ])
+    assert out[0]["role"] == "system"
+    assert "tool_calls" not in out[0], "system 消息不能携带 tool_calls"
+    assert out[0]["content"] == "be terse", "摘 tool_calls 不该顺手丢掉正文"
+
+
+def test_developer_tool_calls_also_gets_content_fixed():
+    """``developer`` + ``tool_calls`` + ``content: null`` 的 content 也要补成 ``""``。
+
+    这条守的是「content 修正不绑 role」：若修正仍判 ``role == "assistant"``，
+    消息在这之前已经被改写成 ``system``，条件永远不成立、``null`` 原样出站。
+    """
+    out = _upstream_messages([
+        {"role": "developer", "content": None,
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "f", "arguments": "{}"}}]},
+    ])
+    assert out[0]["role"] == "system"
+    assert "tool_calls" not in out[0]
+    assert out[0]["content"] == ""
+
+
+def test_developer_without_tool_calls_keeps_content():
+    """没有 ``tool_calls`` 的 ``developer`` 只改 role，其它字段原样。"""
+    out = _upstream_messages([{"role": "developer", "content": "x", "name": "n"}])
+    assert out[0] == {"role": "system", "content": "x", "name": "n"}
+
+
+def test_assistant_content_fix_is_scoped_to_tool_calls():
+    """``content: null`` 只在**带 tool_calls 的 assistant** 上改写。
+
+    普通 assistant（无 tool_calls）的 ``content: null`` 是合法的，改成 ``""``
+    反而会凭空多出一条空回复——不能一刀切。
+    """
+    out = _upstream_messages([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None},
+        {"role": "tool", "tool_call_id": "orphan", "content": "x"},
+    ])
+    # 孤儿 tool 会被配对逻辑转成 user，不影响这里对 assistant 的断言
+    assert next(m for m in out if m.get("role") == "assistant")["content"] is None
+
+
+def test_plain_messages_are_untouched():
+    """没有 tool_calls 的消息不该被改写（避免误伤普通对话）。"""
+    out = _upstream_messages([
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None},
+    ])
+    assert out[0] == {"role": "system", "content": "s"}
+    assert out[1] == {"role": "user", "content": "hi"}
+    assert out[2] == {"role": "assistant", "content": None}
 
 
 # --- body 编码 -------------------------------------------------------------
@@ -732,6 +931,52 @@ def test_quota_reset_ts_filters_sentinel():
 
     assert _reset_ts({"expiresAt": 253402214400000}) is None
     assert _reset_ts({"expiresAt": 1791653946861}) == 1791653946
+
+
+def test_used_percent_prefers_counted_values():
+    """优先用 ``used``/``total``（自洽），别信可能矛盾的 ``percentage``。
+
+    实测 ``total=200, used=101`` 时上游给 ``0.51``（``remaining/total=0.495``）——
+    那是**剩余**比例；而 ``userQuota`` 给过 ``percentage: 0.0`` 配
+    ``used: 0, remaining: 2000``（一分没用却说剩余 0%），三者互相矛盾。
+    counted 值两边都自洽，故以它为准。
+    """
+    from buddy_proxy.qoder.provider import _used_percent
+
+    # 已用 101/200 = 50.5%；若错把上游 0.51 当剩余直接透传会是 0.51
+    assert _used_percent({"percentage": 0.51}, 101.0, 200.0) == pytest.approx(50.5)
+    # 矛盾样本：percentage=0.0 说「剩余 0%」，但 used=0 才是事实
+    assert _used_percent({"percentage": 0.0}, 0.0, 2000.0) == pytest.approx(0.0)
+    # total 拿不到时才退回 percentage（0~1 视作剩余比例）
+    assert _used_percent({"percentage": 0.2}, 0.0, 0.0) == pytest.approx(80.0)
+    assert _used_percent({"percentage": 1.0}, 0.0, 0.0) == pytest.approx(0.0)
+    assert _used_percent({}, 0.0, 0.0) == pytest.approx(0.0)
+
+
+def test_quota_items_percent_is_used_scale():
+    """``items[].percent`` 必须是 0~100 的**已用**值（前端 ≥85 判红）。
+
+    直接透传上游 ``percentage``（0~1）= 进度条画反 + 85 阈值永远够不到
+    （红色告警成死代码）。
+    """
+    from buddy_proxy.qoder.provider import QoderProvider
+
+    provider = QoderProvider(Region("cn", "Qoder CN", "https://a", "https://b", "https://c", ".qoder-cn"))
+    data = {
+        "userType": "personal_professional",
+        "usageType": "credits",
+        "isQuotaExceeded": False,
+        "userQuota": {"total": 2000.0, "used": 2000.0, "remaining": 0.0, "percentage": 0.0},
+        "addOnQuota": {"total": 200.0, "used": 101.0, "remaining": 99.0, "percentage": 0.51},
+    }
+    out = provider._format_quota(data, Credential(token="t", uid="u"))
+    by_label = {i["label"]: i for i in out["items"]}
+    # total 大的一侧当 primary（既有选择规则），但两侧口径要一致：都是「已用」
+    assert by_label["订阅额度"]["percent"] == pytest.approx(100.0)
+    # 上游 0.51 是「剩余 51%」；已用 101/200 = 50.5%
+    assert by_label["加油包"]["percent"] == pytest.approx(50.5)
+    # 两个值都落在 0~100 量纲内，85 阈值才有意义
+    assert all(0.0 <= i["percent"] <= 100.0 for i in out["items"])
 
 
 def test_build_upstream_includes_attribution_envelope():
