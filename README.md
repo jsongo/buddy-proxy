@@ -283,13 +283,13 @@ is left alone):
 - **`developer` role is rejected at deserialisation** — rewritten to `system`, and its
   `tool_calls` (if any) dropped: `tool_calls` may only hang off an `assistant` message, so a
   `system` message carrying them poisons the `tool` reply that follows.
-- **An assistant message carrying `tool_calls` may not have `content: null`.** Anthropic's
-  tool_use-only turn converts to exactly that, so any session that had *used a tool* failed
-  while a plain question succeeded. The upstream's error for this is misleading — it reports
+- **A message carrying `tool_calls` may not have `content: null`.** Anthropic's tool_use-only
+  turn converts to exactly that, so any session that had *used a tool* failed while a plain
+  question succeeded. The upstream's error for this is misleading — it reports
   `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`,
   which sends you hunting in the tool-pairing code — so it is rewritten to `""` here.
-  The rewrite is deliberately scoped to assistant messages that have `tool_calls`; a plain
-  `content: null` assistant turn is legal and is left untouched.
+  The rewrite keys off `tool_calls` rather than the role, and runs *before* the `tool_calls`
+  are stripped above; a plain `content: null` assistant turn is legal and left untouched.
 
 Upstream in-band errors carry the real cause in a `details` field (`message` alone is just
 `Error in upstream response`); `_describe_upstream_error` surfaces it, and failures are

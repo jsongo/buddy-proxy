@@ -380,9 +380,7 @@ class QoderProvider(BaseProvider):
             remaining = float(primary.get("remaining") or 0)
         except (TypeError, ValueError):
             remaining = max(total - used, 0.0)
-        percent = primary.get("percentage")
-        if not isinstance(percent, (int, float)):
-            percent = (used / total * 100) if total else 0.0
+        percent = _used_percent(primary, used, total)
 
         def _item(node: dict, name: str) -> dict[str, Any]:
             total_v = _total(node)
@@ -394,15 +392,12 @@ class QoderProvider(BaseProvider):
                 remain_v = float(node.get("remaining") or 0)
             except (TypeError, ValueError):
                 remain_v = max(total_v - used_v, 0.0)
-            pct = node.get("percentage")
-            if not isinstance(pct, (int, float)):
-                pct = (used_v / total_v * 100) if total_v else 0.0
             return {
                 "label": name,
                 "used": round(used_v, 4),
                 "total": round(total_v, 4),
                 "remaining": round(remain_v, 4),
-                "percent": round(float(pct), 4),
+                "percent": round(_used_percent(node, used_v, total_v), 4),
                 "reset_ts": _reset_ts(data),
             }
 
@@ -849,14 +844,16 @@ def _unwrap(payload: str) -> tuple[str | None, str | None, bool]:
 def _normalize_message(message: Any) -> Any:
     """单条消息的上游适配（Qoder 专属，不改公共转换器）。
 
-    两处上游硬性要求，实测（2026-09）：
+    三条上游硬性要求，实测（2026-09）：
 
     1. **``developer`` role 整请求被拒**（反序列化阶段就挂），转 ``system``。
-    2. **带 ``tool_calls`` 的 assistant，``content`` 不能是 ``null``**。
+    2. **带 ``tool_calls`` 的消息，``content`` 不能是 ``null``**。
        Anthropic 的 ``tool_use`` only 回合转出来正是 ``content: null``，
        上游会拒单——而且**报错文案误导**：它说「role 'tool' 必须回应带
        tool_calls 的消息」，害得往 tool 配对方向排查。实际把它改成 ``""``
-       即可通过（``assistant content=""`` 实测 200）。
+       即可通过（``content=""`` 实测 200）。这条**不绑 role**：绑了
+       ``assistant`` 的话，``developer`` 那条先被改成 ``system`` 就永远命中
+       不了（而且必须在摘 ``tool_calls`` 之前做，否则条件同样不成立）。
     3. **``tool_calls`` 只能挂在 ``assistant`` 上**。``system`` 带 ``tool_calls``
        一样被那句误导文案拒掉（实测：``system`` + ``content:""`` 仍 ❌，
        ``assistant`` + ``content:""`` ✅）——因为其后的 ``tool`` 没有
@@ -868,12 +865,15 @@ def _normalize_message(message: Any) -> Any:
     if not isinstance(message, dict):
         return message
     out = message
+    # ⚠️ content 的修正必须排在摘 ``tool_calls`` **之前**（见 ``developer`` 分支）：
+    # 一旦先摘掉 tool_calls，下面「有没有 tool_calls」就再也不成立，
+    # ``content: null`` 会原样出站。
+    if out.get("tool_calls") and out.get("content") is None:
+        out = {**out, "content": ""}
     if out.get("role") == "developer":
         # role 改成 system，同时摘掉不可能属于系统消息的 tool_calls
         out = {k: v for k, v in out.items() if k != "tool_calls"}
         out["role"] = "system"
-    if out.get("role") == "assistant" and out.get("tool_calls") and out.get("content") is None:
-        out = {**out, "content": ""}
     return out
 
 
@@ -960,6 +960,32 @@ def _reset_ts(data: dict[str, Any]) -> int | None:
         if value < 4102444800000:
             return int(value / 1000)
     return None
+
+
+def _used_percent(node: dict[str, Any], used: float, total: float) -> float:
+    """额度节点 -> **已用**百分比（0~100）。
+
+    上游 ``percentage`` 是**剩余**比例、且量纲是 0~1（实测：``total=200,
+    used=101, remaining=99`` 时给 ``0.51``——``remaining/total=0.495`` 对得上，
+    而 ``used/total=0.505`` 对不上）。管理页 ``quotaItemHtml`` 的 ``percent``
+    要的是**已用**（填进度条 +「已用 x%」+ ≥85% 变红），直接透传会出现两个
+    问题：进度条画反、且 0~1 的比例永远够不到 85 的阈值（红色告警成死代码）。
+    Mimo 通道同样的坑见 ``mimo/provider.py`` 的 ``_usage_items`` 注释。
+
+    但 ``percentage`` 并不总是可信：``userQuota`` 实测给过 ``percentage: 0.0``
+    而 ``used: 0.0, remaining: 2000.0``（一分没用却说剩余 0%），三者互相矛盾。
+    此时 ``used``/``total`` 是自洽的、也更直观，故**优先用 counted 值**：
+    只有当 ``used``/``total`` 拿不到（``total`` 为 0）才退回 ``percentage``。
+    """
+    if total > 0:
+        return max(0.0, min(100.0, used / total * 100.0))
+    pct = node.get("percentage")
+    if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+        # 0~1 当作剩余比例换算成已用；已经是 0~100 的（>1.5）按已用原样用。
+        if pct <= 1.5:
+            return max(0.0, min(100.0, (1.0 - float(pct)) * 100.0))
+        return max(0.0, min(100.0, float(pct)))
+    return 0.0
 
 
 def ensure_credential_sync(region: Region) -> Credential:

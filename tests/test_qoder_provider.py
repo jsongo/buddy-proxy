@@ -277,6 +277,22 @@ def test_developer_tool_calls_are_dropped():
     assert out[0]["content"] == "be terse", "摘 tool_calls 不该顺手丢掉正文"
 
 
+def test_developer_tool_calls_also_gets_content_fixed():
+    """``developer`` + ``tool_calls`` + ``content: null`` 的 content 也要补成 ``""``。
+
+    这条守的是「content 修正不绑 role」：若修正仍判 ``role == "assistant"``，
+    消息在这之前已经被改写成 ``system``，条件永远不成立、``null`` 原样出站。
+    """
+    out = _upstream_messages([
+        {"role": "developer", "content": None,
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "f", "arguments": "{}"}}]},
+    ])
+    assert out[0]["role"] == "system"
+    assert "tool_calls" not in out[0]
+    assert out[0]["content"] == ""
+
+
 def test_developer_without_tool_calls_keeps_content():
     """没有 ``tool_calls`` 的 ``developer`` 只改 role，其它字段原样。"""
     out = _upstream_messages([{"role": "developer", "content": "x", "name": "n"}])
@@ -915,6 +931,52 @@ def test_quota_reset_ts_filters_sentinel():
 
     assert _reset_ts({"expiresAt": 253402214400000}) is None
     assert _reset_ts({"expiresAt": 1791653946861}) == 1791653946
+
+
+def test_used_percent_prefers_counted_values():
+    """优先用 ``used``/``total``（自洽），别信可能矛盾的 ``percentage``。
+
+    实测 ``total=200, used=101`` 时上游给 ``0.51``（``remaining/total=0.495``）——
+    那是**剩余**比例；而 ``userQuota`` 给过 ``percentage: 0.0`` 配
+    ``used: 0, remaining: 2000``（一分没用却说剩余 0%），三者互相矛盾。
+    counted 值两边都自洽，故以它为准。
+    """
+    from buddy_proxy.qoder.provider import _used_percent
+
+    # 已用 101/200 = 50.5%；若错把上游 0.51 当剩余直接透传会是 0.51
+    assert _used_percent({"percentage": 0.51}, 101.0, 200.0) == pytest.approx(50.5)
+    # 矛盾样本：percentage=0.0 说「剩余 0%」，但 used=0 才是事实
+    assert _used_percent({"percentage": 0.0}, 0.0, 2000.0) == pytest.approx(0.0)
+    # total 拿不到时才退回 percentage（0~1 视作剩余比例）
+    assert _used_percent({"percentage": 0.2}, 0.0, 0.0) == pytest.approx(80.0)
+    assert _used_percent({"percentage": 1.0}, 0.0, 0.0) == pytest.approx(0.0)
+    assert _used_percent({}, 0.0, 0.0) == pytest.approx(0.0)
+
+
+def test_quota_items_percent_is_used_scale():
+    """``items[].percent`` 必须是 0~100 的**已用**值（前端 ≥85 判红）。
+
+    直接透传上游 ``percentage``（0~1）= 进度条画反 + 85 阈值永远够不到
+    （红色告警成死代码）。
+    """
+    from buddy_proxy.qoder.provider import QoderProvider
+
+    provider = QoderProvider(Region("cn", "Qoder CN", "https://a", "https://b", "https://c", ".qoder-cn"))
+    data = {
+        "userType": "personal_professional",
+        "usageType": "credits",
+        "isQuotaExceeded": False,
+        "userQuota": {"total": 2000.0, "used": 2000.0, "remaining": 0.0, "percentage": 0.0},
+        "addOnQuota": {"total": 200.0, "used": 101.0, "remaining": 99.0, "percentage": 0.51},
+    }
+    out = provider._format_quota(data, Credential(token="t", uid="u"))
+    by_label = {i["label"]: i for i in out["items"]}
+    # total 大的一侧当 primary（既有选择规则），但两侧口径要一致：都是「已用」
+    assert by_label["订阅额度"]["percent"] == pytest.approx(100.0)
+    # 上游 0.51 是「剩余 51%」；已用 101/200 = 50.5%
+    assert by_label["加油包"]["percent"] == pytest.approx(50.5)
+    # 两个值都落在 0~100 量纲内，85 阈值才有意义
+    assert all(0.0 <= i["percent"] <= 100.0 for i in out["items"])
 
 
 def test_build_upstream_includes_attribution_envelope():
