@@ -276,6 +276,34 @@ Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Cantus, Sonus, DeepSee
 
 Anthropic clients (`/v1/messages`, e.g. Claude Code) are supported: the proxy converts the OpenAI-shaped upstream stream into `message_start` / `content_block_delta` / `message_stop` events, including `thinking` blocks from the model's reasoning output.
 
+### Daily activity credits (check-in)
+
+Qoder runs a **daily "claim 100 Credits" campaign** (the popup the desktop app opens on
+launch). It is served from a different face than chat — `{openapi}/sash/api/v1/me/campaigns` —
+and, unlike `/algo/**`, it **needs no COSY signature**: a plain `Authorization: Bearer <dt-token>`
+works (the desktop app calls it from the Electron main process, logged as `requestSource: "native_main"`).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/sash/api/v1/me/campaigns` | list campaigns + claim status |
+| `GET` | `/sash/api/v1/me/campaigns/{id}/reward` | grant result |
+| `POST` | `/sash/api/v1/me/campaigns/{id}/claim` | **claim** |
+
+The Qoder channel declares `supports_checkin`, so it shows up in the admin UI's
+**打卡 & 额度** panel next to CodeBuddy and is included in auto check-in.
+
+Three behaviours worth knowing (all verified against a live account, 2026-09):
+
+- **It is per-day, keyed by a new campaign id.** The window is literally `10:00 → next 09:59`
+  (UTC+8), and `campaignKey` increments daily (`act-20260923-556` → `-557`), with `campaignId`
+  a fresh UUID each day. Always re-list; never cache the id across a day boundary.
+- **Claiming is idempotent.** Re-claiming an already-claimed campaign returns
+  `200 {"status":"CLAIMED","replayed":true}` — that is a *replay*, not a new grant
+  (`claimedAt` is the past one). Only `replayed: false` means credits were actually granted.
+- **Don't trust the top-level `claimable` flag** to decide whether to claim: it also covers
+  `VIEW_DETAILS` campaigns and unopened windows. The real test is per entry:
+  `actionType == "CLAIM_BENEFIT" && claimStatus == "CLAIMABLE"`.
+
 > `--qoder` is only needed when you want this channel; without it the provider is not registered and `qoder/...` model names fall through to the fallback provider.
 
 ## Connect clients

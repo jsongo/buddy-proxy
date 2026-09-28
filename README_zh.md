@@ -577,6 +577,33 @@ uv run python -m buddy_proxy --desensitize --mimo
 uv run python -m buddy_proxy --desensitize --qoder
 ```
 
+#### 每日活动权益（签到）
+
+Qoder 有个**「每日领 100 Credits」活动**（桌面端一启动就弹的那个）。它不在聊天面上，
+而是走 `{openapi}/sash/api/v1/me/campaigns`；和 `/algo/**` 不同，这个面**不需要 COSY 签名**——
+裸 `Authorization: Bearer <dt-token>` 就行（桌面端是在 Electron 主进程里调的，
+日志里记作 `requestSource: "native_main"`）。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/sash/api/v1/me/campaigns` | 列出活动 + 领取状态 |
+| `GET` | `/sash/api/v1/me/campaigns/{id}/reward` | 发奖结果 |
+| `POST` | `/sash/api/v1/me/campaigns/{id}/claim` | **领取** |
+
+Qoder 通道声明了 `supports_checkin`，因此会和 CodeBuddy 一起出现在管理页
+**「打卡 & 额度」**面板里，并纳入自动打卡。
+
+三个值得知道的行为（均为 2026-09 真实账号实测）：
+
+- **按天轮换，每天是新的活动 id。** 窗口就是 `10:00 → 次日 09:59`（UTC+8），
+  `campaignKey` 每天自增（`act-20260923-556` → `-557`），`campaignId` 每天是新 UUID。
+  永远重新拉列表，别把 id 缓存过天。
+- **领取是幂等的。** 对已领过的活动再 POST 会返回 `200 {"status":"CLAIMED","replayed":true}`
+  ——那是**重放**，不是新发奖（`claimedAt` 是过去那次的时间）。只有 `replayed: false`
+  才代表真发了 Credits。
+- **别信顶层 `claimable`** 来判断能不能领：它把 `VIEW_DETAILS` 类活动也算进来了。
+  真正的判据是**逐条**看 `actionType == "CLAIM_BENEFIT" && claimStatus == "CLAIMABLE"`。
+
 ## 免责声明
 
 本项目仅供学习与研究使用，请遵守 CodeBuddy 的服务条款，使用风险自负。

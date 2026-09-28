@@ -52,6 +52,19 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d")
 
 
+async def _call(fn: Callable, *args):
+    """调用 provider 的打卡/额度方法，同步异步都支持。
+
+    provider 多为同步实现（urllib/httpx 同步），经 ``asyncio.to_thread`` 跑，
+    避免阻塞事件循环；但 Qoder 这类通道只有异步 HTTP 客户端，``to_thread``
+    拿到的是**协程对象**而不是结果（既不 await 就丢弃，返回值也不对），
+    故按函数类型分派。
+    """
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args)
+    return await asyncio.to_thread(fn, *args)
+
+
 def read_checkin_settings() -> dict[str, Any]:
     saved = settings_mod.load_settings()
     raw_time = str(saved.get("checkin_time") or DEFAULT_CHECKIN_TIME)
@@ -245,12 +258,7 @@ class BenefitsManager:
             if now - cached[0] < ttl:
                 return cached[1]
         try:
-            if inspect.iscoroutinefunction(fn):
-                # 已经是异步实现（如 Qoder 的实时额度查询）：直接 await，
-                # 不再塞进线程池——那里拿到的是协程对象而不是结果。
-                data = await fn(*args)
-            else:
-                data = await asyncio.to_thread(fn, *args)
+            data = await _call(fn, *args)
         except Exception as exc:
             data = {"error": str(exc)[:300]}
         self._cache[key] = (now, data)
@@ -270,7 +278,7 @@ class BenefitsManager:
 
     async def _claim_and_record(self, provider_id: str, provider: Any) -> dict[str, Any]:
         try:
-            status = await asyncio.to_thread(provider.checkin_claim)
+            status = await _call(provider.checkin_claim)
         except Exception as exc:
             message = str(exc)[:300]
             # 上游返回"已签到"类提示视为成功（幂等补记录）
@@ -331,7 +339,7 @@ class BenefitsManager:
             self._last_attempt[pid] = time.time()
             # 先查状态再决定是否领：避免对「已签到/当天无活动」的上游反复打 claim
             try:
-                status = await asyncio.to_thread(provider.checkin_status)
+                status = await _call(provider.checkin_status)
             except Exception:
                 continue
             if not isinstance(status, dict):

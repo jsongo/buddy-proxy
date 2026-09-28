@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.providers.base import BaseProvider
 
+from .campaigns import CLAIM_ACTION, CampaignClient
 from .catalog import Catalog, is_hidden, public_model_id, to_openai_model
 from .config import COSY_VERSION, Region, resolve_region, with_cached_endpoints
 from .cosy import sign
@@ -96,6 +97,8 @@ class QoderProvider(BaseProvider):
 
     id = "qoder"
     name = "Qoder"
+    # 每日活动权益（「每天领 100 Credits」）走 /sash 面，见 qoder/campaigns.py。
+    supports_checkin = True
 
     def __init__(self, region: Region | None = None) -> None:
         self._region = with_cached_endpoints(region or resolve_region())
@@ -196,6 +199,107 @@ class QoderProvider(BaseProvider):
         # 才认领；否则（真正的未知模型）放行给别人。
         key = self._catalog.resolve_key(want)
         return any(str(m.get("key") or "") == key for m in entries)
+
+    # -- 每日活动权益（打卡） ------------------------------------------------
+
+    async def _campaigns(self) -> CampaignClient:
+        """构造活动面客户端（复用当前凭据）。"""
+        cred = await self._credential()
+        return CampaignClient(self._region, cred)
+
+    async def checkin_status(self) -> dict[str, Any] | None:
+        """查今日「活动权益」领取状态（``/sash/api/v1/me/campaigns``）。
+
+        判据是**逐条**看 ``CLAIM_BENEFIT`` + ``CLAIMABLE``，不看顶层
+        ``claimable``（它把「仅查看详情」的活动也算进来了，会把"无奖励"报成
+        "可领"，导致自动打卡对着一条领不出东西的活动反复打）。
+
+        每天是可领活动的**新 campaignId**（10:00 UTC+8 轮换），故这里永远
+        重新拉列表、不跨天缓存。返回 ``None`` 以外的结构见
+        ``BaseProvider.checkin_status``。
+        """
+        try:
+            client = await self._campaigns()
+            campaigns = await client.list()
+        except Exception as exc:  # noqa: BLE001 - 状态查询失败不该让整页 500
+            log.warning("qoder 活动状态查询失败: %s", exc)
+            return {"checked_in": False, "claimable": False, "message": str(exc)[:200]}
+
+        claimable = [c for c in campaigns if c.is_claimable]
+        claimed = [c for c in campaigns if c.action_type == CLAIM_ACTION and c.is_claimed]
+        today = claimable[0] if claimable else (claimed[0] if claimed else None)
+
+        status: dict[str, Any] = {
+            "checked_in": bool(claimed) and not claimable,
+            "claimable": bool(claimable),
+            "inactive": not claimable and not claimed,
+            "streak_days": 0,
+            "message": "",
+        }
+        if today is not None:
+            status.update(
+                {
+                    "daily_credit": today.amount,
+                    "benefit_kind": today.kind,
+                    "activity_key": today.key,
+                    "activity_name": today.key,
+                    "campaign_id": today.id,
+                    "ends_at": today.end_at or None,
+                }
+            )
+        if claimable:
+            status["message"] = f"今日可领 {claimable[0].amount or ''} Credits".strip()
+        elif claimed:
+            status["message"] = "今日已领取"
+        return status
+
+    async def checkin_claim(self) -> dict[str, Any] | None:
+        """领取今日活动 Credits（``POST .../{campaignId}/claim``）。
+
+        **领取是幂等的**：对已领过的活动再 POST 返回 ``replayed: true``（且
+        ``claimedAt`` 是过去那次的时间）——那是补记，不是新领取。返回值里用
+        ``replayed`` 区分，``message`` 据实说明，避免把重放报成「刚领到 100」。
+        """
+        client = await self._campaigns()
+        campaigns = await client.list()
+        target = next((c for c in campaigns if c.is_claimable), None)
+        if target is None:
+            # 没有可领的：区分「今天已领过」与「今天本来就没有活动」。
+            claimed = [c for c in campaigns if c.action_type == CLAIM_ACTION and c.is_claimed]
+            if claimed:
+                return {
+                    "checked_in": True,
+                    "claimable": False,
+                    "message": "今日已领取（无需重复领取）",
+                    "activity_key": claimed[0].key,
+                }
+            return {
+                "checked_in": False,
+                "claimable": False,
+                "inactive": True,
+                "message": "当前没有可领取的活动",
+            }
+
+        result = await client.claim(target.id)
+        if not result.ok:
+            raise RuntimeError(
+                result.message or result.error_code or f"领取失败（status={result.status}）"
+            )
+        return {
+            "checked_in": True,
+            "claimable": False,
+            "replayed": result.replayed,
+            # 重放时并没有新发奖，不给积分数字，免得上游打卡历史记成「今天领了」。
+            "extra_credits": None if result.replayed else target.amount,
+            "activity_key": target.key,
+            "grant_id": result.grant_id,
+            "claimed_at": result.claimed_at,
+            "message": (
+                "该活动此前已领取（重放），本次未新发 Credits"
+                if result.replayed
+                else f"已领取 {target.amount or ''} Credits".strip()
+            ),
+        }
 
     # -- 额度 ---------------------------------------------------------------
 
