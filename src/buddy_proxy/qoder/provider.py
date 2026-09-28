@@ -486,17 +486,20 @@ class QoderProvider(BaseProvider):
             resp = await client.send(req, stream=True)
         except httpx.HTTPError as exc:
             await client.aclose()
-            raise HTTPException(status_code=502, detail=f"qoder 上游连接失败: {exc}") from exc
+            raise _upstream_error(f"上游连接失败: {exc}") from exc
 
         if resp.status_code != 200:
             text = (await resp.aread()).decode("utf-8", "replace")[:300]
             await resp.aclose()
             await client.aclose()
-            status = resp.status_code if resp.status_code in (401, 429) else 502
-            raise HTTPException(
-                status_code=status,
-                detail=f"qoder 上游 HTTP {resp.status_code}: {text}",
-            )
+            message = f"HTTP {resp.status_code}: {text}"
+            if resp.status_code in (401, 429):
+                # 鉴权/限流是明确的、客户端可自行判断的错误，保持原样与状态码
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"qoder 上游 HTTP {resp.status_code}: {text}",
+                )
+            raise _upstream_error(message)
 
         if want_stream:
             # Anthropic 客户端（Claude Code 的 /v1/messages）不能收 OpenAI chunk：
@@ -539,10 +542,7 @@ class QoderProvider(BaseProvider):
         # developer -> system：上游在反序列化阶段整请求拒绝该 role。
         messages = upstream.get("messages")
         if isinstance(messages, list):
-            upstream["messages"] = [
-                {**m, "role": "system"} if isinstance(m, dict) and m.get("role") == "developer" else m
-                for m in messages
-            ]
+            upstream["messages"] = [_normalize_message(m) for m in messages]
 
         now_ms = int(time.time() * 1000)
         request_id = str(uuid.uuid4())
@@ -708,7 +708,7 @@ class QoderProvider(BaseProvider):
             await client.aclose()
 
         if error is not None:
-            raise HTTPException(status_code=502, detail=f"qoder 上游错误: {error}")
+            raise _upstream_error(error)
 
         message: dict[str, Any] = {"role": "assistant", "content": "".join(content) or None}
         if tool_calls:
@@ -842,8 +842,65 @@ def _unwrap(payload: str) -> tuple[str | None, str | None, bool]:
     if "choices" not in chunk and "usage" not in chunk and (
         chunk.get("code") is not None or isinstance(chunk.get("message"), str)
     ):
-        return None, str(chunk.get("message") or chunk)[:300], False
+        return None, _describe_upstream_error(chunk), False
     return body, None, False
+
+
+def _normalize_message(message: Any) -> Any:
+    """单条消息的上游适配（Qoder 专属，不改公共转换器）。
+
+    两处上游硬性要求，实测（2026-09）：
+
+    1. **``developer`` role 整请求被拒**（反序列化阶段就挂），转 ``system``。
+    2. **带 ``tool_calls`` 的 assistant，``content`` 不能是 ``null``**。
+       Anthropic 的 ``tool_use`` only 回合转出来正是 ``content: null``，
+       上游会拒单——而且**报错文案误导**：它说「role 'tool' 必须回应带
+       tool_calls 的消息」，害得往 tool 配对方向排查。实际把它改成 ``""``
+       即可通过（``assistant content=""`` 实测 200）。
+
+    这两条只影响本通道：其它 provider 共用同一个转换器，不能在那里改。
+    """
+    if not isinstance(message, dict):
+        return message
+    out = message
+    if out.get("role") == "developer":
+        out = {**out, "role": "system"}
+    if out.get("role") == "assistant" and out.get("tool_calls") and out.get("content") is None:
+        out = {**out, "content": ""}
+    return out
+
+
+def _describe_upstream_error(chunk: dict[str, Any]) -> str:
+    """带内错误帧 -> 可读原因。
+
+    上游把真正的失败原因放在 ``details`` 里（JSON 字符串），顶层 ``message``
+    只有一句没用的 ``Error in upstream response``。只取 ``message`` 会让
+    「模型不存在」「参数非法」「渠道校验拦截」全都退化成同一句话，线上只能
+    靠猜——所以这里把 ``details.error.message`` 一并挖出来。
+    """
+    parts = [str(chunk.get("message") or "")] if chunk.get("message") else []
+    code = chunk.get("code")
+    if code:
+        parts.append(f"code={code}")
+    details = chunk.get("details")
+    detail_msg = ""
+    if isinstance(details, str) and details.strip():
+        try:
+            parsed = json.loads(details)
+        except ValueError:
+            detail_msg = details.strip()
+        else:
+            err = parsed.get("error") if isinstance(parsed, dict) else None
+            if isinstance(err, dict):
+                detail_msg = str(err.get("message") or "")
+            elif isinstance(parsed, dict):
+                detail_msg = str(parsed.get("message") or "")
+    elif isinstance(details, dict):
+        err = details.get("error")
+        detail_msg = str((err or {}).get("message") or "") if isinstance(err, dict) else ""
+    if detail_msg:
+        parts.append(detail_msg)
+    return " | ".join(p for p in parts if p)[:500] or "上游返回未知错误"
 
 
 def _sse_error(message: str) -> bytes:
@@ -851,6 +908,23 @@ def _sse_error(message: str) -> bytes:
     payload = json.dumps({"error": {"message": message, "type": "upstream_error"}},
                          ensure_ascii=False)
     return f"data: {payload}\n\n".encode()
+
+
+def _upstream_error(error: str) -> HTTPException:
+    """上游带内错误 -> HTTPException（502）。
+
+    Anthropic 客户端（Claude Code）只认 ``{"type":"error","error":{...}}``，
+    收到我们原来的 ``{"detail": ...}`` 会把它当**未知可重试错误**，于是对着
+    同一个请求重试到上限（线上表现为 ``Retrying in 15s · attempt 7/10``）。
+    这里补上 Anthropic 形状，让它能正确识别并停止无谓重试。
+    """
+    return HTTPException(
+        status_code=502,
+        detail={
+            "type": "error",
+            "error": {"type": "api_error", "message": f"qoder 上游错误: {error}"},
+        },
+    )
 
 
 def _last_user_text(messages: list[Any]) -> str:
