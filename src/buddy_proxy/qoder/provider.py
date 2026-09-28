@@ -31,16 +31,35 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from buddy_proxy.providers.base import BaseProvider
 
 from .catalog import Catalog, is_hidden, public_model_id, to_openai_model
-
-#: 同时属于 CodeBuddy 静态表、且应优先归 CodeBuddy 的名字。
-#: 目前只有档位模型 ``auto``（CodeBuddy 的默认模型）。这些名字在本通道的精确
-#: 轮里让开，只在显式 ``qoder/`` 前缀下才由本通道服务。
-CODEBUDDY_OWNED_IDS: frozenset[str] = frozenset({"auto"})
 from .config import COSY_VERSION, Region, resolve_region, with_cached_endpoints
 from .cosy import sign
 from .credentials import AuthError, Credential, ensure_credential
 
 log = logging.getLogger(__name__)
+
+
+#: 归 CodeBuddy 的档位式名字：Qoder 目录里也挂着同名档位（``auto`` 是
+#: ``TIER_MODELS`` 合成的档位模型），但这个名字在 CodeBuddy 那边是**默认模型**，
+#: 语义上归 CodeBuddy。这些名字两个轮次都让开，只在显式 ``qoder/`` 前缀下
+#: 才由本通道服务。
+#:
+#: 为什么不能全靠 ``_is_codebuddy_model`` 推出来：静态表里还有
+#: ``qwen3.8-max`` / ``kimi-k3`` / ``deepseek-v4.1-flash`` / ``glm-5.3``
+#: —— 它们同时也是本通道真实发布的模型（同一批权重，两边都有资格），
+#: 让开会让这些模型在目录里"消失"。能自动区分的只有「**档位**模型」这一条：
+#: ``TIER_MODELS`` 是本地合成的、不是上游目录里的真实模型。
+CODEBUDDY_OWNED_IDS: frozenset[str] = frozenset({"auto"})
+
+
+def _is_codebuddy_owned(name: str) -> bool:
+    """该名字是否归 CodeBuddy（本通道让开）。
+
+    只对档位模型（:data:`CODEBUDDY_OWNED_IDS`）成立。大小写不敏感——``auto``
+    是档位名、没有大小写语义，``Auto`` / ``AUTO`` 也该让开；而别名轮那道
+    ``_is_codebuddy_model`` 守卫刻意做精确比对（否则 ``Qwen3.8-Max`` 这类
+    官方显示名会被误挡），漏得过去。
+    """
+    return name.strip().lower() in CODEBUDDY_OWNED_IDS
 
 #: 出站透传给上游的 OpenAI 字段白名单（其余私有扩展不透传）。
 _PASSTHROUGH_FIELDS = (
@@ -152,21 +171,20 @@ class QoderProvider(BaseProvider):
         want = (model or "").strip()
         if not want:
             return False
-        # ``auto`` 归 CodeBuddy：**两个轮次都让开**。别名轮的
-        # ``_is_codebuddy_model`` 守卫是精确大小写的（它必须如此，免得
-        # ``Qwen3.8-Max`` 这类官方显示名被误挡），所以 ``Auto`` / ``AUTO``
-        # 漏得过去；而 ``auto`` 无论如何都该是 CodeBuddy 的默认模型，
-        # 交给别名轮去认领没有正当理由。显式 ``qoder/auto`` 走前缀路由，
-        # 不经过本方法。
-        if want.lower() in CODEBUDDY_OWNED_IDS:
+        # 名字若同时属于 CodeBuddy 静态表（如 ``auto``），**两个轮次都让开**。
+        # 别名轮那道 ``_is_codebuddy_model`` 守卫管不到精确轮，而基类会把
+        # ``qoder/auto`` 剥前缀后当成精确命中；Qoder 的档位 id 恰好就是 ``auto``，
+        # 于是 ``auto``（CodeBuddy 的默认模型）被静默改道到本通道（实测确实发生
+        # 了：provider_route 显示 qoder 服务了 auto）。文件名式判断统一走
+        # ``_is_codebuddy_model``，静态表变了不用两边同步。
+        # 大小写变体（``Auto`` / ``AUTO``）也一并让开：``auto`` 这个档位名本来
+        # 就没有大小写语义，而 ``_is_codebuddy_model`` 是精确比对的（它必须如此，
+        # 免得 ``Qwen3.8-Max`` 这类官方显示名被误挡）。显式 ``qoder/auto`` 走
+        # 前缀路由，不经过本方法。
+        if _is_codebuddy_owned(want):
             return False
         entries = self._catalog._models or Catalog.fallback()
         # 隐藏模型（旧模型）也放进精确集合：它们只是不出现在列表里，点名仍可调。
-        # 但档位模型 ``auto`` 是**例外**——它同时是 CodeBuddy 静态表的默认模型，
-        # 归 CodeBuddy。``_is_codebuddy_model`` 那道守卫按设计只在**别名轮**生效，
-        # 挡不住精确轮；这里必须自己让开，否则 ``auto`` 会被静默改道到本通道
-        # （实测确实发生了：provider_route 显示 qoder 服务了 auto）。
-        # 点名 ``qoder/auto`` 仍走前缀路由，不受影响。
         exact_ids = {(public_model_id(e) or "").strip() for e in entries}
         exact_ids.discard("")
         if want in exact_ids:
