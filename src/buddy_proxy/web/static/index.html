@@ -1341,11 +1341,24 @@ function renderGroups() {
         : '';
       const schWinsAttr = sch ? esc(JSON.stringify(sch.windows)) : '[]';
       const dim = dis ? ' style="opacity:.5"' : '';
+      const ord = m.order || null;
+      const ordMarks = ord ? ord.marks : [];
+      const ordTitle = ord
+        ? '候选上游顺序：' + ord.targets.join(' → ')
+          + (ordMarks.length ? '；冷却中：' + ordMarks.map(k => k.target).join(', ') : '')
+        : '';
+      const ordTag = ord
+        ? `<span class="tag ${ordMarks.length ? 'bad' : 'ok'}" title="${esc(ordTitle)}">⇄ ${ord.targets.length}${ordMarks.length ? ' ⏸' + ordMarks.length : ''}</span>`
+        : '';
+      const ordAttr = ord ? esc(JSON.stringify(ord.targets)) : '[]';
+      // 冷却快照随行传入：弹窗就能显示 ⏸，不必再打一次 /ui/api/models
+      const ordMarksAttr = esc(JSON.stringify((ordMarks || []).map(k => [k.target, k.cooldown_s])));
       return `<tr>
         <td${dim}><span class="mono">${esc(m.id)}</span>
             ${m.is_default ? '<span class="badge-default">✦ 默认</span>' : ''}
             ${dis ? '<span class="tag bad">已停用</span>' : ''}
-            ${schTag}</td>
+            ${schTag}
+            ${ordTag}</td>
         <td class="muted"${dim}>${esc(m.name || '')}</td>
         <td${dim}>${m.credits ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
@@ -1354,6 +1367,8 @@ function renderGroups() {
             ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick="setDefault('${esc(g.id)}','${esc(m.id)}')">设为默认</button>`}
             <button class="primary" onclick="runTest('${esc(g.id)}','${esc(m.id)}')">测试</button>
             <button class="ghost" title="设置限时可用时段：仅在窗口内可调用，窗口外直接失败（支持跨天）" onclick='openScheduleModal("${esc(g.id)}","${esc(m.id)}",${schWinsAttr})'>${sch ? '时段·' + sch.windows.length : '时段'}</button>
+            <button class="ghost" title="设置候选上游顺序：按序尝试，未输出任何内容就失败时自动换下一档" onclick='openOrderModal("${esc(g.id)}","${esc(m.id)}",${ordAttr},${ordMarksAttr})'>${ord ? '顺序·' + ord.targets.length : '顺序'}</button>
+            ${ordMarks.length ? `<button class="ghost" title="清除冷却标记，立刻重新尝试这些目标" onclick="clearOrderMarks('${esc(g.id)}','${esc(m.id)}')">清冷却</button>` : ''}
             <button class="${dis ? 'primary' : 'ghost'}" title="${dis ? '重新启用后可正常调用' : '停用后调用此模型的请求直接失败'}" onclick="toggleModel('${esc(g.id)}','${esc(m.id)}',${dis ? 'false' : 'true'})">${dis ? '启用' : '停用'}</button>
         </td></tr>`;
     }).join('');
@@ -1565,6 +1580,225 @@ async function saveSchedule() {
     closeModal();
     refreshAll();
   } catch (e) { toast('保存失败: ' + e.message, true); }
+}
+
+// ── 候选上游顺序编辑（按序尝试、未提交即失败换下一档）──
+let ORDER_CTX = null;         // { provider, model }
+let ORDER_ITEMS = [];         // 当前正在编辑的 [{provider, model}]，唯一真源（DOM 只做渲染）
+let ORDER_OPTIONS = null;     // /ui/api/model-order/options 的缓存：{provider: [{id,label}]}
+let ORDER_MARKS = {};         // "provider/model"（小写归一）→ 剩余冷却秒数（仅展示用）
+let ORDER_PROVIDER_LIST = []; // 可选通道 id 列表
+let ORDER_DRAG_FROM = null;   // 拖拽中的行下标
+
+// 规范化比较：大小写/空白不敏感，避免「Glm-5.3」被判成不存在的模型
+function orderKey(provider, model) {
+  return `${(provider || '').toLowerCase()}/${(model || '').trim().toLowerCase()}`;
+}
+
+async function loadOrderOptions() {
+  if (ORDER_OPTIONS) return ORDER_OPTIONS;
+  const r = await api('/ui/api/model-order/options');
+  const map = {};
+  (r.groups || []).forEach(g => { map[g.provider] = g.models || []; });
+  ORDER_OPTIONS = map;
+  return map;
+}
+
+function orderRender() {
+  const box = document.getElementById('order-rows');
+  if (!box) return;
+  if (!ORDER_ITEMS.length) {
+    box.innerHTML = '<div class="muted" style="font-size:13px;padding:10px 0">'
+      + '暂无目标 —— 模型按 id 自动匹配到哪个通道就用哪个（历史行为）。</div>';
+    return;
+  }
+  box.innerHTML = ORDER_ITEMS.map((it, i) => orderRow(it, i)).join('');
+}
+
+function orderRow(item, idx) {
+  const id = `order-p-${idx}`;
+  const models = (ORDER_OPTIONS && ORDER_OPTIONS[item.provider]) || [];
+  // 自由文本 + <datalist>：既能点选（用户要的「可以选」），又保留手输
+  // （目录里的名字可能与上游实际接受的 id 不同，锁死成下拉会把人卡住）
+  const list = models.map(m =>
+    `<option value="${esc(m.id)}"${m.label ? ` label="${esc(m.label)}"` : ''}></option>`).join('');
+  const left = ORDER_MARKS[orderKey(item.provider, item.model)];
+  const known = !models.length || models.some(m => m.id === item.model);
+  return `<div class="order-row" draggable="true" data-idx="${idx}"
+      style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <span class="order-grip" title="拖拽调整顺序" style="cursor:grab;color:var(--muted)">⠿</span>
+    <span class="muted mono" style="flex:0 0 18px">${idx + 1}.</span>
+    <select class="order-provider" style="flex:0 0 26%" onchange="orderSetProvider(${idx}, this.value)">
+      ${ORDER_PROVIDER_LIST.map(p =>
+        `<option value="${esc(p)}"${p === item.provider ? ' selected' : ''}>${esc(p)}</option>`).join('')}
+    </select>
+    <input class="order-model" type="text" list="${id}" style="flex:1"
+      placeholder="模型名（可下拉选择或手输，如 glm-5.3）"
+      value="${esc(item.model || '')}"
+      oninput="orderSetModel(${idx}, this.value)">
+    <datalist id="${id}">${list}</datalist>
+    ${left ? `<span class="tag bad" title="冷却中，剩余 ${left}s；期间请求会跳过它">⏸ ${left}s</span>` : ''}
+    ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
+    <button class="ghost" title="上移" onclick="orderMove(${idx},-1)">▲</button>
+    <button class="ghost" title="下移" onclick="orderMove(${idx},1)">▼</button>
+    <button class="ghost" title="删除此目标" onclick="orderRemove(${idx})">✕</button>
+  </div>`;
+}
+
+function orderSetProvider(idx, value) { ORDER_ITEMS[idx].provider = value; orderRender(); }
+
+function orderSetModel(idx, value) {
+  ORDER_ITEMS[idx].model = value;
+  // 只对「已完整输入」的名做存在性提示，避免每敲一个字符就重绘闪烁
+  const row = document.querySelector(`#order-rows .order-row[data-idx="${idx}"]`);
+  if (row && value.trim().length >= 2) orderRender();
+}
+
+function orderMove(idx, delta) {
+  const to = idx + delta;
+  if (to < 0 || to >= ORDER_ITEMS.length) return;
+  const [it] = ORDER_ITEMS.splice(idx, 1);
+  ORDER_ITEMS.splice(to, 0, it);
+  orderRender();
+}
+
+function orderRemove(idx) { ORDER_ITEMS.splice(idx, 1); orderRender(); }
+
+// 拖拽：原生 HTML5。dragstart 只记起点，drop 时按 DOM 顺序回写 ORDER_ITEMS，
+// 保证「DOM 渲染顺序」与「数组顺序」永远一致（数组才是保存时读的真源）。
+function orderDragStart(ev) {
+  const row = ev.target.closest && ev.target.closest('.order-row');
+  if (!row) return;
+  ORDER_DRAG_FROM = Number(row.dataset.idx);
+  if (ev.dataTransfer) {
+    ev.dataTransfer.effectAllowed = 'move';
+    // Firefox 不设 data 就不触发 drag 事件
+    try { ev.dataTransfer.setData('text/plain', String(ORDER_DRAG_FROM)); } catch (e) {}
+  }
+  row.style.opacity = '0.4';
+}
+
+function orderDragOver(ev) {
+  if (ORDER_DRAG_FROM === null) return;
+  ev.preventDefault();  // 不 preventDefault 就不会触发 drop
+  const row = ev.target.closest && ev.target.closest('.order-row');
+  const box = document.getElementById('order-rows');
+  if (!row || !box || Number(row.dataset.idx) === ORDER_DRAG_FROM) return;
+  const dragged = box.querySelector(`.order-row[data-idx="${ORDER_DRAG_FROM}"]`);
+  if (!dragged) return;
+  const rect = row.getBoundingClientRect();
+  const after = (ev.clientY - rect.top) > rect.height / 2;
+  box.insertBefore(dragged, after ? row.nextElementSibling : row);
+  // 拖拽过程中重新编号，让后续判定基于最新位置
+  Array.from(box.querySelectorAll('.order-row')).forEach((r, i) => { r.dataset.idx = i; });
+  ORDER_DRAG_FROM = Number(dragged.dataset.idx);
+}
+
+function orderDragEnd(ev) {
+  const box = document.getElementById('order-rows');
+  if (box && ORDER_DRAG_FROM !== null) {
+    ORDER_ITEMS = Array.from(box.querySelectorAll('.order-row')).map(r => ({
+      provider: r.querySelector('.order-provider').value,
+      model: r.querySelector('.order-model').value.trim(),
+    }));
+  }
+  ORDER_DRAG_FROM = null;
+  orderRender();
+}
+
+function addOrderRow() {
+  const prev = ORDER_ITEMS.length ? ORDER_ITEMS[ORDER_ITEMS.length - 1].provider : '';
+  ORDER_ITEMS.push({ provider: prev || ORDER_PROVIDER_LIST[0] || '', model: '' });
+  orderRender();
+  const box = document.getElementById('order-rows');
+  const last = box && box.querySelector('.order-row:last-child .order-model');
+  if (last) last.focus();
+}
+
+async function openOrderModal(provider, model, targets, marks) {
+  ORDER_CTX = { provider, model };
+  document.getElementById('modal-title').textContent = `候选上游顺序 · ${provider}/${model}`;
+  // 冷却快照由模型行随行传入（[[target, cooldown_s], ...]），省掉一次 /ui/api/models。
+  // target 是 "provider/model"；模型名自身不含 "/"，因为 model_key 只加一个前缀。
+  ORDER_MARKS = {};
+  (marks || []).forEach(k => {
+    const i = String(k[0]).indexOf('/');
+    if (i > 0) ORDER_MARKS[orderKey(String(k[0]).slice(0, i), String(k[0]).slice(i + 1))] = k[1];
+  });
+  ORDER_ITEMS = (targets || []).map(t => {
+    const i = t.indexOf('/');
+    return i > 0 ? { provider: t.slice(0, i), model: t.slice(i + 1) }
+                 : { provider: 'codebuddy', model: t };
+  });
+  document.getElementById('modal-body').innerHTML = `
+    <div class="muted" style="font-size:13px;margin-bottom:10px">
+      从上往下按序尝试，某个渠道<b>失败就换下一个</b>，并给失败渠道打 5 分钟冷却标记
+      （反复失败延长至 1 小时），期间请求自动跳过它。<br>
+      仅当<b>尚未向客户端输出任何内容</b>就失败时才会换档——已开始流式返回后不再重试
+      （防止上游重复计费）。因此 <b>codebuddy 通道的流式错误不会换档</b>
+      （上游把错误放在流里，代理无法感知），把它排在末位更实用。<br>
+      模型名可下拉选择或手输（上游实际接受的 id 可能与目录名不同）；<b>拖拽 ⠿ 或按 ▲▼</b>
+      调整顺序。不添加任何目标 = 恢复历史路由（按模型 id 自动匹配）。<br>
+      <b>注意</b>：客户端把 model 写成 <span class="mono">通道/模型</span> 时是明确指定通道，
+      会<b>直接走该通道、不参与这里的换档</b>；想要自动换档请让客户端只传模型名。
+    </div>
+    <div id="order-rows"></div>
+    <button class="ghost" style="margin-top:8px" onclick="addOrderRow()">+ 添加目标</button>
+    <div style="margin-top:16px;text-align:right">
+      <button onclick="closeModal()">取消</button>
+      <button class="primary" onclick="saveOrder()">保存</button>
+    </div>`;
+  const box = document.getElementById('order-rows');
+  box.addEventListener('dragstart', orderDragStart);
+  box.addEventListener('dragover', orderDragOver);
+  box.addEventListener('drop', ev => ev.preventDefault());
+  box.addEventListener('dragend', orderDragEnd);
+  // 拖到行外时也要收尾，否则残留的半透明行不会被清掉
+  box.addEventListener('dragleave', ev => {
+    if (!box.contains(ev.relatedTarget)) orderDragEnd(ev);
+  });
+  // 选择器数据拉不到也不能卡住编辑：退化成纯手输（options 为空数组）
+  await loadOrderOptions().catch(() => { ORDER_OPTIONS = {}; });
+  // 通道列表以**选项接口**为准，而不是 MODELS：MODELS 只在「模型」标签页加载过才有值，
+  // 从其它入口打开弹窗时它是 null，会让下拉框空掉。
+  ORDER_PROVIDER_LIST = Object.keys(ORDER_OPTIONS).length
+    ? Object.keys(ORDER_OPTIONS)
+    : (MODELS && MODELS.groups || []).map(g => g.id);
+  orderRender();
+  document.getElementById('overlay').classList.add('show');
+}
+
+async function saveOrder() {
+  if (!ORDER_CTX) return;
+  const targets = ORDER_ITEMS
+    .map(it => ({ provider: it.provider, model: (it.model || '').trim() }))
+    .filter(it => it.model);
+  try {
+    const r = await api('/ui/api/model-order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ ...ORDER_CTX, targets })});
+    // 后端会把目标规范化（剥通道前缀、归一别名）。若与输入不同就明确告知，
+    // 否则「我写的是 glm-5.3，实际生效的是别的名字」这种静默错配没人看得见。
+    const saved = r.targets || [];
+    const asked = targets.map(t => `${t.provider}/${t.model}`);
+    const changed = asked.some((a, i) => saved[i] !== a);
+    toast(targets.length
+      ? `${ORDER_CTX.provider}/${ORDER_CTX.model} 候选顺序：${saved.join(' → ')}`
+        + (changed ? '（已按通道目录规范化）' : '')
+      : `${ORDER_CTX.provider}/${ORDER_CTX.model} 已恢复历史路由`);
+    closeModal();
+    refreshAll();
+  } catch (e) { toast('保存失败: ' + e.message, true); }
+}
+
+async function clearOrderMarks(provider, model) {
+  try {
+    const r = await api('/ui/api/model-order/mark-clear', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ provider, model })});
+    toast(`已清除 ${r.marks_cleared || 0} 个冷却标记`);
+    refreshAll();
+  } catch (e) { toast('清除失败: ' + e.message, true); }
 }
 
 async function runTest(provider, model) {

@@ -30,6 +30,7 @@ from buddy_proxy.web.model_list import load_models_from_local_config
 from buddy_proxy.codebuddy_provider import forward_chat
 from buddy_proxy.benefits import BenefitsManager, read_checkin_settings
 from buddy_proxy.core import settings as settings_mod
+from buddy_proxy.core import cooldown as cooldown_mod
 
 # 一键测试发送的内容与 token 上限（够穿透 thinking 模型的少量预算）
 TEST_PROMPT = "hi"
@@ -256,6 +257,7 @@ async def ui_models(request: Request):
     default_model = getattr(state, "default_model", None) or ""
     disabled = getattr(state, "disabled_models", set()) or set()
     schedules = getattr(state, "model_schedules", {}) or {}
+    order = getattr(state, "model_order", None) or {}
     for group in groups:
         for m in group["models"]:
             st = stat_map.get((group["id"], m["id"])) or {}
@@ -265,9 +267,25 @@ async def ui_models(request: Request):
                 "avg_ms": st.get("avg_ms", 0),
                 "last_ts": st.get("last_ts", 0),
             }
-            key = settings_mod.model_key(group["id"], m["id"])
+            # 键必须用**剥前缀后的裸名**构造：通道目录里 m["id"] 带前缀
+            # （qoder/qoder/qfmodel 形态），而转发侧一律用剥前缀的裸名
+            # （_reject_if_disabled 拿到的是裸名），两处口径必须一致，否则
+            # 「停用了却还能用」/「时段不生效」。
+            key = settings_mod.model_key(group["id"], _bare_model_id(m["id"], group["id"]))
             m["is_default"] = default_model in (key, m["id"])
             m["disabled"] = key in disabled
+            # 候选上游顺序：有配置则附目标列表 + 各目标当前冷却标记，供前端渲染徽标/编辑器
+            order_targets = order.get(key) if isinstance(order, dict) else None
+            if order_targets:
+                marks = []
+                for target in order_targets:
+                    if "/" not in target:
+                        continue
+                    t_provider, t_model = target.split("/", 1)
+                    left = cooldown_mod.remaining(t_provider, t_model)
+                    if left:
+                        marks.append({"target": target, "cooldown_s": left})
+                m["order"] = {"targets": order_targets, "marks": marks}
             # 限时窗口：有配置则附窗口列表 + 当前是否在开放时段，供前端渲染徽标/编辑器
             windows = schedules.get(key) if isinstance(schedules, dict) else None
             if windows:
@@ -660,6 +678,146 @@ async def ui_model_schedule(request: Request):
         {"model_schedules": {k: {"windows": v} for k, v in sorted(current.items())}})
     return {"ok": True, "model": key, "windows": windows,
             "open": settings_mod.model_schedule_open(windows) if windows else None}
+
+
+@app.post("/ui/api/model-order")
+async def ui_model_order(request: Request):
+    """设置/清除模型的候选上游顺序（按序尝试、未提交即失败就换下一档）。
+
+    请求体：``{"provider": "zcode", "model": "glm-5.3",
+              "targets": [{"provider": "zcode", "model": "glm-5.3"},
+                          {"provider": "traepat", "model": "glm-5.3"}]}``
+
+    每个目标经 :func:`_normalize_model_ref` + :func:`_validate_model` 校验真实存在，
+    非法目标 400。``targets`` 为空列表或缺省 → 删除该键（恢复历史路由）并顺带清掉
+    该模型的冷却标记——用户显式改顺序 = 重置健康判断。持久化到 settings.json 的
+    ``model_order`` 并热更新运行态。
+    """
+    _ensure_local(request)
+    state = get_state()
+    body = await request.json()
+    provider = (body.get("provider") or "").strip()
+    model = (body.get("model") or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
+    provider, model = _normalize_model_ref(provider, model, state)
+    _validate_model(provider or "codebuddy", model, state)
+
+    key = settings_mod.model_key(provider, model)
+    raw_targets = body.get("targets")
+    targets: list[str] = []
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            t_model = (item.get("model") or "").strip()
+            if not t_model:
+                continue
+            t_provider, t_model = _normalize_model_ref(
+                (item.get("provider") or "").strip(), t_model, state)
+            _validate_model(t_provider or "codebuddy", t_model, state)
+            targets.append(settings_mod.model_key(t_provider or "codebuddy", t_model))
+    targets = settings_mod.normalize_order(list(dict.fromkeys(targets)))
+
+    current = getattr(state, "model_order", None) or {}
+    if not isinstance(current, dict):
+        current = dict(current)
+    # 清顺序时顺带清标记：用户显式改 = 重置健康判断，避免刚配完还是被冷却挡着。
+    # 必须在 pop 之前取旧目标列表，否则读到的是已被删空的值。
+    cleared = 0
+    if targets:
+        current[key] = targets
+    else:
+        for target in current.get(key) or []:
+            if "/" in target:
+                cleared += cooldown_mod.clear(*target.split("/", 1))
+        current.pop(key, None)
+
+    state.model_order = current
+    # 存储形状与用户手写配置一致：直接存字符串数组（不像 model_schedules 包一层）
+    settings_mod.save_settings({"model_order": {k: v for k, v in sorted(current.items())}})
+    return {"ok": True, "model": key, "targets": targets, "marks_cleared": cleared}
+
+
+@app.get("/ui/api/model-order/options")
+async def ui_model_order_options(request: Request):
+    """候选目标选择器数据源：``[{provider, models: [...]}, ...]``。
+
+    只在「添加目标」时拉一次，让用户**选**而不是拼错。刻意**不**复用
+    ``/ui/api/models``：那个接口带停用/时段/指标等重量级字段，这里只需要
+    「有哪些通道、每个通道认识哪些模型名」，请求体越小越好。
+
+    每个模型给两样东西：
+
+    - ``id``：**用来写进 model_order 的规范名**（剥掉 ``qoder/<public>`` 这类
+      通道内前缀，因为转发侧按裸名路由）。
+    - ``label``：给人看的名（display_name / 别名），与 ``id`` 不同才显示。
+
+    刻意**不过滤**停用/不在时段的目标：候选里放一个今天不想用的通道是合法配置
+    （运行期会跳过并继续下一个），把它从选择器里藏掉只会让人以为不支持。
+    """
+    _ensure_local(request)
+    state = get_state()
+    groups: list[dict[str, Any]] = []
+    for group in _model_groups(state):
+        gid = group.get("id") or ""
+        if not gid:
+            continue
+        models: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in group.get("models") or []:
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get("id") or ""
+            mid = _bare_model_id(raw_id, gid)
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            label = (item.get("name") or "").strip()
+            entry = {"id": mid, "target": settings_mod.model_key(gid, mid)}
+            if label and label != mid:
+                entry["label"] = label
+            models.append(entry)
+        if models:
+            groups.append({"provider": gid, "models": models})
+    return {"groups": groups}
+
+
+@app.post("/ui/api/model-order/mark-clear")
+async def ui_model_order_mark_clear(request: Request):
+    """清除冷却标记（不动顺序），给「上游已恢复、现在就重试」用。
+
+    请求体：``{"provider": "zcode", "model": "glm-5.3", "target": "zcode/glm-5.3"}``
+    —— ``target`` 可选；缺省则清该模型候选列表里全部目标的标记。两者都缺省则全清。
+    """
+    _ensure_local(request)
+    state = get_state()
+    body = await request.json()
+    provider = (body.get("provider") or "").strip()
+    model = (body.get("model") or "").strip()
+    target = (body.get("target") or "").strip()
+
+    if target:
+        if "/" not in target:
+            raise HTTPException(
+                status_code=400, detail={"error": {"message": "target 应为 provider/model 形态"}})
+        cleared = cooldown_mod.clear(*target.split("/", 1))
+        return {"ok": True, "target": target, "marks_cleared": cleared}
+
+    if not model:
+        cleared = cooldown_mod.clear()
+        return {"ok": True, "marks_cleared": cleared}
+
+    provider, model = _normalize_model_ref(provider, model, state)
+    key = settings_mod.model_key(provider, model)
+    order_targets = (getattr(state, "model_order", None) or {}).get(key) or []
+    cleared = 0
+    for item in order_targets:
+        if "/" in item:
+            cleared += cooldown_mod.clear(*item.split("/", 1))
+    if not order_targets:
+        cleared = cooldown_mod.clear(provider or "codebuddy", model)
+    return {"ok": True, "model": key, "marks_cleared": cleared}
 
 
 @app.post("/ui/api/test")

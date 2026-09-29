@@ -347,6 +347,29 @@ def main():
         print(f"[Model Schedules] {len(model_schedules)} 个限时模型: "
               f"{', '.join(sorted(model_schedules))}")
 
+    # 候选上游顺序：settings.json 的 {"provider/model": ["zcode/glm-5.3", ...]}，
+    # 命中时按序尝试、未提交即失败才换下一个（见 forward.py）。键归一成 model_key
+    # 口径；通道未启用的目标直接丢弃并告警——留着只会变成一条永远被静默跳过的条目。
+    model_order: dict[str, list[str]] = {}
+    raw_order = saved_settings.get("model_order")
+    if isinstance(raw_order, dict):
+        for raw_key, value in raw_order.items():
+            if not (isinstance(raw_key, str) and raw_key.strip()):
+                continue
+            key = settings_mod.normalize_order_key(raw_key)
+            targets = []
+            for target in settings_mod.normalize_order(value):
+                pid = target.split("/", 1)[0] if "/" in target else "codebuddy"
+                if pid != "codebuddy" and pid not in providers:
+                    print(f"[Model Order] {key} 的目标 {target} 通道未启用，已忽略")
+                    continue
+                targets.append(target)
+            if key and targets:
+                model_order[key] = targets
+    if model_order:
+        print(f"[Model Order] {len(model_order)} 个模型配置候选顺序: "
+              f"{', '.join(sorted(model_order))}")
+
     metrics = MetricsCollector(args.log_file.parent / "metrics.jsonl")
 
     _state.proxy_state = ProxyState(
@@ -363,6 +386,7 @@ def main():
         default_model=default_model or None,
         disabled_models=disabled_models,
         model_schedules=model_schedules,
+        model_order=model_order,
         metrics=metrics,
         interactive_login=args.login,
     )

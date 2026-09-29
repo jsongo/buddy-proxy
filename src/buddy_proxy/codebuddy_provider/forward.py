@@ -1,6 +1,17 @@
-"""多 provider 路由入口：显式前缀 / 模型自动匹配 / 兜底通道。
+"""多 provider 路由入口：显式前缀 / 模型自动匹配 / 兜底通道 / 候选顺序换档。
 
 所有路径统一经 :func:`observability._instrument` 记录请求指标（/ui 图表数据源）。
+
+**候选顺序（``state.model_order``）的重试规则**：一个模型的候选上游按序尝试，但
+**只有**当一次尝试在**向客户端提交任何字节之前**失败时才换下一档——即抛
+``HTTPException(可换档状态码)``、抛传输层异常（``_RETRYABLE_EXC``），或拿到非 2xx 的
+``JSONResponse``。一旦返回的是 ``StreamingResponse``，字节即将/已经开始流向客户端，
+重放有重复计费风险，绝不换档（同 ``trae/pat/chat.py`` 的「首个语义事件提交后绝不重放」
+不变量）。已知盲区：codebuddy 流式把上游错误做成了**带内错误 chunk**
+（``pipeline.stream_upstream``），路由器无从察觉，故第一档为 codebuddy 时流式失败不换档。
+
+反过来，**编程错误不换档**：``TypeError`` / ``KeyError`` 这类 bug 若被当成上游故障，
+就会被冷却标记掩盖、客户端反而拿到 200，真因极难发现。
 """
 
 from __future__ import annotations
@@ -10,6 +21,7 @@ import json
 import pathlib
 from typing import Any
 
+import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -18,9 +30,28 @@ from buddy_proxy.core.state import (
     get_state,
 )
 from buddy_proxy.core import settings as settings_mod
+from buddy_proxy.core import cooldown as cooldown_mod
 
 from .observability import _instrument
 from .provider import _default_codebuddy
+
+#: 允许换档的 HTTP 状态码：上游不可用/过载，换个通道有意义。
+#:
+#: 刻意**不含** 400/401/403/404：那些是确定性错误（参数错、模型不存在、被停用、
+#: 凭据无效），换谁都不会成功，重试只会拖时间并掩盖真因。
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+#: 允许换档的**异常**类型：只认传输层故障，不认编程错误。
+#:
+#: 刻意**不用**裸 ``except Exception``：那会把 ``TypeError`` / ``KeyError`` 这类真 bug 也
+#: 当成「上游故障」——打上冷却标记、静默换到下一档，客户端拿到 200，真因只剩一行
+#: ``error=TypeError`` 日志（而且非 ``HTTPException`` 不会进 ``_instrument``，连指标都
+#: 没有）。真 bug 被换档「治好」比直接报错更难排查。
+#:
+#: 这样收窄是安全的：本仓库的通道在各自 ``forward`` 里已把传输异常统一转成
+#: ``HTTPException(502/504/429)``（见 zcode/trae pat 的做法），所以绝大多数失败走上面
+#: 的 ``HTTPException`` 分支；这里兜的是漏网的上游连接层异常。
+_RETRYABLE_EXC = (httpx.HTTPError, OSError)
 
 
 @functools.lru_cache(maxsize=1)
@@ -118,6 +149,187 @@ def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
         )
 
 
+def _resolve_auto(state: Any, requested_model: str) -> Any:
+    """模型 id 自动匹配：**先全部按 id 精确匹配**（含剥前缀裸名），都未命中再退回别名。
+
+    分两轮是必须的——多个通道可能"认识"同一个名字（qoder 的显示名 GLM-5.3 与
+    zcode 的模型名 glm-5.3 撞车），若让别名与精确匹配同等参与、按注册序先到
+    先得，注册靠前的通道就会把别人的模型抢走。别名只能是兜底，不能是抢占。
+
+    别名轮（``allow_aliases=True``）额外跳过「名字就是 CodeBuddy 静态表 id」的
+    情况：CodeBuddy 是兜底通道、不在 ``providers`` 里，别名轮无从靠「别的通道
+    能否精确认领」判断归属。``auto`` 正是 CodeBuddy 的默认模型，而 Qoder 本地
+    合成的档位模型（TIER_MODELS）也叫 ``auto``，不挡住就会静默改道。
+
+    ⚠️ 只挡别名轮，不挡精确轮：精确轮是各通道按自己发布的 id 认领，trae/zcode
+    等通道的模型名可能与静态表重合（两边都真有这个模型），让他们照常先认领，
+    与既有路由行为一致。
+    """
+    providers = getattr(state, "providers", {}) or {}
+    for allow_aliases in (False, True):
+        if allow_aliases and _is_codebuddy_model(requested_model):
+            break  # 归 CodeBuddy 静态表，别名不得认领
+        for p in providers.values():
+            try:
+                if p.accepts_model(requested_model, aliases=allow_aliases):
+                    return p
+            except Exception:  # noqa: BLE001 - 单个通道判断失败不该阻断路由
+                continue
+    return None
+
+
+async def _dispatch_once(
+    state: Any,
+    provider_id: str,
+    model: str,
+    body: dict[str, Any],
+    protocol: str,
+    original: dict[str, Any] | None,
+) -> StreamingResponse | JSONResponse:
+    """把一次请求派发到**已解析**的 ``(provider_id, model)``。
+
+    只做单次派发：解析 provider 对象 → 停用/时段闸门 → ``ensure_auth`` → ``_instrument``。
+    **不**读 ``model_order``、不排序、不做换档——那些都在 :func:`forward_chat` 外层。
+    **不吞任何异常**（``HTTPException`` 原样上抛），由调用方决定是否换下一档。
+
+    ``body`` / ``model`` 必须是**已剥前缀**的：前缀剥离、trae/traepat 交叉校验、
+    ``_resolved_model_id`` 都属于**解析**，留在 ``forward_chat`` 里。
+    """
+    providers = getattr(state, "providers", {}) or {}
+    if provider_id == "codebuddy" or provider_id not in providers:
+        # 默认 CodeBuddy 通道（不在 providers 里），对称封装，与其它 provider 一致
+        _reject_if_disabled(state, "codebuddy", model)
+        return await _instrument(
+            state, _default_codebuddy.forward(body, protocol, original),
+            provider_id="codebuddy", model_id=model, protocol=protocol,
+            stream=bool(body.get("stream")),
+        )
+    provider = providers[provider_id]
+    # 非默认 provider（Trae/豆包等）：由各自 forward 决定协议支持范围。
+    # Trae 已支持 anthropic 协议（/v1/messages 客户端如 Claude Code 可直连）；
+    # 豆包等仅 openai 协议透传（doubao2api 只支持 OpenAI chat completions）。
+    # 停用/时段键按 provider 归一后的 id 生成，与转发链路口径一致
+    # （别名请求如「Qwen3.8-Flash」也要能被停用规则命中）。
+    gate_model = _resolved_model_id(provider, model)
+    _reject_if_disabled(state, provider.id, gate_model)
+    diagnostic("provider_route", provider=provider.id, model=model, protocol=protocol)
+    provider.ensure_auth()
+    return await _instrument(
+        state, provider.forward(body, protocol, original),
+        provider_id=provider.id, model_id=model, protocol=protocol,
+        stream=bool(body.get("stream")),
+    )
+
+
+def _split_target(target: str) -> tuple[str, str]:
+    """候选目标 ``"provider/model"`` → ``(provider, model)``；裸名 → codebuddy。"""
+    if "/" in target:
+        provider_id, model = target.split("/", 1)
+        return provider_id, model
+    return "codebuddy", target
+
+
+def _target_gated_out(state: Any, provider_id: str, model: str) -> bool:
+    """候选目标是否被停用/不在可用时段（此时跳过它、继续下一个）。
+
+    与 :func:`_reject_if_disabled` 同一套判定，但**返回布尔而非抛 403**：候选里放着
+    一个今天不想用的通道时，不该把整个模型的请求打成 403（决策：跳过并继续）。
+    ``_reject_if_disabled`` 仍然保留，用于非候选路径（未配顺序时行为不变）。
+    """
+    key = settings_mod.model_key(provider_id, model)
+    disabled = getattr(state, "disabled_models", None)
+    if disabled and key in disabled:
+        return True
+    schedules = getattr(state, "model_schedules", None)
+    windows = schedules.get(key) if isinstance(schedules, dict) else None
+    return windows is not None and not settings_mod.model_schedule_open(windows)
+
+
+def _retryable_failure(resp: StreamingResponse | JSONResponse) -> int | None:
+    """本次派发结果是否算「未提交即失败」，可否安全换下一个候选。
+
+    可换：非 2xx 的 ``JSONResponse``（zcode/mimo 的 ``_upstream_error_response``、
+    qoder/doubao 的 4xx/5xx 错误体），且状态码在 ``_RETRYABLE_STATUS`` 内。
+
+    不可换：一切 ``StreamingResponse``——响应对象已经交给 ASGI，字节即将/已经开始流向
+    客户端，重放有重复计费风险（见模块 docstring 的不变量）。codebuddy 流式的带内错误
+    chunk 也走这条分支，属于已知盲区。
+    """
+    if isinstance(resp, StreamingResponse):
+        return None
+    status = getattr(resp, "status_code", 200)
+    return status if status in _RETRYABLE_STATUS else None
+
+
+async def _forward_with_order(
+    state: Any,
+    key: str,
+    targets: list[str],
+    body: dict[str, Any],
+    protocol: str,
+    original: dict[str, Any] | None,
+) -> StreamingResponse | JSONResponse:
+    """按 ``targets`` 顺序尝试，未被提交即失败就换下一档。
+
+    跳过两类候选：当前被 ``core.cooldown`` 标记的、被停用/不在可用时段的（决策：跳过并
+    继续，而不是把整个模型打成 403）。
+
+    全部候选都不可用/都失败时抛**最后一个**可换档失败（保留最有信息量的错误），而不是
+    笼统报 502——客户端要能看到上游真因。
+    """
+    last_exc: HTTPException | None = None
+    last_note = ""
+    for target in targets:
+        provider_id, model = _split_target(target)
+        if cooldown_mod.is_marked(provider_id, model):
+            diagnostic("model_order_skip", model=key, target=target, reason="cooldown")
+            continue
+        if _target_gated_out(state, provider_id, model):
+            diagnostic("model_order_skip", model=key, target=target, reason="gated")
+            continue
+        try:
+            resp = await _dispatch_once(state, provider_id, model, body, protocol, original)
+        except HTTPException as exc:
+            if exc.status_code not in _RETRYABLE_STATUS:
+                raise  # 确定性错误（400/401/403/404）：换谁都没用，原样上抛
+            last_exc = exc
+            last_note = f"HTTP {exc.status_code}"
+            cooldown_mod.mark_failed(provider_id, model, status=exc.status_code)
+            diagnostic("model_order_failover", model=key, target=target,
+                       status=exc.status_code)
+            continue
+        except _RETRYABLE_EXC as exc:  # httpx 传输层 / OSError：上游不可达
+            # 注意：asyncio.CancelledError 是 BaseException 子类，不被这里捕获——
+            # 客户端断连必须原样向上传播，不能当成可换档失败重试。
+            # 其余 Exception（TypeError/KeyError 等）同样不在这里捕获，原样上抛成 500：
+            # 那是代码 bug，不该被换档掩盖（见 _RETRYABLE_EXC 注释）。
+            last_note = f"{type(exc).__name__}"
+            cooldown_mod.mark_failed(provider_id, model)
+            diagnostic("model_order_failover", model=key, target=target,
+                       error=type(exc).__name__)
+            continue
+        status = _retryable_failure(resp)
+        if status is None:
+            return resp  # 成功，或已提交语义的流（不换档）
+        last_note = f"HTTP {status}"
+        cooldown_mod.mark_failed(provider_id, model, status=status)
+        diagnostic("model_order_failover", model=key, target=target, status=status)
+
+    if last_exc is not None:
+        raise last_exc
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "error": {
+                "message": (f"模型 {key} 的候选上游全部不可用"
+                            + (f"（最后失败：{last_note}）" if last_note else
+                               "（均处于冷却或被停用/时段限制）")),
+                "type": "upstream_unavailable",
+            }
+        },
+    )
+
+
 async def forward_chat(
     body: dict[str, Any],
     protocol: str,
@@ -125,14 +337,16 @@ async def forward_chat(
 ) -> StreamingResponse | JSONResponse:
     """转发 chat 请求到上游，支持流式和非流式。
 
-    多 provider 路由（三种方式，优先级从高到低）：
+    多 provider 路由（优先级从高到低）：
     1. 显式前缀：``model: "<provider-id>/<model-name>"``，如
        ``trae/DeepSeek-V4-Flash``、``doubao/doubao-think``、
        ``codebuddy/glm-5.3``；前缀命中已启用 provider（或 codebuddy）时，
        剥掉前缀再转发，强制走指定通道。
-    2. 自动匹配：模型 id 命中某个非默认 provider 的 models() 列表
+    2. **候选顺序**：``state.model_order`` 里为该模型配了候选列表时，按序尝试，
+       未提交即失败就换下一档（见 :func:`_forward_with_order` 与模块 docstring）。
+    3. 自动匹配：模型 id 命中某个非默认 provider 的 models() 列表
        （如豆包/Trae 模型），走该 provider 的 forward。
-    3. 兜底通道：都未命中时，走 ``state.default_provider``（默认 codebuddy，
+    4. 兜底通道：都未命中时，走 ``state.default_provider``（默认 codebuddy，
        可通过 --default-provider / PROXY_DEFAULT_PROVIDER 改为 trae 等）。
 
     请求未带 ``model`` 字段时，用管理页设置的默认启用模型
@@ -173,78 +387,46 @@ async def forward_chat(
         elif prefix == "codebuddy":
             # 显式强制走默认 CodeBuddy 通道，跳过 provider 自动匹配与兜底
             body = {**body, "model": real_model}
-            _reject_if_disabled(state, "codebuddy", real_model)
             diagnostic("provider_route", provider="codebuddy", model=real_model,
                        protocol=protocol, via="prefix")
-            return await _instrument(
-                state, _default_codebuddy.forward(body, protocol, original),
-                provider_id="codebuddy", model_id=real_model, protocol=protocol,
-                stream=bool(body.get("stream")),
-            )
+            return await _dispatch_once(state, "codebuddy", real_model, body, protocol, original)
 
-    # 2) 自动匹配模型 id（仅在未显式指定前缀时；前缀路由的结果不能被覆盖）
-    #
-    # 分两轮：**先全部按 id 精确匹配**（含剥前缀裸名），都未命中再退回别名。
-    # 不能一轮搞定——多个通道可能"认识"同一个名字（qoder 的显示名 GLM-5.3 与
-    # zcode 的模型名 glm-5.3 撞车），若让别名与精确匹配同等参与、按注册序先到
-    # 先得，注册靠前的通道就会把别人的模型抢走。别名只能是兜底，不能是抢占。
-    #
-    # 别名轮（``allow_aliases=True``）额外跳过「名字就是 CodeBuddy 静态表 id」的
-    # 情况：CodeBuddy 是兜底通道、不在 ``providers`` 里，别名轮无从靠「别的通道
-    # 能否精确认领」判断归属。``auto`` 正是 CodeBuddy 的默认模型，而 Qoder 本地
-    # 合成的档位模型（TIER_MODELS）也叫 ``auto``，不挡住就会静默改道。
-    #
-    # ⚠️ 只挡别名轮，不挡精确轮：精确轮是各通道按自己发布的 id 认领，trae/zcode
-    # 等通道的模型名可能与静态表重合（两边都真有这个模型），让他们照常先认领，
-    # 与既有路由行为一致。
+    # 2) 候选顺序：为该模型配了 model_order 时按序尝试（未配则整段跳过，行为与历史一致）
     if provider is None:
-        for allow_aliases in (False, True):
-            if allow_aliases and _is_codebuddy_model(requested_model):
-                break  # 归 CodeBuddy 静态表，别名不得认领
-            for p in providers.values():
-                try:
-                    if p.accepts_model(requested_model, aliases=allow_aliases):
-                        provider = p
-                        break
-                except Exception:  # noqa: BLE001 - 单个通道判断失败不该阻断路由
-                    continue
-            if provider is not None:
-                break
+        order = getattr(state, "model_order", None) or {}
+        if isinstance(order, dict):
+            owner = _resolve_auto(state, requested_model)
+            # 键口径：优先「请求实际解析到的归属」；解析不到时回落到默认通道
+            owner_id = owner.id if owner is not None else "codebuddy"
+            owner_model = (_resolved_model_id(owner, requested_model)
+                           if owner is not None else requested_model)
+            key = settings_mod.model_key(owner_id, owner_model)
+            targets = order.get(key)
+            # 直接按 provider/model 形态命中的键也认（客户端已带前缀时 owner 已被剥）
+            if not targets:
+                targets = order.get(settings_mod.model_key(
+                    owner_id, str(requested_model)))
+            if targets:
+                diagnostic("model_order_try", model=key, targets=len(targets))
+                return await _forward_with_order(
+                    state, key, list(targets), body, protocol, original)
+
+    # 3) 自动匹配模型 id（仅在未显式指定前缀时；前缀路由的结果不能被覆盖）
+    if provider is None:
+        provider = _resolve_auto(state, requested_model)
 
     if provider is not None:
-        # 非默认 provider（Trae/豆包等）：由各自 forward 决定协议支持范围。
-        # Trae 已支持 anthropic 协议（/v1/messages 客户端如 Claude Code 可直连）；
-        # 豆包等仅 openai 协议透传（doubao2api 只支持 OpenAI chat completions）。
-        # 停用/时段键按 provider 归一后的 id 生成，与转发链路口径一致
-        # （别名请求如「Qwen3.8-Flash」也要能被停用规则命中）。
-        gate_model = _resolved_model_id(provider, requested_model)
-        _reject_if_disabled(state, provider.id, gate_model)
-        diagnostic("provider_route", provider=provider.id, model=requested_model, protocol=protocol)
-        provider.ensure_auth()
-        return await _instrument(
-            state, provider.forward(body, protocol, original),
-            provider_id=provider.id, model_id=requested_model, protocol=protocol,
-            stream=bool(body.get("stream")),
-        )
+        return await _dispatch_once(
+            state, provider.id, requested_model, body, protocol, original)
 
-    # 3) 兜底通道：未命中任何 provider 模型列表时，按配置的默认通道转发
+    # 4) 兜底通道：未命中任何 provider 模型列表时，按配置的默认通道转发
     default_provider_id = getattr(state, "default_provider", "codebuddy")
     if default_provider_id in providers:
-        default_provider = providers[default_provider_id]
-        _reject_if_disabled(state, default_provider.id, requested_model)
-        diagnostic("provider_route", provider=default_provider.id,
+        diagnostic("provider_route", provider=default_provider_id,
                    model=requested_model, protocol=protocol, via="default")
-        default_provider.ensure_auth()
-        return await _instrument(
-            state, default_provider.forward(body, protocol, original),
-            provider_id=default_provider_id, model_id=requested_model, protocol=protocol,
-            stream=bool(body.get("stream")),
-        )
+        return await _dispatch_once(
+            state, default_provider_id, requested_model, body, protocol, original)
 
     # 默认 CodeBuddy 路径（对称封装，与其它 provider 一致）
-    _reject_if_disabled(state, "codebuddy", requested_model)
-    return await _instrument(
-        state, _default_codebuddy.forward(body, protocol, original),
-        provider_id="codebuddy", model_id=requested_model, protocol=protocol,
-        stream=bool(body.get("stream")),
-    )
+    return await _dispatch_once(
+        state, "codebuddy", requested_model, body, protocol, original)

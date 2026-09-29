@@ -83,6 +83,31 @@ workers, or explicit provider shutdown lifecycles.
   bypassing it can make UI policy and runtime routing disagree.
 - `core/settings.py` owns local settings path, normalization, and atomic
   persistence. Callers must not open or write the settings JSON directly.
+- `model_order` (settings key) maps a `model_key` to an ordered list of
+  `provider/model` candidates, tried top-down by `forward._forward_with_order`.
+  **Failover is only legal when an attempt failed before any byte was committed
+  to the client** — a retryable `HTTPException`, a transport-level exception
+  (`_RETRYABLE_EXC`: `httpx.HTTPError` / `OSError`), or a non-2xx
+  `JSONResponse`. A `StreamingResponse` is never replayed (double-billing risk;
+  same invariant as `trae/pat/chat.py`). Known blind spot: codebuddy reports
+  upstream stream errors as an *in-band* error chunk, so its stream failures are
+  undetectable and never fail over.
+  Conversely, **programming errors are not failover material**: a `TypeError`
+  escaping a provider is re-raised, not treated as an upstream outage, so a real
+  bug surfaces as a 500 instead of being masked by a working fallback channel.
+- Routing precedence: an explicit `provider/model` prefix in the request is a
+  deliberate instruction and returns before `model_order` is consulted, so a
+  prefixed request never fails over. Failover applies to bare model names,
+  where the router resolves the owning provider itself.
+- `core/cooldown.py` owns transient target health: a failed target is skipped
+  for a short TTL (escalating on repeat failure). It is deliberately **in-memory
+  and not persisted** — a restart is a legitimate reason to re-probe, and user
+  intent lives in `settings.json`.
+- The `model_order` editor lives in the bundled `/ui` page. Its channel list and
+  model choices come from `GET /ui/api/model-order/options` (the page's global
+  `MODELS` is only populated once the models tab has loaded, so the editor must
+  not depend on it). Targets are picked from that list but remain free-text,
+  because an upstream may accept an id its catalog does not advertise.
 
 ## Logging and privacy
 
