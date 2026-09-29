@@ -28,6 +28,39 @@ SNAPSHOT_TTL_S = 300
 # 失败结果缓存 TTL：短得多，让网络抖动几秒恢复后下一轮就能自愈
 FAILURE_TTL_S = 30
 DEFAULT_CHECKIN_TIME = "09:30"
+# 「翻转点已过 → 提前作废快照」只在这个宽限窗口内生效。正常轮换最多让缓存
+# 早退这么多；超出说明上游给的 next_ts 已经不可信，退回按 TTL 过期。
+FLIP_GRACE_S = 3600
+
+
+def _state_flipped(data: Any, now: float) -> bool:
+    """缓存里的快照是否「描述的状态已经翻篇」。
+
+    ``checkin_status`` 会给 ``next_ts``——按 ``providers/base.py`` 的契约，它
+    正是这个状态**翻转**的时刻（已签到 = 下一轮开始，未签到 = 本轮截止）。
+    一旦它成为过去，这份快照描述的就不再是现状：界面刚把倒计时数到「即将
+    刷新」，紧接着那次轮询却仍拿到翻篇前的旧状态，于是显示「已签到」+ 按钮
+    禁用，要等满 TTL（5 分钟）才自愈。而 qoder 的窗口错过即失效，这 5 分钟
+    足够错过一整轮——倒计时承诺的「即将刷新」也就成了空话。
+
+    所以把 ``next_ts`` 本身当作这份缓存的到期时刻：它比任何固定 TTL 都准，
+    且天然只在轮换点触发一次重查，不会带来额外轮询。
+
+    ``next_ts`` 缺失或不是数字（额度结果、失败结构、上游给了怪值）时一律
+    判否——拿不准就照旧走 TTL，别因为一个坏字段把缓存整个废掉。
+
+    只认「刚过点」的 ``next_ts``：正常路径下越过翻转点后重查一次，上游就会
+    给下一个（未来的）时刻，缓存自然恢复。若重查回来的**仍是**很久以前的值
+    （活动已停但上游没更新字段之类），那说明这个字段已经不可信，再拿它当
+    到期条件就会让缓存永久失效、每次轮询都打上游。故超过 ``FLIP_GRACE_S``
+    就退回 TTL——反正 TTL 到了还会再查一次，不会漏掉恢复。
+    """
+    if not isinstance(data, dict):
+        return False
+    nxt = data.get("next_ts")
+    if isinstance(nxt, bool) or not isinstance(nxt, (int, float)):
+        return False
+    return nxt <= now and now - nxt <= FLIP_GRACE_S
 
 
 def _is_failure(data: Any) -> bool:
@@ -275,12 +308,16 @@ class BenefitsManager:
         抖动（切 WiFi、VPN 重连），若按正常的 5 分钟缓存，用户会盯着一条不准确
         的「网关不可达 / 查询失败」警告好几分钟——哪怕几秒后网就恢复了。成功
         结果照常缓存 ``SNAPSHOT_TTL_S``。
+
+        还有一条比 TTL 更早的失效条件：快照自己说的「翻转时刻」已过
+        （见 :func:`_state_flipped`），此时状态必然已经变了，再拿它渲染就是
+        在说谎。
         """
         now = time.time()
         cached = self._cache.get(key)
         if cached:
             ttl = FAILURE_TTL_S if _is_failure(cached[1]) else SNAPSHOT_TTL_S
-            if now - cached[0] < ttl:
+            if now - cached[0] < ttl and not _state_flipped(cached[1], now):
                 return cached[1]
         try:
             data = await _call(fn, *args)

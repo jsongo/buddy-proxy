@@ -234,6 +234,95 @@ def test_tick_does_not_claim_when_upstream_contradicts_itself(tmp_path, monkeypa
     assert ck["done_today"] is True
 
 
+def test_snapshot_cache_expires_at_the_rotation_it_advertises(tmp_path, monkeypatch):
+    """倒计时数到「即将刷新」时，下一次轮询必须真拿到新状态。
+
+    这是倒计时功能自己引入的失效场景：界面上那个「下次时间」就是 ``next_ts``，
+    而它按契约正是状态翻转的时刻。可 ``_cached`` 原本只认固定 TTL（300s），
+    翻转点若落在 TTL 之内，到点后的那次轮询仍会命中翻篇前的快照 —— 界面继续
+    显示「已签到」+ 按钮禁用，要等满 5 分钟才自愈。qoder 的窗口错过即失效，
+    这 5 分钟足够丢掉一整轮，倒计时那句「即将刷新」也就成了空话。
+
+    所以把 ``next_ts`` 本身当作到期时刻。这里让翻转点落在 TTL **之内**：
+    取 300 的话缓存到点本就自然过期，测的就不是本 bug 而是普通 TTL 过期
+    （我第一版就是这么写错的，去掉修复照样「通过」）。
+    """
+    boundary = time.time() + 30          # 远小于 SNAPSHOT_TTL_S，却已到点
+    assert boundary - time.time() < 300, "翻转点必须在 TTL 之内才有意义"
+
+    class _Boundary(_RotatingCheckin):
+        def checkin_status(self):
+            self.status_calls += 1
+            if time.time() >= boundary:
+                self.claimable, self.checked_in = True, False
+            return {"checked_in": self.checked_in, "claimable": self.claimable,
+                    "inactive": False, "message": "ok",
+                    "next_ts": int(boundary), "next_ts_source": "upstream"}
+
+    p = _Boundary(claimable=False)
+    state, mgr = _manager(tmp_path, monkeypatch, {"rotating": p})
+
+    def status_of():
+        snap = asyncio.run(mgr.snapshot())
+        return next(x["checkin"] for x in snap["providers"] if x["id"] == "rotating")
+
+    before = status_of()
+    assert before["done_today"] is True and before.get("claimable") is False
+    calls_before = p.status_calls
+
+    # 模拟倒计时归零：把 manager 看到的时钟推过 next_ts（缓存条目仍是 30s 内）
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: boundary + 1)
+    after = status_of()
+    monkeypatch.setattr(time, "time", real_time)
+
+    assert p.status_calls > calls_before, "到点后必须重查上游，不能吃翻篇前的缓存"
+    assert after.get("claimable") is True, "到点后界面应显示可领"
+    assert after["done_today"] is False, "到点后按钮不该还是禁用的"
+
+
+def test_state_flipped_predicate_ignores_junk():
+    """``_state_flipped`` 拿不准一律判否——坏字段不该把缓存整个废掉。"""
+    from buddy_proxy.benefits import FLIP_GRACE_S, _state_flipped
+
+    now = 1_000_000.0
+    assert _state_flipped({"next_ts": now - 1}, now) is True    # 刚过点
+    assert _state_flipped({"next_ts": now}, now) is True        # 此刻即翻转
+    assert _state_flipped({"next_ts": now + 1}, now) is False   # 还没到
+    assert _state_flipped({}, now) is False                     # 无字段（额度结果）
+    assert _state_flipped(None, now) is False
+    assert _state_flipped("nope", now) is False
+    assert _state_flipped({"next_ts": "1000"}, now) is False     # 字符串不认
+    assert _state_flipped({"next_ts": True}, now) is False       # bool 不是时刻
+    # 宽限窗口边界：窗口内认、出了窗口不认
+    assert _state_flipped({"next_ts": now - FLIP_GRACE_S}, now) is True
+    assert _state_flipped({"next_ts": now - FLIP_GRACE_S - 1}, now) is False
+
+
+def test_stale_next_ts_does_not_defeat_the_cache(tmp_path, monkeypatch):
+    """上游一直给**很早以前**的 ``next_ts`` 时，不能把缓存变成每次都打上游。
+
+    这是给上面那条提前失效加的护栏：正常轮换过点后重查一次，上游就会给出
+    下一个（未来的）时刻；若重查回来仍是老早的值（活动停了但字段没更新），
+    再拿它当到期条件就等于永久废掉缓存——管理页 30s 轮询 + 后台巡检都走
+    这里，会把上游打爆。
+    """
+    class _StaleNext(_RotatingCheckin):
+        def checkin_status(self):
+            self.status_calls += 1
+            return {"checked_in": self.checked_in, "claimable": self.claimable,
+                    "inactive": False, "message": "ok",
+                    "next_ts": int(time.time()) - 3600,   # 早过点，且一直这样
+                    "next_ts_source": "upstream"}
+
+    p = _StaleNext(claimable=False)
+    state, mgr = _manager(tmp_path, monkeypatch, {"rotating": p})
+
+    for _ in range(5):
+        asyncio.run(mgr.snapshot())
+    assert p.status_calls == 1, "过期的 next_ts 不该让缓存每次失效"
+
+
 def test_claimable_now_predicate_ignores_junk():
     """``claimable_now`` 对非 dict / 兜错结构 / 缺字段一律判否，不抛。"""
     from buddy_proxy.benefits import claimable_now

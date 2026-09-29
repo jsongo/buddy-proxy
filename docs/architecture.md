@@ -151,6 +151,16 @@ silent:
   real claim timestamps and must be labelled `inferred` — the UI shows "≈".
   When `next_ts` cannot be computed (season over, campaign inactive), the field
   is omitted rather than filled with a stale timestamp.
+- **A cached status snapshot expires at its own rotation, not just its TTL.**
+  The UI counts down to `next_ts`, so the refresh right after that moment must
+  actually show the new state — but the 300 s snapshot cache would otherwise
+  serve the pre-rotation state, leaving "已签到" and a disabled button for up to
+  five more minutes (long enough for Qoder to lose a whole round, since its
+  window expires on miss). `benefits._state_flipped` therefore treats a *past*
+  `next_ts` as an earlier expiry, which is free: the cached entry already
+  carries the moment it stops being true. Bounded by `FLIP_GRACE_S` (1 h) so an
+  upstream that keeps returning a long-past timestamp cannot render the cache
+  permanently useless and hammer the upstream on every poll.
 
 ## Logging and privacy
 
