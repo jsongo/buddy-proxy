@@ -118,11 +118,23 @@ workers, or explicit provider shutdown lifecycles.
   for a short TTL (escalating on repeat failure). It is deliberately **in-memory
   and not persisted** — a restart is a legitimate reason to re-probe, and user
   intent lives in `settings.json`.
-- The `model_order` editor lives in the bundled `/ui` page. Its channel list and
-  model choices come from `GET /ui/api/model-order/options` (the page's global
-  `MODELS` is only populated once the models tab has loaded, so the editor must
-  not depend on it). Targets are picked from that list but remain free-text,
-  because an upstream may accept an id its catalog does not advertise.
+- The `model_order` editor lives in its own **Model order** tab of the bundled
+  `/ui` page: one card per configured model, expanding to the reorderable target
+  list. Its channel list and model choices come from
+  `GET /ui/api/model-order/options` (the page's global `MODELS` is only populated
+  once the models tab has loaded, so the editor must not depend on it). Targets
+  are picked from that list but remain free-text, because an upstream may accept
+  an id its catalog does not advertise.
+- A model card's key is `<bare-model-name>` plus the **owning channel**, and the
+  page builds it as `provider + _bare_model_id(id)` — the catalog's `m["id"]`
+  carries a channel prefix (`qoder/deepseek-v4.1-flash`) while `model_order` keys
+  and metrics are recorded against the bare name. The same mismatch applies to
+  the per-model request counts on the models tab: looking them up with the
+  prefixed id made that column read ~0 for every channel that prefixes its ids.
+- Editing is **page-only**. There is deliberately no row-level order button on
+  the models tab: that table's action column grew crowded and the entry point
+  became unfindable. The row keeps a `⇄ n` badge (targets, plus `⏸ n` cooled) and
+  a clear-cooldown button, nothing more.
 
 ## Check-in rotation
 

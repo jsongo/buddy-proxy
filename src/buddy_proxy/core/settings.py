@@ -44,6 +44,47 @@ def load_settings() -> dict[str, Any]:
         return {}
 
 
+def _mtime_str(path: pathlib.Path) -> str:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:  # noqa: BLE001 - 纯展示字段，取不到就留空
+        return ""
+
+
+def settings_health() -> dict[str, Any]:
+    """探测设置文件的健康状态，供管理页顶部告警条幅使用（只读，绝不抛异常）。
+
+    :func:`load_settings` 对损坏文件是 ``except: return {}``——配置容错需要它这么写，
+    但代价是「model_order / 停用 / 时段 / 默认模型四项一起失效却毫无提示」，而且
+    :func:`save_settings` 的 ``{**previous, **update}`` 在 previous 为空时会把整个
+    文件覆盖成只剩本次写入的那一项。两条叠加，用户只会看到「功能不见了」。
+    2026-09-30 排查 model_order 时正是被这个静默失效带偏的，故把「读不出来」
+    变成可展示的事实。
+
+    ``ok=False`` 只在「文件存在但读不出 / 不是合法 JSON 对象」时给出：文件不存在
+    是正常的首次启动形态（走默认值），不该报警。
+    """
+    path = settings_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"ok": True, "exists": False, "path": str(path)}
+    except Exception as exc:  # noqa: BLE001 - 权限/编码异常：设置同样没生效
+        return {"ok": False, "exists": True, "path": str(path),
+                "error": f"{type(exc).__name__}: {exc}"}
+    try:
+        data = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001 - 语法错误：把原始报错给用户定位
+        return {"ok": False, "exists": True, "path": str(path),
+                "error": str(exc), "size": len(raw), "mtime": _mtime_str(path)}
+    if not isinstance(data, dict):
+        return {"ok": False, "exists": True, "path": str(path),
+                "error": f"顶层不是 JSON 对象（是 {type(data).__name__}）",
+                "size": len(raw), "mtime": _mtime_str(path)}
+    return {"ok": True, "exists": True, "path": str(path),
+            "keys": sorted(data), "size": len(raw), "mtime": _mtime_str(path)}
+
+
 def _backup_settings(path: pathlib.Path, previous: dict[str, Any]) -> None:
     """覆盖前把**上一版**留一份 ``<name>.bak``，让 UI 写操作可回滚。
 

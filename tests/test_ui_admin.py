@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -123,6 +124,9 @@ def test_ui_page_served(env):
     assert r.status_code == 200
     assert "Buddy Proxy 控制台" in r.text
     assert r.headers["content-type"].startswith("text/html")
+    # 告警条幅的 DOM 与渲染函数都在页面里（数据到了才 .show）
+    assert 'id="alertbar"' in r.text
+    assert "function renderAlert" in r.text
 
 
 def test_root_redirects_to_ui(env):
@@ -134,6 +138,38 @@ def test_overview_shape(env):
     assert body["uptime_seconds"] >= 0
     assert body["default_provider"] == "codebuddy"
     assert set(body["providers"]) == {"fakeprov", "fakestream"}
+    # 设置健康度随 overview 下发（前端顶部告警条幅的数据源）
+    assert "settings" in body
+
+
+def test_overview_settings_health_ok(env):
+    """设置文件正常时 health 为 ok——条幅不弹。"""
+    settings_mod.save_settings({"default_provider": "codebuddy"})
+    assert env.client.get("/ui/api/overview").json()["settings"]["ok"] is True
+
+
+def test_overview_settings_health_reports_corruption(env):
+    """设置文件语法错误时必须显式报告，而不是静默当作「没有设置」。
+
+    load_settings() 为容错返回 {}，若不额外探测，用户只会看到
+    「model_order / 停用 / 时段 / 默认模型一起消失」且毫无提示。
+    """
+    settings_mod.settings_path().write_text('{"a": [1,\n', encoding="utf-8")
+    health = env.client.get("/ui/api/overview").json()["settings"]
+    assert health["ok"] is False
+    assert health["exists"] is True
+    assert health["error"]                    # 原始报错给用户定位
+    assert health["path"].endswith("settings.json")
+    # 同时确认配置确实全都没生效（这正是要告警的原因）
+    assert settings_mod.load_settings() == {}
+
+
+def test_overview_settings_health_missing_file_is_ok(env):
+    """文件不存在是正常首次启动，不该报警（会走默认值）。"""
+    settings_mod.settings_path().unlink(missing_ok=True)
+    health = env.client.get("/ui/api/overview").json()["settings"]
+    assert health["ok"] is True
+    assert health["exists"] is False
 
 
 def test_models_grouped_by_provider(env):
@@ -563,15 +599,15 @@ def test_mark_clear_does_not_validate_against_catalog(alias_env):
         cooldown_mod._reset_for_tests()
 
 
-def test_order_modal_provider_list_not_from_MODELS(env):
-    """顺序弹窗的通道下拉必须来自选项接口，不能依赖 MODELS。
+def test_order_provider_list_not_from_MODELS(env):
+    """顺序页的通道下拉必须来自选项接口，不能依赖 MODELS。
 
-    MODELS 只在「模型」标签页加载过才有值；若弹窗从它取通道列表，从其它入口
-    打开时下拉框会是空的（下拉即不可用），等于「添加时不能选」。这条把它钉死。
+    MODELS 只在「模型」标签页加载过才有值；若从这里取通道列表，直接进顺序页
+    时下拉框会是空的（下拉即不可用），等于「添加时不能选」。这条把它钉死。
     """
     ui = env.client.get("/ui").text
-    start = ui.index("async function openOrderModal(")
-    end = ui.index("async function saveOrder(", start)
+    start = ui.index("async function ensureOrderOptions(")
+    end = ui.index("\n}", start)
     body = ui[start:end]
     assert "Object.keys(ORDER_OPTIONS)" in body, "通道列表应优先来自选项接口"
     # 兜底可以读 MODELS，但必须在 ORDER_OPTIONS 为空之后，且带 null 守卫
@@ -579,6 +615,47 @@ def test_order_modal_provider_list_not_from_MODELS(env):
     # 选项接口本身要有数据，否则下拉依旧是空的
     opts = env.client.get("/ui/api/model-order/options").json()["groups"]
     assert {g["provider"] for g in opts} == {"codebuddy", "fakeprov", "fakestream"}
+
+
+def test_model_table_has_no_inline_order_entry(env):
+    """模型表里不该再有行内「顺序」按钮或它的弹窗。
+
+    用户报告过：功能做在那张表的操作列里，行多列窄，根本找不到（而且表里的
+    配置项一多，「顺序·3」这种短标签也读不出是什么）。编辑入口统一到
+    「模型顺序」页签，这里只留一个徽标说明「已配几档」。
+    """
+    ui = env.client.get("/ui").text
+    assert "openOrderModal" not in ui, "行内顺序弹窗应已删除"
+    assert "async function saveOrder(" not in ui, "弹窗的保存函数应已删除"
+    # 徽标保留：模型表仍要知道这个模型配了几档、几档在冷却
+    assert "ordTag" in ui and "⇄ " in ui, "「已配顺序」的徽标不该一起删掉"
+    assert "clearOrderMarks" in ui, "「清冷却」按钮是这张表唯一的顺序相关操作，应保留"
+
+
+def test_order_save_wont_post_empty_targets_when_dom_desynced(env):
+    """保存必须区分「用户真的清空了」和「界面状态不可信」，后者绝不发空 targets。
+
+    真机现象：`orderPageSync` 找不到 `.order-rows` 容器时直接 return，折叠卡片
+    上那时残留的 `[]`（刷新后 orderPage 的 not-open 分支会把它当占位写回草稿）
+    就被当成用户输入 POST 出去，服务端配置**静默抹平**——实测
+    qoder/qwen3.8-max 的 `["qoder/qwen3.8-max","trae/qwen3.8-max"]` 就这样没了。
+    """
+    ui = env.client.get("/ui").text
+    start = ui.index("function orderPageIntendedItems(")
+    body = ui[start:ui.index("\n}", start)]
+    # 折叠态：只有草稿存在才认它（那是这轮编辑的结果），没有草稿就是不可信
+    assert "ORDER_DRAFT[key] ? ORDER_DRAFT[key].filter" in body, "折叠态要区分「编辑过」与「没展开过」"
+    assert "return null" in body, "不可信时必须返回 null，不能悄悄当成空列表"
+    sstart = ui.index("async function orderPageSave(")
+    sbody = ui[sstart:ui.index("\n}", sstart)]
+    assert "orderPageIntendedItems(key)" in sbody and "=== null" in sbody, (
+        "保存要拦住不可信状态，而不是发出去"
+    )
+    # 「清空」是显式意图：绕开依赖 DOM 的 orderPageSync，且不可逆、要先问一句
+    cstart = ui.index("async function orderPageClear(")
+    cbody = ui[cstart:ui.index("\n}", cstart)]
+    assert "orderPageSync" not in cbody, "清空应显式表达意图，不靠 DOM 反写"
+    assert "confirm(" in cbody, "清空是不可逆操作，得先问一句"
 
 
 def test_scheduled_model_call_blocked_outside_window(env, monkeypatch):
@@ -1249,3 +1326,22 @@ def test_reject_if_disabled_uses_model_key_alias(env, monkeypatch):
     assert caught.value.status_code == 403
 
 
+
+
+def test_model_stats_use_bare_model_name(alias_env):
+    """模型表的请求数必须按**裸名**查得到。
+
+    埋点记的 model_id 来自转发链路（`glm-5.3`），而通道目录里的 `m["id"]` 带
+    通道前缀（`qoder/deepseek-v4.1-flash`）。拿带前缀的 id 去查 stat_map，这一
+    列就几乎恒为 0——用户反馈「14d 请求数字一直很小」的真因（实测 qoder 的
+    deepseek-v4.1-flash 真实 2234 次、表里显示 1）。
+    """
+    state = alias_env.state
+    state.metrics.record(provider="fakealias", model="glm-5.3", protocol="openai",
+                         status=200, duration_ms=10.0)
+    data = alias_env.client.get("/ui/api/models").json()
+    grp = next(g for g in data["groups"] if g["id"] == "fakealias")
+    row = next(m for m in grp["models"] if m["id"].endswith("glm-5.3"))
+    assert row["stats"]["count"] == 1, (
+        f"带前缀 id 查不到裸名口径的指标：{row['id']} → {row['stats']}"
+    )

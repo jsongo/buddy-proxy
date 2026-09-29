@@ -41,6 +41,24 @@
   .rb-btn:hover { color: var(--text); border-color: var(--accent); }
   .rb-btn.active { color: var(--text); border-color: var(--accent);
                    background: rgba(79,140,255,.13); font-weight: 600; }
+  /* 设置文件告警条幅：读不出来时贴在最顶部。默认 display:none，靠 .show 打开。
+     刻意用普通流式块（非 fixed/sticky）：正常滚动即可移出视野、不遮挡内容，
+     也不占固定高度，无需给 .wrap 预留 padding-top。 */
+  .alertbar { display: none; align-items: flex-start; gap: 10px;
+              background: rgba(255,107,107,.13); border-bottom: 1px solid rgba(255,107,107,.5);
+              color: #ffd0d0; padding: 10px 24px; font-size: 13px; line-height: 1.6; }
+  .alertbar.show { display: flex; }
+  .alertbar .ab-ico { flex: none; font-size: 15px; line-height: 1.4; }
+  .alertbar .ab-body { flex: 1; min-width: 0; }
+  .alertbar b { color: #fff; }
+  .alertbar .ab-detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                         font-size: 12px; color: #ffb3b3; word-break: break-all;
+                         margin-top: 3px; }
+  .alertbar code { background: rgba(0,0,0,.35); border-radius: 4px; padding: 1px 5px;
+                   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .alertbar .ab-close { flex: none; background: transparent; border: 1px solid rgba(255,107,107,.45);
+                        color: #ffd0d0; border-radius: 6px; padding: 1px 8px; font-size: 12px; }
+  .alertbar .ab-close:hover { background: rgba(255,107,107,.2); border-color: #ff6b6b; color: #fff; }
   /* 请求日志快速筛选（通道/模型，复用 .rb-btn 按钮态） */
   .log-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 2px 0 10px; }
   .log-filters .lf-label { font-size: 12px; color: var(--muted); }
@@ -70,6 +88,63 @@
   button.primary:hover { filter: brightness(1.1); }
   button.ghost { background: transparent; }
   button:disabled { opacity: .45; cursor: not-allowed; }
+  /* 表单控件：浏览器默认是白底 + 浅色边框，放在深色卡片上会刺眼（且 select
+     的默认箭头在暗色下几乎看不见）。统一成与 button 同一套配色。 */
+  input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+           background: var(--bg); border: 1px solid var(--line); color: var(--text);
+           border-radius: 8px; padding: 5px 9px; font-size: 12.5px; font-family: inherit;
+           outline: none; transition: border-color .15s, box-shadow .15s; }
+  input:not([type="checkbox"]):not([type="radio"]):focus, select:focus, textarea:focus {
+           border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79,140,255,.18); }
+  input::placeholder, textarea::placeholder { color: var(--muted); opacity: .75; }
+  select { cursor: pointer; appearance: none; padding-right: 26px;
+           /* 用 SVG 画下拉箭头：暗色主题下默认箭头不可见，且各浏览器外观不一 */
+           background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b96a5' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+           background-repeat: no-repeat; background-position: right 8px center;
+           background-size: 9px; }
+  input[type="date"], input[type="time"] { color-scheme: dark; }
+  input[type="date"]::-webkit-calendar-picker-indicator,
+  input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.65); cursor: pointer; }
+  /* ── 模型顺序页 ── */
+  .order-card { margin-bottom: 10px; padding: 0; overflow: hidden; }
+  .order-head { display: flex; align-items: center; gap: 9px; cursor: pointer;
+                padding: 11px 14px; transition: background .15s; }
+  .order-head:hover { background: var(--card2); }
+  .order-title { font-weight: 600; font-size: 13px; }
+  /* 归属通道做成标题后面的弱化小字，**不是徽标**：它是这张卡的身份，不是状态。
+     早先写成 tag 时被读成「当前首选通道」，拖拽后它没变就以为出了 bug——换成
+     跟标题同行的灰色小字后，「这是名字的一部分」这层意思就出来了。 */
+  .order-owner { font-size: 11.5px; color: var(--muted); cursor: help;
+                 margin-left: -3px; }
+  /* 折叠时的链路摘要：展开后行里已经写明了，再挂一条只是噪声 */
+  .order-chain { flex: 1; min-width: 0; font-size: 12px; text-align: right;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .order-body { padding: 4px 14px 12px; border-top: 1px solid var(--line); }
+  .order-rows { padding-top: 8px; }
+  .order-row { display: flex; align-items: center; gap: 7px; padding: 5px 7px;
+               border-radius: 8px; transition: background .15s; }
+  .order-row:hover { background: var(--card2); }
+  .order-row + .order-row { margin-top: 2px; }
+  /* 拖拽手柄：拉宽热区并加大字号，⠿ 本身只有 13px 宽，不好抓 */
+  .order-grip { cursor: grab; color: var(--muted); user-select: none;
+                font-size: 15px; line-height: 1; padding: 0 1px; }
+  .order-grip:active { cursor: grabbing; }
+  .order-no { flex: 0 0 15px; font-size: 11.5px; text-align: right; }
+  /* 通道下拉按内容自适应（traepat 比 trae 宽），不写死百分比：
+     写死会在长通道名上截断，在短通道名上留一大块空。 */
+  .order-provider { flex: 0 0 auto; max-width: 132px; }
+  .order-model { flex: 1; min-width: 0; }
+  .order-flags { flex: 0 0 auto; display: inline-flex; gap: 5px; }
+  .order-btns { flex: 0 0 auto; display: inline-flex; gap: 4px; }
+  .order-btns button { padding: 4px 7px; line-height: 1; font-size: 11px; color: var(--muted); }
+  .order-btns button:hover { color: #fff; }
+  .order-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  button.danger:hover { border-color: #e5534b; color: #e5534b; }
+  /* 窄屏：模型名那行变窄后按钮仍要够点，通道下拉收一收 */
+  @media (max-width: 720px) {
+    .order-provider { max-width: 92px; }
+    .order-btns button { padding: 4px 5px; }
+  }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 14px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   .card .k { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
@@ -254,6 +329,17 @@
   .modal { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
            width: min(620px, calc(100vw - 40px)); max-height: 80vh; overflow: auto; padding: 20px 22px; }
   .modal h3 { margin: 0 0 12px; font-size: 15px; }
+  .modal-foot { margin-top: 16px; display: flex; justify-content: flex-end; gap: 8px; }
+  .modal-foot:empty { display: none; }
+  /* 「新增模型顺序」的模型选择列表：按归属通道分组，组内只写模型名 */
+  .order-new-list { max-height: 44vh; overflow: auto; margin-top: 2px; }
+  .order-new-group { position: sticky; top: 0; z-index: 1; background: var(--card);
+                     font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+                     color: var(--muted); padding: 8px 2px 5px; }
+  .order-new-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+                    border-radius: 8px; }
+  .order-new-item:hover { background: var(--card2); }
+  .order-new-item .on-m { font-size: 13px; }
   .kv { display: grid; grid-template-columns: 96px 1fr; gap: 5px 12px; font-size: 13px; margin-bottom: 10px; }
   .kv .k { color: var(--muted); }
   pre.view { background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
@@ -293,10 +379,15 @@
       <button class="tab active" data-tab="overview">📊 总览</button>
       <button class="tab" data-tab="log">📜 请求日志</button>
       <button class="tab" data-tab="models">🧩 模型<span class="cnt" id="cnt-models"></span></button>
+      <button class="tab" data-tab="order">🔀 模型顺序<span class="cnt" id="cnt-order"></span></button>
       <button class="tab" data-tab="benefits">✅ 打卡 &amp; 额度<span class="cnt" id="cnt-benefits"></span></button>
     </nav>
   </div>
 </div>
+
+<!-- 设置文件告警条幅：settings.json 读不出来时（语法错误等）贴在导航下方。
+     常驻 DOM、默认隐藏；内容由 renderAlert() 按 /ui/api/overview 的 settings 字段填。 -->
+<div class="alertbar" id="alertbar" role="alert"></div>
 
 <!-- 日期范围选择器：单一组件，切页签时移动到当前页的挂载点（总览 / 请求日志共用） -->
 <div class="rangebar" id="rangebar">
@@ -344,6 +435,29 @@
     <div id="groups"><div class="empty">加载中…</div></div>
   </section>
 
+  <section class="page" id="page-order">
+    <div class="sec-head">
+      <h2>模型顺序 <span class="sub">同一模型的候选上游按序尝试，未输出任何内容就失败时自动换下一档</span></h2>
+      <span class="spacer"></span>
+      <span class="muted" style="font-size:12px" id="order-summary"></span>
+      <button class="ghost" onclick="orderAddModel()">+ 新增模型</button>
+    </div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="muted" style="font-size:13px;line-height:1.7">
+        从上往下按序尝试，某个渠道<b>失败就换下一个</b>，并给失败渠道打 5 分钟冷却标记
+        （反复失败延长至 1 小时），期间请求自动跳过它。<br>
+        仅当<b>尚未向客户端输出任何内容</b>就失败时才会换档——已开始流式返回后不再重试
+        （防止上游重复计费）。因此 <b>codebuddy 通道的流式错误不会换档</b>
+        （上游把错误放在流里，代理无法感知），把它排在末位更实用。<br>
+        模型名可下拉选择或手输（上游实际接受的 id 可能与目录名不同）；<b>拖拽 ⠿ 或按 ▲▼</b>
+        调整顺序。清空全部目标 = 恢复历史路由（按模型 id 自动匹配）。<br>
+        <b>注意</b>：客户端把 model 写成 <span class="mono">通道/模型</span> 时是明确指定通道，
+        会<b>直接走该通道、不参与这里的换档</b>；想要自动换档请让客户端只传模型名。
+      </div>
+    </div>
+    <div id="order-list"><div class="empty">加载中…</div></div>
+  </section>
+
   <section class="page" id="page-benefits">
     <h2>打卡 &amp; 额度 <span class="sub">自动打卡 · 最近 35 天 · 按通道额度</span></h2>
     <div class="grid2 top">
@@ -382,7 +496,9 @@
   <div class="modal">
     <h3 id="modal-title">测试</h3>
     <div id="modal-body"><span class="spin"></span>调用上游中…</div>
-    <div style="margin-top: 14px; text-align: right;">
+    <!-- 底部按钮槽：各弹窗自己写「取消/保存」时把它清空，避免与固定的
+         「关闭」并排出现两个含义重叠的按钮（用户看到的是「取消」压着「关闭」）。 -->
+    <div class="modal-foot" id="modal-foot">
       <button onclick="closeModal()">关闭</button>
     </div>
   </div>
@@ -629,6 +745,7 @@ function invalidateRecent() {
 // 概览卡片与 renderRecent() 读的都是 STATS，缺了它 render() 会直接抛错。
 function dataForTab(name) {
   if (name === 'models') return ['stats', 'models'];
+  if (name === 'order') return ['stats', 'models'];   // 顺序页复用 /ui/api/models 的 order 字段
   if (name === 'log') return ['stats'];
   if (name === 'benefits') return ['stats', 'benefits'];
   return ['stats'];  // overview：概览卡片与图表都来自 stats
@@ -680,8 +797,39 @@ function currentTab() {
   return (b && b.dataset.tab) || 'overview';
 }
 
+// 设置文件告警条幅：settings.json 读不出来时贴顶展示。
+// load_settings() 为容错会静默吞掉语法错误（返回 {}），代价是 model_order /
+// 停用 / 时段 / 默认模型四项一起失效且毫无提示——用户只会看到「功能不见了」。
+// 这里把「读不出来」显式化，并说清真正的风险：任何一次管理页保存都会用
+// save_settings 的 {**previous, **update} 把整份文件覆盖成只剩那一项。
+let ALERT_DISMISSED = false;   // 本次会话内用户手动关闭过：别在轮询里又弹回来
+function renderAlert() {
+  const el = document.getElementById('alertbar');
+  if (!el) return;
+  const s = (OVERVIEW && OVERVIEW.settings) || null;
+  if (!s || s.ok || ALERT_DISMISSED) { el.classList.remove('show'); return; }
+  el.innerHTML = `
+    <span class="ab-ico">⚠️</span>
+    <span class="ab-body">
+      <b>设置文件无法解析，配置未生效</b>（候选顺序 / 停用 / 时段 / 默认模型
+      会一起失效）。修改前请先在管理页停手：任何一次保存都会把整份文件
+      覆盖成只剩该项。
+      <div class="ab-detail">${esc(s.error || '未知错误')}
+        ${s.mtime ? ` · 文件修改于 ${esc(s.mtime)}` : ''}
+        ${s.size != null ? ` · ${s.size} 字节` : ''}</div>
+      <div class="ab-detail">路径 <code>${esc(s.path)}</code>　修好后点右上角「↻ 刷新」重载</div>
+    </span>
+    <button class="ab-close" onclick="dismissAlert()">关闭</button>`;
+  el.classList.add('show');
+}
+function dismissAlert() {
+  ALERT_DISMISSED = true;
+  document.getElementById('alertbar').classList.remove('show');
+}
+
 function render() {
   const tab = currentTab();
+  renderAlert();
 
   // 范围选择器 + 当前范围下的模型聚合（Top10/耗时图/悬停共用）
   renderRangeQuick();
@@ -720,10 +868,12 @@ function render() {
     <div class="card"><div class="k">兜底通道</div><div class="v"><span class="chip">${esc(OVERVIEW.default_provider)}</span><small>未命中模型时</small></div></div>`;
   }
 
-  // 页签角标：模型总数（models 未加载时留空）/ 打卡状态
+  // 页签角标：模型总数 / 已配顺序数 / 打卡状态（数据未加载时留空）
   if (MODELS)
     document.getElementById('cnt-models').textContent =
       (MODELS.groups || []).reduce((n, g) => n + g.models.length, 0) || '';
+  if (MODELS)
+    document.getElementById('cnt-order').textContent = orderedModels().length || '';
   if (BENEFITS) {
     const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
     const cb = document.getElementById('cnt-benefits');
@@ -739,6 +889,8 @@ function render() {
     renderDaily(); renderModelBars(); renderLatency();
   } else if (tab === 'models') {
     if (MODELS) renderGroups();
+  } else if (tab === 'order') {
+    renderOrderPage();
   } else if (tab === 'benefits') {
     if (BENEFITS) renderBenefits();
   } else if (tab === 'log') {
@@ -758,7 +910,7 @@ function refreshStickyVars() {
 window.addEventListener('resize', refreshStickyVars);
 
 // ---- 页签 ----
-const TABS = ['overview', 'log', 'models', 'benefits'];
+const TABS = ['overview', 'log', 'models', 'order', 'benefits'];
 // 范围选择器仅在总览/请求日志页有意义
 const RANGE_TABS = new Set(['overview', 'log']);
 function switchTab(name) {
@@ -1519,9 +1671,6 @@ function renderGroups() {
       const ordTag = ord
         ? `<span class="tag ${ordMarks.length ? 'bad' : 'ok'}" title="${esc(ordTitle)}">⇄ ${ord.targets.length}${ordMarks.length ? ' ⏸' + ordMarks.length : ''}</span>`
         : '';
-      const ordAttr = ord ? esc(JSON.stringify(ord.targets)) : '[]';
-      // 冷却快照随行传入：弹窗就能显示 ⏸，不必再打一次 /ui/api/models
-      const ordMarksAttr = esc(JSON.stringify((ordMarks || []).map(k => [k.target, k.cooldown_s])));
       return `<tr>
         <td${dim}><span class="mono">${esc(m.id)}</span>
             ${m.is_default ? '<span class="badge-default">✦ 默认</span>' : ''}
@@ -1536,7 +1685,9 @@ function renderGroups() {
             ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick="setDefault('${esc(g.id)}','${esc(m.id)}')">设为默认</button>`}
             <button class="primary" onclick="runTest('${esc(g.id)}','${esc(m.id)}')">测试</button>
             <button class="ghost" title="设置限时可用时段：仅在窗口内可调用，窗口外直接失败（支持跨天）" onclick='openScheduleModal("${esc(g.id)}","${esc(m.id)}",${schWinsAttr})'>${sch ? '时段·' + sch.windows.length : '时段'}</button>
-            <button class="ghost" title="设置候选上游顺序：按序尝试，未输出任何内容就失败时自动换下一档" onclick='openOrderModal("${esc(g.id)}","${esc(m.id)}",${ordAttr},${ordMarksAttr})'>${ord ? '顺序·' + ord.targets.length : '顺序'}</button>
+            <!-- 候选顺序的编辑入口只在「模型顺序」页签：这张表行多列窄，塞进去
+                 既挤又难找（用户当初就是在这一列里找不到它）。行内只留一个
+                 徽标，说明「这个模型已配顺序、有几档、几档在冷却」。 -->
             ${ordMarks.length ? `<button class="ghost" title="清除冷却标记，立刻重新尝试这些目标" onclick="clearOrderMarks('${esc(g.id)}','${esc(m.id)}')">清冷却</button>` : ''}
             <button class="${dis ? 'primary' : 'ghost'}" title="${dis ? '重新启用后可正常调用' : '停用后调用此模型的请求直接失败'}" onclick="toggleModel('${esc(g.id)}','${esc(m.id)}',${dis ? 'false' : 'true'})">${dis ? '启用' : '停用'}</button>
         </td></tr>`;
@@ -1552,7 +1703,9 @@ function renderGroups() {
         <span class="chev">▾</span>
       </div>
       <table>
-        <thead><tr><th>模型 ID</th><th>名称</th><th>标签</th><th class="num">14d 请求</th><th class="num">平均耗时</th><th class="num">操作</th></tr></thead>
+        <thead><tr><th>模型 ID</th><th>名称</th><th>标签</th>
+          <th class="num" title="本代理转发的、近 14 天的成功+失败请求数。按实际转发的通道和模型名统计（不是按客户端原始请求里的名字），最久保留 30 天。">近 14 天请求</th>
+          <th class="num" title="仅统计有耗时的请求">平均耗时</th><th class="num">操作</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>`;
   }).join('');
@@ -1710,11 +1863,10 @@ function openScheduleModal(provider, model, windows) {
       不添加任何时段 = 恢复全天可用。时区：Asia/Shanghai。
     </div>
     <div id="sched-rows">${rows}</div>
-    <button class="ghost" style="margin-top:8px" onclick="addScheduleRow()">+ 添加时段</button>
-    <div style="margin-top:16px;text-align:right">
-      <button onclick="closeModal()">取消</button>
-      <button class="primary" onclick="saveSchedule()">保存</button>
-    </div>`;
+    <button class="ghost" style="margin-top:8px" onclick="addScheduleRow()">+ 添加时段</button>`;
+  setModalFoot(`
+    <button onclick="closeModal()">取消</button>
+    <button class="primary" onclick="saveSchedule()">保存</button>`);
   document.getElementById('overlay').classList.add('show');
 }
 
@@ -1751,11 +1903,436 @@ async function saveSchedule() {
   } catch (e) { toast('保存失败: ' + e.message, true); }
 }
 
+// ── 模型顺序页（独立页签：一眼看全所有已配顺序的模型，就地拖拽编辑）──
+// 与模型页行内的「顺序」按钮改的是同一份数据（/ui/api/model-order）。这里存在的
+// 意义是把入口从「藏在每行操作列的按钮里」提到一级页签，并按模型铺开。
+// 展开态与草稿都存在 ORDER_PAGE 里，整页重绘（render() 由轮询/写操作触发）不丢编辑中
+// 的内容——否则 30s 轮询一到，正在拖的顺序就被刷回旧值。
+
+// 遍历 MODELS，收集「带 order 配置」的模型，形状 {p, m, targets[], marks[]}
+// 通道目录里的 m["id"] 可能自带通道前缀（qoder 组里是 qoder/qwen3.8-max），
+// 而 model_order 的键用的是**剥前缀的裸名**（转发侧按裸名路由，见 ui.py
+// _bare_model_id）。不剥就会渲染出 qoder/qoder/qwen3.8-max 这种永远不生效的键。
+function bareModelId(id, provider) {
+  const p = String(provider || '');
+  const s = String(id || '');
+  return p && s.startsWith(p + '/') ? s.slice(p.length + 1) : s;
+}
+
+function orderedModels() {
+  const out = [];
+  ((MODELS && MODELS.groups) || []).forEach(g => {
+    (g.models || []).forEach(m => {
+      if (m.order) out.push({ p: g.id, m: bareModelId(m.id, g.id), order: m.order });
+    });
+  });
+  return out;
+}
+
+// 可选模型全集（用于「+ 新增模型」的下拉），按通道分组
+function allModelOptions() {
+  const out = [];
+  ((MODELS && MODELS.groups) || []).forEach(g => {
+    (g.models || []).forEach(m => out.push({ p: g.id, m: bareModelId(m.id, g.id) }));
+  });
+  return out;
+}
+
+// 页面状态：展开的模型键集合是纯 UI 状态，不随数据刷新重置。
+// 注意 "p/m" 里的 model 是**裸名**（见 bareModelId）——与 model_order 的键同口径。
+let ORDER_OPEN = new Set();     // 已展开的 "p/m"
+let ORDER_DRAFT = {};           // "p/m" → [{provider, model}] 编辑中的草稿（未保存）
+let ORDER_PAGE_MARKS = {};      // "p/m" → {targetKey: 剩余秒数}
+
+function orderPageKey(p, m) { return `${p}/${m}`; }
+
+// 服务端下发的 targets（"p/m" 字符串数组）→ 行对象数组
+function orderTargetsToItems(targets) {
+  return (targets || []).map(t => {
+    const i = String(t).indexOf('/');
+    return i > 0 ? { provider: String(t).slice(0, i), model: String(t).slice(i + 1) }
+                 : { provider: 'codebuddy', model: String(t) };
+  });
+}
+
+// 只数填了模型名的档位：末尾那个刚点「+ 添加目标」还没填名的空行不算一档
+function orderCount(items) { return (items || []).filter(i => i.model).length; }
+
+// 「未保存」= 草稿与服务端值**内容**不同，而不是「草稿存在」。
+// 草稿在展开时就会建立（renderOrderRows 的首次填充），若只看存在性，
+// 每张展开过的卡片都会永远挂着「未保存」——撤销修改后也摘不掉。
+function orderIsDirty(key) {
+  const draft = ORDER_DRAFT[key];
+  if (!draft) return false;
+  const row = orderedModels().find(r => orderPageKey(r.p, r.m) === key);
+  const server = row ? row.order.targets : [];
+  const cur = draft.filter(i => i.model).map(i => `${i.provider}/${i.model}`);
+  return cur.length !== server.length || cur.some((v, i) => v !== server[i]);
+}
+
+// 顺序页的行渲染依赖通道下拉（ORDER_PROVIDER_LIST）与模型候选（ORDER_OPTIONS），
+// 这两样原本只在打开弹窗时加载。这里幂等补齐：拉不到就退化成纯手输，不阻断页面。
+async function ensureOrderOptions() {
+  if (ORDER_PROVIDER_LIST.length) return;
+  await loadOrderOptions().catch(() => { ORDER_OPTIONS = {}; });
+  // 通道列表以选项接口为准（MODELS 只在模型页加载过才有值）
+  ORDER_PROVIDER_LIST = Object.keys(ORDER_OPTIONS || {}).length
+    ? Object.keys(ORDER_OPTIONS)
+    : ((MODELS && MODELS.groups) || []).map(g => g.id);
+}
+
+function renderOrderPage() {
+  const box = document.getElementById('order-list');
+  if (!box) return;
+  // 已配置的条目由服务端下发；MODELS 非空即当前世代的数据（ensureData 会在
+  // 代次失配时把它置回 null），所以这里不必再额外判「加载完没有」。
+  if (!MODELS) { box.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  // 选项还没到位时先拉一次再重绘（只触发一轮：拉到后 ORDER_PROVIDER_LIST 非空）
+  if (!ORDER_PROVIDER_LIST.length) {
+    ensureOrderOptions().then(() => { if (currentTab() === 'order') renderOrderPage(); });
+  }
+
+  const rows = orderedModels();
+  const sum = document.getElementById('order-summary');
+  if (sum) sum.textContent = rows.length ? `${rows.length} 个模型已配顺序` : '';
+
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty">还没有配置任何模型顺序 —— 点右上角「+ 新增模型」开始。'
+      + '<br><span class="muted" style="font-size:12px">未配置的模型按模型 id 自动匹配通道（历史行为）。</span></div>';
+    return;
+  }
+
+  box.innerHTML = rows.map(r => orderPageCard(r)).join('');
+  // 拖拽/编辑只绑一次：整块容器用事件委托，避免每张卡片重复绑定
+  bindOrderPage(box);
+}
+
+function orderPageCard(r) {
+  const key = orderPageKey(r.p, r.m);
+  const open = ORDER_OPEN.has(key);
+  // 草稿优先：用户正在编辑时不要被新拉到的数据覆盖
+  const items = ORDER_DRAFT[key] || orderTargetsToItems(r.order.targets);
+  const marks = ORDER_PAGE_MARKS[key] || {};
+  const markCount = Object.keys(marks).length;
+  const chain = r.order.targets.join(' → ');
+
+  // 折叠时才显示链路摘要：展开后每行都写着 provider/模型，再挂一条重复的
+  // 「a → b → c」只是噪声，还把卡片头挤得满满当当。
+  return `<div class="card order-card" data-key="${esc(key)}">
+    <div class="order-head" onclick="orderToggle('${esc(key)}')">
+      <span class="chev" style="transform:rotate(${open ? 0 : -90}deg)">▾</span>
+      <span class="mono order-title">${esc(r.m)}</span>
+      <span class="order-owner mono" title="归属通道：请求里的裸模型名解析到哪个通道，顺序就配在它名下。
+它不随候选顺序变化——把别的通道排到第一位不会改变归属，要改归属得另建一张卡。
+显示它是为了区分同名模型：glm-5.3 被 zcode 和 codebuddy 都发布时是两张各自独立的卡片。">· ${esc(r.p)}</span>
+      <span class="tag order-count">${orderCount(items)} 档</span>
+      ${markCount ? `<span class="tag bad" title="有目标处于冷却中，请求会跳过它">⏸ ${markCount}</span>` : ''}
+      <span class="tag bad order-dirty" title="有未保存的修改" style="${orderIsDirty(key) ? '' : 'display:none'}">未保存</span>
+      <span class="order-chain muted mono">${open ? '' : esc(chain)}</span>
+    </div>
+    ${open ? `<div class="order-body">
+      <div class="order-rows" data-key="${esc(key)}"></div>
+      <div class="order-actions">
+        <button class="ghost" onclick="orderPageAdd('${esc(key)}')">+ 添加目标</button>
+        <span class="spacer"></span>
+        <button class="ghost" onclick="orderPageReset('${esc(key)}')">撤销修改</button>
+        <button class="primary" onclick="orderPageSave('${esc(key)}')">保存</button>
+        <button class="ghost danger" title="清空全部目标 = 恢复按模型 id 自动匹配的历史路由"
+                onclick="orderPageClear('${esc(key)}')">清空</button>
+      </div>
+    </div>` : ''}
+  </div>`;
+}
+
+// 展开/收起：只影响这一张卡片的 DOM，不整体重绘（避免打断其它卡片的编辑）
+function orderToggle(key) {
+  if (ORDER_OPEN.has(key)) ORDER_OPEN.delete(key); else ORDER_OPEN.add(key);
+  renderOrderPage();
+}
+
+// 给每个 .order-rows 容器绑一次事件，再填行内容。
+// 绑定（bindOrderRowEvents）与渲染（renderOrderRows）分开，是为了避免
+// renderOrderRows → bindOrderPage → renderOrderRows 的无限递归。
+function bindOrderPage(box) {
+  box.querySelectorAll('.order-rows').forEach(el => renderOrderRows(el.dataset.key));
+}
+
+// 把 DOM 行回写成草稿（DOM 是编辑期真源，草稿是保存时读的真源）
+function orderPageSync(key) {
+  const el = document.querySelector(`.order-rows[data-key="${CSS.escape(key)}"]`);
+  if (!el) return;
+  ORDER_DRAFT[key] = Array.from(el.querySelectorAll('.order-row')).map(r => ({
+    provider: r.querySelector('.order-provider').value,
+    model: (r.querySelector('.order-model').value || '').trim(),
+  }));
+}
+
+function renderOrderRows(key) {
+  const el = document.querySelector(`.order-rows[data-key="${CSS.escape(key)}"]`);
+  if (!el) return;
+  let items = ORDER_DRAFT[key];
+  if (!items) {
+    // 首次：从服务端拉到的 targets 建草稿
+    const row = orderedModels().find(r => orderPageKey(r.p, r.m) === key);
+    if (!row) { el.innerHTML = ''; return; }
+    items = ORDER_DRAFT[key] = orderTargetsToItems(row.order.targets);
+    const marks = {};
+    (row.order.marks || []).forEach(k => {
+      const i = String(k.target).indexOf('/');
+      if (i > 0) marks[orderKey(k.target.slice(0, i), k.target.slice(i + 1))] = k.cooldown_s;
+    });
+    ORDER_PAGE_MARKS[key] = marks;
+  }
+  el.innerHTML = items.length
+    ? items.map((it, i) => orderRow(it, i, ORDER_PAGE_MARKS[key] || {}, key)).join('')
+    : '<div class="muted" style="font-size:13px;padding:6px 0">暂无目标 —— 保存后恢复历史路由（按模型 id 自动匹配）。</div>';
+  // 只补绑新产生的容器，绝不回头调 bindOrderPage（那会再触发本函数 → 递归）
+  bindOrderRowEvents(el);
+}
+
+// 只给单个容器挂事件（不渲染），供 renderOrderRows / bindOrderPage 共用
+function bindOrderRowEvents(el) {
+  if (!el || el.dataset.bound) return;
+  el.dataset.bound = '1';
+  el.addEventListener('dragstart', ev => orderPageDrag(ev, 'start'));
+  el.addEventListener('dragover',  ev => orderPageDrag(ev, 'over'));
+  el.addEventListener('dragend',   ev => orderPageDrag(ev, 'end'));
+  el.addEventListener('drop',      ev => ev.preventDefault());
+  el.addEventListener('dragleave', ev => {
+    if (!el.contains(ev.relatedTarget)) orderPageDrag(ev, 'end');
+  });
+  // provider 下拉：同步草稿就够了，重绘交给 orderSetProvider 的行内处理器统一做
+  // （两处都重绘会连着绘两次，输入框闪一下，还会把刚送回去的光标又丢掉）。
+  // change 冒泡到容器时，触发行可能已被那次重绘换掉（closest 返回 null）——
+  // 事件是异步派发的，DOM 归属得现查，不能假定还在。
+  el.addEventListener('change', ev => {
+    const row = ev.target.closest && ev.target.closest('.order-row');
+    const box = row && row.closest('.order-rows');
+    if (box && row.querySelector('.order-provider') === ev.target)
+      orderPageSync(box.dataset.key);
+  });
+}
+
+function orderPageAdd(key) {
+  orderPageSync(key);
+  const list = ORDER_DRAFT[key] || [];
+  const prev = list.length ? list[list.length - 1].provider : '';
+  list.push({ provider: prev || (ORDER_PROVIDER_LIST[0] || ''), model: '' });
+  ORDER_DRAFT[key] = list;
+  renderOrderRows(key);
+  const el = document.querySelector(`.order-rows[data-key="${CSS.escape(key)}"]`);
+  const last = el && el.querySelector('.order-row:last-child .order-model');
+  if (last) last.focus();
+}
+
+function orderPageReset(key) {
+  delete ORDER_DRAFT[key];
+  renderOrderRows(key);
+  renderOrderPageHead(key);
+}
+
+// 拖拽：与弹窗版同一套语义，只是作用域换成单张卡片的 .order-rows
+function orderPageDrag(ev, phase) {
+  const box = ev.currentTarget;
+  const row = ev.target.closest && ev.target.closest('.order-row');
+  if (phase === 'start') {
+    if (!row) return;
+    ORDER_DRAG_FROM = Number(row.dataset.idx);
+    if (ev.dataTransfer) {
+      ev.dataTransfer.effectAllowed = 'move';
+      try { ev.dataTransfer.setData('text/plain', String(ORDER_DRAG_FROM)); } catch (e) {}
+    }
+    row.style.opacity = '0.4';
+    return;
+  }
+  if (phase === 'over') {
+    if (ORDER_DRAG_FROM === null) return;
+    ev.preventDefault();
+    if (!row || Number(row.dataset.idx) === ORDER_DRAG_FROM) return;
+    const dragged = box.querySelector(`.order-row[data-idx="${ORDER_DRAG_FROM}"]`);
+    if (!dragged) return;
+    const rect = row.getBoundingClientRect();
+    const after = (ev.clientY - rect.top) > rect.height / 2;
+    box.insertBefore(dragged, after ? row.nextElementSibling : row);
+    Array.from(box.querySelectorAll('.order-row')).forEach((r, i) => { r.dataset.idx = i; });
+    ORDER_DRAG_FROM = Number(dragged.dataset.idx);
+    return;
+  }
+  // end：回写
+  if (ORDER_DRAG_FROM !== null) {
+    const key = box.dataset.key;
+    ORDER_DRAFT[key] = Array.from(box.querySelectorAll('.order-row')).map(r => ({
+      provider: r.querySelector('.order-provider').value,
+      model: (r.querySelector('.order-model').value || '').trim(),
+    }));
+  }
+  ORDER_DRAG_FROM = null;
+  const key = box.dataset.key;
+  if (key) { renderOrderRows(key); renderOrderPageHead(key); }
+}
+
+// 只更新卡片头部（档位数/未保存标记/链路），不整页重绘
+function renderOrderPageHead(key) {
+  const card = document.querySelector(`.order-card[data-key="${CSS.escape(key)}"]`);
+  if (!card) return;
+  const head = card.querySelector('.order-head');
+  const items = ORDER_DRAFT[key] || [];
+  const cnt = head.querySelector('.order-count');
+  if (cnt) cnt.textContent = `${orderCount(items)} 档`;
+  const dirty = head.querySelector('.order-dirty');
+  if (dirty) dirty.style.display = orderIsDirty(key) ? '' : 'none';
+  // 归属通道标签**不随拖拽变**：键恒等于「请求解析到的归属通道 + 模型名」，
+  // 拖到第一位的是候选顺序，不是归属（forward.py 用 _resolve_auto 的解析结果
+  // 取键，跟 targets 的顺序无关）。这里重写一遍只是保证重绘后不残留旧文案；
+  // 真要换归属通道得另建一张卡。
+  const chain = items.filter(i => i.model).map(i => `${i.provider}/${i.model}`).join(' → ');
+  const tail = head.querySelector('.order-chain');
+  if (tail) {
+    // 展开时不显示链路（行里已经写明了），只在折叠态有意义
+    tail.textContent = card.querySelector('.order-body') ? '' : chain;
+  }
+}
+
+// 保存时读的「真源」。卡片**展开**时 DOM 是编辑真源（输入框里的字可能还没回写草稿）；
+// **折叠**时没有输入框，能代表这轮意图的只有 `ORDER_DRAFT[key]`。
+//
+// 这里返回 null 表示「拿不到可信的界面状态」——两种情况：
+//   1. 既没展开、也没有草稿（比如刚刷新完页面，orderPage() 的 not-open 分支把
+//      `ORDER_DRAFT[key]` 重置成了 `[]`）。此时 `[]` 只是占位，不代表用户想清空。
+//   2. 展开着但行数对不上（渲染竞态）。宁可就地提示重来，也不要把空数组当成
+//      用户输入发出去，把服务端配置**静默抹平**——这正是「折叠态保存一下配置就没了」
+//      的成因。返回 [] 才是用户真的把行都删光了，那是合法的「恢复历史路由」。
+function orderPageIntendedItems(key) {
+  const el = document.querySelector(`.order-rows[data-key="${CSS.escape(key)}"]`);
+  if (!el) {
+    // 折叠态：没有 DOM 可读。只有草稿存在（说明这轮编辑过）才认它；
+    // 连草稿都没有就是「没展开过」，不可信。
+    return ORDER_DRAFT[key] ? ORDER_DRAFT[key].filter(it => it.model) : null;
+  }
+  const rows = Array.from(el.querySelectorAll('.order-row'));
+  const items = rows.map(r => ({
+    provider: r.querySelector('.order-provider').value,
+    model: (r.querySelector('.order-model').value || '').trim(),
+  })).filter(it => it.model);
+  // 输入框里已经填了名的行数，和草稿里的行数对不上 → 渲染竞态，不可信
+  const draft = (ORDER_DRAFT[key] || []).filter(it => it.model);
+  if (rows.length && items.length !== draft.length && draft.length) return null;
+  return items;
+}
+
+async function orderPageSave(key) {
+  orderPageSync(key);
+  const items = orderPageIntendedItems(key);
+  if (items === null) {
+    toast('界面还没同步好，请重新展开这张卡片再保存', true);
+    return;
+  }
+  const asked = items.map(t => `${t.provider}/${t.model}`);
+  const [provider, ...rest] = key.split('/');
+  const model = rest.join('/');
+  try {
+    const r = await api('/ui/api/model-order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ provider, model, targets: items })});
+    const saved = r.targets || [];
+    // 按下标一对一比是够的：服务端回的是**已经归一化过**的列表（去重/别名/截断都在
+    // 写盘时做完），所以 `saved` 与 `asked` 逐项不同就代表真的被规范化过。实测别名
+    // 撞车（草稿里加 workbuddy/glm-5.3）时它会正确地报出来——那不是误报。
+    const changed = asked.some((a, i) => saved[i] !== a);
+    toast(items.length
+      ? `${key} 候选顺序：${saved.join(' → ')}` + (changed ? '（已按通道目录规范化）' : '')
+      : `${key} 已恢复历史路由`);
+    delete ORDER_DRAFT[key];
+    delete ORDER_PAGE_MARKS[key];
+    await refreshAll();
+    renderOrderPage();
+  } catch (e) { toast('保存失败: ' + e.message, true); }
+}
+
+// 「清空」= 明确表达「恢复历史路由」的意图，绕开 orderPageSync（它靠 DOM 反写草稿，
+// 折叠态没容器时会把那时的 `[]` 原样当成用户输入）。这是不可逆操作，先问一句。
+async function orderPageClear(key) {
+  if (!confirm(`清空 ${key} 的全部候选，恢复按模型 id 自动匹配的历史路由？`)) return;
+  ORDER_DRAFT[key] = [];
+  const el = document.querySelector(`.order-rows[data-key="${CSS.escape(key)}"]`);
+  if (el) renderOrderRows(key);   // 展开态让界面立刻反映清空，再走保存
+  await orderPageSave(key);
+}
+
+// 「+ 新增模型」：选**模型**（不是选 provider），选中即以空顺序展开（保存后生效）。
+// 列表按「请求解析到的归属通道」分组，组内只显示模型名——同一个 glm-5.3 在
+// codebuddy 和 zcode 下是两个各自独立的键，分组既去掉了重复的通道前缀，
+// 又保住了这个区别。组头写上归属通道号，是因为键必须落对通道顺序才生效。
+function orderAddModel() {
+  const opts = allModelOptions();
+  const existing = new Set(orderedModels().map(r => orderPageKey(r.p, r.m)));
+  const byProvider = new Map();
+  opts.forEach(o => {
+    if (!byProvider.has(o.p)) byProvider.set(o.p, []);
+    byProvider.get(o.p).push(o);
+  });
+  document.getElementById('modal-title').textContent = '新增模型顺序';
+  document.getElementById('modal-body').innerHTML = `
+    <div class="muted" style="font-size:13px;margin-bottom:10px">
+      选择要配置候选顺序的模型，每个模型是一张独立的卡片。同一模型被多个通道发布时，
+      这里列出的是<b>请求解析到的归属通道</b>（如 <span class="mono">glm-5.3</span> 归 zcode），
+      组选错了顺序不会生效。
+    </div>
+    <input id="order-new-search" placeholder="搜索模型名…" style="width:100%;margin-bottom:8px">
+    <div id="order-new-list" class="order-new-list"></div>`;
+  setModalFoot('<button onclick="closeModal()">取消</button>');
+  const draw = (q) => {
+    const kw = (q || '').trim().toLowerCase();
+    let total = 0;
+    const html = [...byProvider].map(([p, list]) => {
+      const hit = list.filter(o => !kw || o.m.toLowerCase().includes(kw) || p.toLowerCase().includes(kw));
+      if (!hit.length) return '';
+      total += hit.length;
+      return `<div class="order-new-group">${esc(p)}</div>` + hit.map(o => {
+        const has = existing.has(orderPageKey(o.p, o.m));
+        return `<div class="order-new-item">
+          <span class="mono on-m">${esc(o.m)}</span>
+          ${has ? '<span class="tag">已配置</span>' : ''}
+          <span class="spacer"></span>
+          <button class="ghost" onclick="orderAddModelPick('${esc(o.p)}','${esc(o.m)}')">${has ? '编辑' : '添加'}</button>
+        </div>`;
+      }).join('');
+    }).join('');
+    document.getElementById('order-new-list').innerHTML = total
+      ? html : '<div class="muted">没有匹配的模型</div>';
+  };
+  draw('');
+  const s = document.getElementById('order-new-search');
+  s.addEventListener('input', () => draw(s.value));
+  s.focus();
+  document.getElementById('overlay').classList.add('show');
+}
+
+function orderAddModelPick(provider, model) {
+  const key = orderPageKey(provider, model);
+  ORDER_OPEN.add(key);
+  if (!ORDER_DRAFT[key]) {
+    const row = orderedModels().find(r => orderPageKey(r.p, r.m) === key);
+    // 已配置的沿用其 targets；未配置的从空开始
+    const list = row ? row.order.targets.map(t => {
+      const i = t.indexOf('/');
+      return i > 0 ? { provider: t.slice(0, i), model: t.slice(i + 1) }
+                   : { provider: 'codebuddy', model: t };
+    }) : [];
+    ORDER_DRAFT[key] = list;
+  }
+  closeModal();
+  switchTab('order');
+  renderOrderPage();
+  setTimeout(() => {
+    const card = document.querySelector(`.order-card[data-key="${CSS.escape(key)}"]`);
+    if (card) card.scrollIntoView({block: 'center', behavior: 'smooth'});
+  }, 60);
+}
+
 // ── 候选上游顺序编辑（按序尝试、未提交即失败换下一档）──
-let ORDER_CTX = null;         // { provider, model }
-let ORDER_ITEMS = [];         // 当前正在编辑的 [{provider, model}]，唯一真源（DOM 只做渲染）
+// 编辑界面只在「模型顺序」页签；模型表那一列只留徽标，不做行内入口。
 let ORDER_OPTIONS = null;     // /ui/api/model-order/options 的缓存：{provider: [{id,label}]}
-let ORDER_MARKS = {};         // "provider/model"（小写归一）→ 剩余冷却秒数（仅展示用）
 let ORDER_PROVIDER_LIST = []; // 可选通道 id 列表
 let ORDER_DRAG_FROM = null;   // 拖拽中的行下标
 
@@ -1773,192 +2350,109 @@ async function loadOrderOptions() {
   return map;
 }
 
-function orderRender() {
-  const box = document.getElementById('order-rows');
-  if (!box) return;
-  if (!ORDER_ITEMS.length) {
-    box.innerHTML = '<div class="muted" style="font-size:13px;padding:10px 0">'
-      + '暂无目标 —— 模型按 id 自动匹配到哪个通道就用哪个（历史行为）。</div>';
-    return;
-  }
-  box.innerHTML = ORDER_ITEMS.map((it, i) => orderRow(it, i)).join('');
-}
-
-function orderRow(item, idx) {
-  const id = `order-p-${idx}`;
+// 渲染一行候选目标。marks 是该模型的冷却表（"provider/model" → 剩余秒数），
+// scope 是数据源作用域，写进行的 data-scope（模型键，读写 ORDER_DRAFT[key]）。
+// 行内处理器只带 this，作用域由 orderRowCtx 从**事件元素自身的行**上读——
+// 不做全局 querySelector 反查：页面上可能同时存在多张展开的卡片，各自都有
+// data-idx="0" 的行，全局查会写错数据源。
+function orderRow(item, idx, marks, scope) {
+  const id = `order-p-${String(scope).replace(/[^a-zA-Z0-9]/g, '_')}-${idx}`;
+  const marksMap = marks || {};
   const models = (ORDER_OPTIONS && ORDER_OPTIONS[item.provider]) || [];
   // 自由文本 + <datalist>：既能点选（用户要的「可以选」），又保留手输
   // （目录里的名字可能与上游实际接受的 id 不同，锁死成下拉会把人卡住）
   const list = models.map(m =>
     `<option value="${esc(m.id)}"${m.label ? ` label="${esc(m.label)}"` : ''}></option>`).join('');
-  const left = ORDER_MARKS[orderKey(item.provider, item.model)];
+  const left = marksMap[orderKey(item.provider, item.model)];
   const known = !models.length || models.some(m => m.id === item.model);
-  return `<div class="order-row" draggable="true" data-idx="${idx}"
-      style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-    <span class="order-grip" title="拖拽调整顺序" style="cursor:grab;color:var(--muted)">⠿</span>
-    <span class="muted mono" style="flex:0 0 18px">${idx + 1}.</span>
-    <select class="order-provider" style="flex:0 0 26%" onchange="orderSetProvider(${idx}, this.value)">
+  return `<div class="order-row" draggable="true" data-idx="${idx}" data-scope="${esc(scope)}">
+    <span class="order-grip" title="拖拽调整顺序">⠿</span>
+    <span class="order-no muted mono">${idx + 1}</span>
+    <select class="order-provider" title="候选通道" onchange="orderSetProvider(this)">
       ${ORDER_PROVIDER_LIST.map(p =>
         `<option value="${esc(p)}"${p === item.provider ? ' selected' : ''}>${esc(p)}</option>`).join('')}
     </select>
-    <input class="order-model" type="text" list="${id}" style="flex:1"
+    <input class="order-model" type="text" list="${id}"
       placeholder="模型名（可下拉选择或手输，如 glm-5.3）"
       value="${esc(item.model || '')}"
-      oninput="orderSetModel(${idx}, this.value)">
+      oninput="orderSetModel(this)">
     <datalist id="${id}">${list}</datalist>
-    ${left ? `<span class="tag bad" title="冷却中，剩余 ${left}s；期间请求会跳过它">⏸ ${left}s</span>` : ''}
-    ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
-    <button class="ghost" title="上移" onclick="orderMove(${idx},-1)">▲</button>
-    <button class="ghost" title="下移" onclick="orderMove(${idx},1)">▼</button>
-    <button class="ghost" title="删除此目标" onclick="orderRemove(${idx})">✕</button>
+    <span class="order-flags">
+      ${left ? `<span class="tag bad" title="冷却中，剩余 ${left}s；期间请求会跳过它">⏸ ${left}s</span>` : ''}
+      ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
+    </span>
+    <span class="order-btns">
+      <button class="ghost" title="上移" onclick="orderMove(this,-1)">▲</button>
+      <button class="ghost" title="下移" onclick="orderMove(this,1)">▼</button>
+      <button class="ghost danger" title="删除此目标" onclick="orderRemove(this)">✕</button>
+    </span>
   </div>`;
 }
 
-function orderSetProvider(idx, value) { ORDER_ITEMS[idx].provider = value; orderRender(); }
+// 从事件元素定位它所属的行：作用域 + 下标 + 对应的可变数组
+function orderRowCtx(el) {
+  const row = el.closest('.order-row');
+  if (!row) return null;
+  const scope = row.dataset.scope || '';
+  return { row, scope, idx: Number(row.dataset.idx), items: orderItemsOf(scope) };
+}
 
-function orderSetModel(idx, value) {
-  ORDER_ITEMS[idx].model = value;
+// 按作用域取数据源：作用域就是模型键，对应该卡片的草稿
+function orderItemsOf(scope) {
+  return (ORDER_DRAFT[scope] = ORDER_DRAFT[scope] || []);
+}
+
+function orderRepaint(scope) {
+  renderOrderRows(scope);
+  renderOrderPageHead(scope);
+}
+
+// 重绘会把整行 innerHTML 换掉，输入框随之失焦。手输模型名时这等于「打第二个
+// 字符就没法继续打」，所以重绘后把光标送回原处。
+function orderRefocus(scope, idx, field, pos) {
+  const row = document.querySelector(
+    `.order-row[data-scope="${CSS.escape(scope)}"][data-idx="${idx}"]`);
+  const el = row && row.querySelector(field);
+  if (!el) return;
+  el.focus();
+  try { el.setSelectionRange(pos, pos); } catch (e) {}
+}
+
+function orderSetProvider(el) {
+  const c = orderRowCtx(el);
+  if (!c || !c.items[c.idx]) return;
+  c.items[c.idx].provider = el.value;
+  orderRepaint(c.scope);
+}
+
+function orderSetModel(el) {
+  const c = orderRowCtx(el);
+  if (!c || !c.items[c.idx]) return;
+  c.items[c.idx].model = el.value;
   // 只对「已完整输入」的名做存在性提示，避免每敲一个字符就重绘闪烁
-  const row = document.querySelector(`#order-rows .order-row[data-idx="${idx}"]`);
-  if (row && value.trim().length >= 2) orderRender();
+  if (el.value.trim().length < 2) return;
+  const pos = el.selectionStart;
+  orderRepaint(c.scope);
+  orderRefocus(c.scope, c.idx, '.order-model', pos);
 }
 
-function orderMove(idx, delta) {
-  const to = idx + delta;
-  if (to < 0 || to >= ORDER_ITEMS.length) return;
-  const [it] = ORDER_ITEMS.splice(idx, 1);
-  ORDER_ITEMS.splice(to, 0, it);
-  orderRender();
+function orderMove(el, delta) {
+  const c = orderRowCtx(el);
+  if (!c) return;
+  const to = c.idx + delta;
+  if (to < 0 || to >= c.items.length) return;
+  const [it] = c.items.splice(c.idx, 1);
+  c.items.splice(to, 0, it);
+  orderRepaint(c.scope);
 }
 
-function orderRemove(idx) { ORDER_ITEMS.splice(idx, 1); orderRender(); }
-
-// 拖拽：原生 HTML5。dragstart 只记起点，drop 时按 DOM 顺序回写 ORDER_ITEMS，
-// 保证「DOM 渲染顺序」与「数组顺序」永远一致（数组才是保存时读的真源）。
-function orderDragStart(ev) {
-  const row = ev.target.closest && ev.target.closest('.order-row');
-  if (!row) return;
-  ORDER_DRAG_FROM = Number(row.dataset.idx);
-  if (ev.dataTransfer) {
-    ev.dataTransfer.effectAllowed = 'move';
-    // Firefox 不设 data 就不触发 drag 事件
-    try { ev.dataTransfer.setData('text/plain', String(ORDER_DRAG_FROM)); } catch (e) {}
-  }
-  row.style.opacity = '0.4';
+function orderRemove(el) {
+  const c = orderRowCtx(el);
+  if (!c || !c.items[c.idx]) return;
+  c.items.splice(c.idx, 1);
+  orderRepaint(c.scope);
 }
 
-function orderDragOver(ev) {
-  if (ORDER_DRAG_FROM === null) return;
-  ev.preventDefault();  // 不 preventDefault 就不会触发 drop
-  const row = ev.target.closest && ev.target.closest('.order-row');
-  const box = document.getElementById('order-rows');
-  if (!row || !box || Number(row.dataset.idx) === ORDER_DRAG_FROM) return;
-  const dragged = box.querySelector(`.order-row[data-idx="${ORDER_DRAG_FROM}"]`);
-  if (!dragged) return;
-  const rect = row.getBoundingClientRect();
-  const after = (ev.clientY - rect.top) > rect.height / 2;
-  box.insertBefore(dragged, after ? row.nextElementSibling : row);
-  // 拖拽过程中重新编号，让后续判定基于最新位置
-  Array.from(box.querySelectorAll('.order-row')).forEach((r, i) => { r.dataset.idx = i; });
-  ORDER_DRAG_FROM = Number(dragged.dataset.idx);
-}
-
-function orderDragEnd(ev) {
-  const box = document.getElementById('order-rows');
-  if (box && ORDER_DRAG_FROM !== null) {
-    ORDER_ITEMS = Array.from(box.querySelectorAll('.order-row')).map(r => ({
-      provider: r.querySelector('.order-provider').value,
-      model: r.querySelector('.order-model').value.trim(),
-    }));
-  }
-  ORDER_DRAG_FROM = null;
-  orderRender();
-}
-
-function addOrderRow() {
-  const prev = ORDER_ITEMS.length ? ORDER_ITEMS[ORDER_ITEMS.length - 1].provider : '';
-  ORDER_ITEMS.push({ provider: prev || ORDER_PROVIDER_LIST[0] || '', model: '' });
-  orderRender();
-  const box = document.getElementById('order-rows');
-  const last = box && box.querySelector('.order-row:last-child .order-model');
-  if (last) last.focus();
-}
-
-async function openOrderModal(provider, model, targets, marks) {
-  ORDER_CTX = { provider, model };
-  document.getElementById('modal-title').textContent = `候选上游顺序 · ${provider}/${model}`;
-  // 冷却快照由模型行随行传入（[[target, cooldown_s], ...]），省掉一次 /ui/api/models。
-  // target 是 "provider/model"；模型名自身不含 "/"，因为 model_key 只加一个前缀。
-  ORDER_MARKS = {};
-  (marks || []).forEach(k => {
-    const i = String(k[0]).indexOf('/');
-    if (i > 0) ORDER_MARKS[orderKey(String(k[0]).slice(0, i), String(k[0]).slice(i + 1))] = k[1];
-  });
-  ORDER_ITEMS = (targets || []).map(t => {
-    const i = t.indexOf('/');
-    return i > 0 ? { provider: t.slice(0, i), model: t.slice(i + 1) }
-                 : { provider: 'codebuddy', model: t };
-  });
-  document.getElementById('modal-body').innerHTML = `
-    <div class="muted" style="font-size:13px;margin-bottom:10px">
-      从上往下按序尝试，某个渠道<b>失败就换下一个</b>，并给失败渠道打 5 分钟冷却标记
-      （反复失败延长至 1 小时），期间请求自动跳过它。<br>
-      仅当<b>尚未向客户端输出任何内容</b>就失败时才会换档——已开始流式返回后不再重试
-      （防止上游重复计费）。因此 <b>codebuddy 通道的流式错误不会换档</b>
-      （上游把错误放在流里，代理无法感知），把它排在末位更实用。<br>
-      模型名可下拉选择或手输（上游实际接受的 id 可能与目录名不同）；<b>拖拽 ⠿ 或按 ▲▼</b>
-      调整顺序。不添加任何目标 = 恢复历史路由（按模型 id 自动匹配）。<br>
-      <b>注意</b>：客户端把 model 写成 <span class="mono">通道/模型</span> 时是明确指定通道，
-      会<b>直接走该通道、不参与这里的换档</b>；想要自动换档请让客户端只传模型名。
-    </div>
-    <div id="order-rows"></div>
-    <button class="ghost" style="margin-top:8px" onclick="addOrderRow()">+ 添加目标</button>
-    <div style="margin-top:16px;text-align:right">
-      <button onclick="closeModal()">取消</button>
-      <button class="primary" onclick="saveOrder()">保存</button>
-    </div>`;
-  const box = document.getElementById('order-rows');
-  box.addEventListener('dragstart', orderDragStart);
-  box.addEventListener('dragover', orderDragOver);
-  box.addEventListener('drop', ev => ev.preventDefault());
-  box.addEventListener('dragend', orderDragEnd);
-  // 拖到行外时也要收尾，否则残留的半透明行不会被清掉
-  box.addEventListener('dragleave', ev => {
-    if (!box.contains(ev.relatedTarget)) orderDragEnd(ev);
-  });
-  // 选择器数据拉不到也不能卡住编辑：退化成纯手输（options 为空数组）
-  await loadOrderOptions().catch(() => { ORDER_OPTIONS = {}; });
-  // 通道列表以**选项接口**为准，而不是 MODELS：MODELS 只在「模型」标签页加载过才有值，
-  // 从其它入口打开弹窗时它是 null，会让下拉框空掉。
-  ORDER_PROVIDER_LIST = Object.keys(ORDER_OPTIONS).length
-    ? Object.keys(ORDER_OPTIONS)
-    : (MODELS && MODELS.groups || []).map(g => g.id);
-  orderRender();
-  document.getElementById('overlay').classList.add('show');
-}
-
-async function saveOrder() {
-  if (!ORDER_CTX) return;
-  const targets = ORDER_ITEMS
-    .map(it => ({ provider: it.provider, model: (it.model || '').trim() }))
-    .filter(it => it.model);
-  try {
-    const r = await api('/ui/api/model-order', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ ...ORDER_CTX, targets })});
-    // 后端会把目标规范化（剥通道前缀、归一别名）。若与输入不同就明确告知，
-    // 否则「我写的是 glm-5.3，实际生效的是别的名字」这种静默错配没人看得见。
-    const saved = r.targets || [];
-    const asked = targets.map(t => `${t.provider}/${t.model}`);
-    const changed = asked.some((a, i) => saved[i] !== a);
-    toast(targets.length
-      ? `${ORDER_CTX.provider}/${ORDER_CTX.model} 候选顺序：${saved.join(' → ')}`
-        + (changed ? '（已按通道目录规范化）' : '')
-      : `${ORDER_CTX.provider}/${ORDER_CTX.model} 已恢复历史路由`);
-    closeModal();
-    refreshAll();
-  } catch (e) { toast('保存失败: ' + e.message, true); }
-}
 
 async function clearOrderMarks(provider, model) {
   try {
@@ -1974,6 +2468,7 @@ async function runTest(provider, model) {
   const overlay = document.getElementById('overlay');
   document.getElementById('modal-title').textContent = `测试 ${provider}/${model}`;
   document.getElementById('modal-body').innerHTML = '<span class="spin"></span>发送 "hi" 到上游，等待回复…（最长 120s）';
+  setModalFoot('');  // 这个弹窗只有固定的「关闭」；不清空会残留上一个弹窗的按钮
   overlay.classList.add('show');
   try {
     const r = await api('/ui/api/test', {
@@ -2002,7 +2497,17 @@ async function runTest(provider, model) {
   }
 }
 
-function closeModal() { document.getElementById('overlay').classList.remove('show'); }
+// 弹窗底部按钮槽。各弹窗自己带「取消/保存」，写进这里而不是 body 末尾，
+// 否则会和骨架里固定的「关闭」并排出现两个含义重叠的按钮。
+function setModalFoot(html) {
+  const foot = document.getElementById('modal-foot');
+  if (foot) foot.innerHTML = html || '<button onclick="closeModal()">关闭</button>';
+}
+
+function closeModal() {
+  document.getElementById('overlay').classList.remove('show');
+  setModalFoot('');  // 复位：下次直接打开「测试」弹窗时不会看到上个弹窗的按钮
+}
 document.getElementById('overlay').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeModal();
 });
