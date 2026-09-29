@@ -532,6 +532,9 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 配到本机任选一种：`export ZCODE_API_KEY=<key>` / 写进 `~/.buddy-proxy/zcode_api_key` / 在本机 ZCode CLI 登录
 coding-plan，然后 `buddy restart`。
 
+写文件时用 `>` **覆盖**、不要用 `>>` 追加：解析只认第一个非空行，追加会让旧 key 继续生效
+（换了 key 却毫无察觉）。目录不存在时先 `mkdir -p ~/.buddy-proxy`。
+
 ### 5. MiMo Provider（`mimo/` 子包）
 
 小米 **MiMo**（platform.xiaomimimo.com），以 `mimo/<id>` 寻址（`mimo-auto`、`mimo-pro`）。

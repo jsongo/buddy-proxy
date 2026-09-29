@@ -270,8 +270,14 @@ def _login_zcode(**_kwargs) -> int:
     print(f"       还没有 coding-plan 套餐的话先开通：{ZCODE_PLAN_URL}")
     print("    ② 配到本机，任选一种：")
     print("       a) 环境变量（临时）：export ZCODE_API_KEY=<粘贴 key>")
-    print(f"       b) 写文件（长期）: echo '<粘贴 key>' >> {secret_file_path()}")
+    # 用 `>` 不用 `>>`：读取只认第一个非空行，追加会让旧 key 继续生效，
+    # 用户换了 key 却毫无察觉。目录也一并建出来——这条命令不经过
+    # __main__.main()，新机器上 ~/.buddy-proxy 可能还不存在。
+    secret = secret_file_path()
+    print(f"       b) 写文件（长期）: mkdir -p {secret.parent} && "
+          f"echo '<粘贴 key>' > {secret}")
     print("          然后 chmod 600（key 是明文凭据）")
+    print("          （`>` 是覆盖：重复配置时把旧 key 换掉，别用 `>>` 追加）")
     print("       c) 已装 ZCode CLI 的话，在 CLI 里登录 coding-plan 也行 "
           "（读 ~/.zcode/v2/config.json）")
     print("    ③ 让网关重新读取：buddy restart")

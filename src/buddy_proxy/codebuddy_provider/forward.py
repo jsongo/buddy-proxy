@@ -400,8 +400,8 @@ async def forward_chat(
                 detail={
                     "error": {
                         "message": f"通道 {prefix} 未启用（当前请求带 {prefix}/ 前缀）。"
-                                   f"请在启动参数里加上 --{prefix}（或设 "
-                                   f"{prefix.upper()}_ENABLED=1）后重启网关。",
+                                   f"请在启动时{settings_mod.provider_enable_hint(prefix)}"
+                                   f"，然后重启网关。",
                         "type": "provider_disabled",
                     }
                 },

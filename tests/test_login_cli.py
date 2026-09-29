@@ -63,6 +63,60 @@ def test_zcode_guide_shows_secret_path_when_configured(capsys, monkeypatch):
     assert auth_login.ZCODE_CONSOLE_URL in out
 
 
+def test_zcode_guide_overwrites_instead_of_appending(capsys):
+    """写文件的指引必须是覆盖（``>``）而不是追加（``>>``）。
+
+    读取侧（``zcode._load_secret_file``）只认**第一个非空行**。用 ``>>`` 追加时
+    旧 key 依然生效——用户换了 key 却毫无察觉，排查起来毫无线索。另外这条命令
+    不经过 ``__main__.main()``，新机器上状态目录可能还不存在，所以指引里要带
+    ``mkdir -p``。
+    """
+    auth_login._login_zcode()
+    out = capsys.readouterr().out
+
+    # 只看真正让人复制的命令行：正文里那句「别用 >> 追加」是有意留的提醒
+    commands = [ln for ln in out.splitlines() if "echo" in ln]
+    assert commands, "指引里应当给出可直接复制的写文件命令"
+    for line in commands:
+        assert ">>" not in line, f"这行是追加写法，旧 key 会继续生效: {line.strip()}"
+    assert "mkdir -p" in out, "目录可能还不存在，得先建出来"
+
+
+def test_zcode_guide_survives_appended_file_documented_case(tmp_path, monkeypatch):
+    """把指引里的命令真跑一遍：落地后 ``resolve_credentials`` 读到的就是新 key。
+
+    防的是「指引看着对、但和解析逻辑对不上」——追加写法的 bug 正是这么漏过去的。
+    """
+    import subprocess
+
+    from buddy_proxy.providers import zcode
+
+    target = tmp_path / "zcode_api_key"
+    # 模拟用户照着指引操作：先建目录再覆盖写
+    subprocess.run(
+        f"mkdir -p {tmp_path} && echo 'NEWKEY_PART1.PART2' > {target}",
+        shell=True, check=True,
+    )
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(tmp_path))
+    assert zcode._load_secret_file() == "NEWKEY_PART1.PART2"
+
+
+def test_every_known_channel_has_enable_hint():
+    """每个认得的通道都要有「怎么开启」的说明，且不能推出不存在的开关。
+
+    ``traepat`` 是这条规矩的由来：它没有 ``--traepat``（挂在 ``--trae`` 分支里
+    由 ``TRAE_PAT_BEARER`` 决定），而路由报错要照着这张表给用户指路。
+    """
+    from buddy_proxy.core import settings as core_settings
+
+    for pid in core_settings.KNOWN_PROVIDER_IDS:
+        hint = core_settings.provider_enable_hint(pid)
+        assert hint, f"{pid} 没有启用说明"
+        if pid == "traepat":
+            assert "--traepat" not in hint, "这个参数不存在"
+            assert "TRAE_PAT_BEARER" in hint
+
+
 # ---------------------------------------------------------------------------
 # 别名
 # ---------------------------------------------------------------------------

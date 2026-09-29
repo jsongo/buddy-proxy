@@ -125,6 +125,32 @@ KNOWN_PROVIDER_IDS = frozenset(
     {"codebuddy", "zcode", "mimo", "qoder", "doubao", "trae", "traepat"}
 )
 
+#: 通道没启用时，告诉用户**怎么启用**。值是要打印给用户看的短句。
+#:
+#: 单独一张表而不是拼 ``--{prefix}`` / ``{PREFIX}_ENABLED=1``：那套命名只对
+#: 一半通道成立。``traepat`` 没有自己的开关——它挂在 ``--trae`` 分支里，由
+#: ``trae.pat.config.pat_enabled()`` 决定（配了 ``TRAE_PAT_BEARER`` 或
+#: ``TRAE_PAT_BEARER_PROFILES`` 才注册），拼出来的 ``--traepat`` 是不存在的
+#: 参数，照着敲只会落到 usage。以后再加通道时，这张表逼着把真实开关写清楚。
+PROVIDER_ENABLE_HINTS: dict[str, str] = {
+    "zcode": "加 --zcode（或设 ZCODE_ENABLED=1）",
+    "mimo": "加 --mimo（或设 MIMO_ENABLED=1）",
+    "qoder": "加 --qoder（或设 QODER_ENABLED=1）",
+    "doubao": "加 --doubao（或设 DOUBAO_ENABLED=1）",
+    "trae": "加 --trae（或设 TRAE_ENABLED=1）",
+    # traepat 没独立开关：先配 TRAE_PAT_BEARER(_PROFILES)，再开 --trae
+    "traepat": "配置 TRAE_PAT_BEARER（或 TRAE_PAT_BEARER_PROFILES）后加 --trae",
+    # codebuddy 是默认通道，进到这里只可能是「认得但没注册」的异常态
+    "codebuddy": "检查启动参数（codebuddy 是默认通道，不应缺失）",
+}
+
+
+def provider_enable_hint(prefix: str) -> str:
+    """``prefix`` 对应的启用方式短句；表里没有就退回通用措辞。"""
+    return PROVIDER_ENABLE_HINTS.get(
+        prefix, f"加 --{prefix}（或设 {prefix.upper()}_ENABLED=1）"
+    )
+
 
 def normalize_default_model(raw: str) -> str:
     """归一化默认模型字符串：去空白、provider 别名归一。"""

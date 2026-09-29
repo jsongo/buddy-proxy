@@ -496,6 +496,27 @@ def test_disabled_known_channel_prefix_fails_loudly(tmp_path, monkeypatch):
     assert a.calls == [], "不许把整个带前缀的名字漏给兜底通道"
 
 
+def test_disabled_traepat_hint_names_real_switch(tmp_path, monkeypatch):
+    """``traepat`` 没启用时的提示必须指向**真实存在**的开关。
+
+    ``traepat`` 没有自己的 ``--traepat``：它挂在 ``--trae`` 分支里，由
+    ``pat_enabled()``（``TRAE_PAT_BEARER`` / ``_PROFILES`` 有配）决定注册。
+    早期实现按 ``--{prefix}`` / ``{PREFIX}_ENABLED=1`` 拼短语，对 traepat 拼出
+    一个不存在的参数——用户照着敲只会落到 usage。
+    """
+    a = _Provider("pa", ["m1"])
+    state = _make_state({"pa": a}, tmp_path, default_provider="pa")
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="traepat/glm-5.3")
+    assert r.status_code == 400, r.text
+    msg = r.json()["detail"]["error"]["message"]
+    assert "--traepat" not in msg, "这个参数根本不存在，不能推荐"
+    assert "TRAE_PAT_BEARER" in msg, "要指向真正的启用方式"
+    assert "--trae" in msg
+    assert a.calls == []
+
+
 def test_unknown_non_channel_prefix_still_falls_back(tmp_path, monkeypatch):
     """但 ``openrouter/xxx`` 这类**不是本项目的通道名** → 维持原有兜底行为。
 
