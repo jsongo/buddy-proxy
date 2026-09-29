@@ -383,6 +383,12 @@ Three behaviours worth knowing (all verified against a live account, 2026-09):
   `VIEW_DETAILS` campaigns and unopened windows. The real test is per entry:
   `actionType == "CLAIM_BENEFIT" && claimStatus == "CLAIMABLE"`.
 
+Activity grants like these land in `/api/v2/quota/usage` as **dedicated resource packages**
+(`dedicatedResourcePackages`), which coexist with the subscription quota and add-on packs —
+they are part of the account's total allowance, each with its own (earlier) expiry. The admin
+UI's quota panel shows every available package as its own row, so the total matches what the
+account really has; packages with `available: false` (expired/invalidated) are skipped.
+
 > `--qoder` is only needed when you want this channel; without it the provider is not registered and `qoder/...` model names fall through to the fallback provider.
 
 ## Connect clients

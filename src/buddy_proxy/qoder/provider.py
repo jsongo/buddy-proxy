@@ -382,7 +382,7 @@ class QoderProvider(BaseProvider):
             remaining = max(total - used, 0.0)
         percent = _used_percent(primary, used, total)
 
-        def _item(node: dict, name: str) -> dict[str, Any]:
+        def _item(node: dict, name: str, reset_ts: int | None = None) -> dict[str, Any]:
             total_v = _total(node)
             try:
                 used_v = float(node.get("used") or 0)
@@ -398,7 +398,8 @@ class QoderProvider(BaseProvider):
                 "total": round(total_v, 4),
                 "remaining": round(remain_v, 4),
                 "percent": round(_used_percent(node, used_v, total_v), 4),
-                "reset_ts": _reset_ts(data),
+                # 专属包自带过期时间（比账号级的更早），不传则用账号级 expiresAt
+                "reset_ts": reset_ts if reset_ts is not None else _reset_ts(data),
             }
 
         # 有额度的一侧排前面（个人版 userQuota 常为 0，主力额度在 addOnQuota），
@@ -407,6 +408,19 @@ class QoderProvider(BaseProvider):
         other_node, other_label = (user_q, "订阅额度") if label == "加油包" else (addon_q, "加油包")
         if _total(other_node) > 0:
             items.append(_item(other_node, other_label))
+
+        # 专属资源包（活动赠送，如「Qwen 专属积分」）：与订阅额度/加油包**并存**，
+        # 是账号总额度的一部分。漏掉它会让管理页显示的积分比实际少一截
+        # （实测 personal_professional 账号：userQuota 2000 + 专属包 2000，
+        # 只读前两个节点就只显示 2000，用户以为额度对不上）。
+        for pkg in data.get("dedicatedResourcePackages") or []:
+            if not isinstance(pkg, dict):
+                continue
+            if not pkg.get("available", True):
+                continue  # 已失效/过期的包不占额度，不展示
+            items.append(_item(
+                pkg, _pkg_label(pkg), reset_ts=_reset_ts(pkg),
+            ))
 
         return {
             "level": data.get("userType") or cred.plan or None,
@@ -950,6 +964,29 @@ def _last_user_text(messages: list[Any]) -> str:
             )
         return ""
     return ""
+
+
+def _pkg_label(pkg: dict[str, Any]) -> str:
+    """专属资源包的展示名。
+
+    上游把名字放在 ``displayLabels`` 里（``dimension == "title"`` 那条，带
+    ``valueI18n`` 多语言），比 ``name`` 字段（``act-20260901-170`` 这种活动
+    代号）更适合给人看。按 zh-CN → en-US → value → name 依次回退，都拿不到
+    就用通用名。
+    """
+    for entry in pkg.get("displayLabels") or []:
+        if not isinstance(entry, dict) or entry.get("dimension") != "title":
+            continue
+        i18n = entry.get("valueI18n") or {}
+        if isinstance(i18n, dict):
+            for key in ("zh-CN", "en-US"):
+                text = str(i18n.get(key) or "").strip()
+                if text:
+                    return text
+        text = str(entry.get("value") or "").strip()
+        if text:
+            return text
+    return str(pkg.get("name") or "").strip() or "专属积分"
 
 
 def _reset_ts(data: dict[str, Any]) -> int | None:

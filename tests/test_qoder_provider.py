@@ -1017,6 +1017,100 @@ def test_quota_items_percent_is_used_scale():
     assert all(0.0 <= i["percent"] <= 100.0 for i in out["items"])
 
 
+def test_quota_includes_dedicated_resource_packages():
+    """专属资源包（活动赠送）必须并入 items，否则界面显示的积分比实际少一截。
+
+    实测 personal_professional 账号：``userQuota`` 2000 + ``addOnQuota`` 300 +
+    ``dedicatedResourcePackages`` 里一个 2000 的「Qwen 专属积分」。早期只读前两个
+    节点，管理页就只显示 2000，用户以为额度对不上（实际有 4300）。
+    样本取自真实上游返回（2026-09-29 抓取），仅改了数值。
+    """
+    from buddy_proxy.qoder.provider import QoderProvider
+
+    provider = QoderProvider(Region("cn", "Qoder CN", "https://a", "https://b", "https://c", ".qoder-cn"))
+    data = {
+        "userType": "personal_professional",
+        "usageType": "credits",
+        "isQuotaExceeded": False,
+        "expiresAt": 1793289600000,
+        "userQuota": {"total": 2000.0, "used": 69.0, "remaining": 1931.0, "percentage": 0.04},
+        "addOnQuota": {"total": 300.0, "used": 300.0, "remaining": 0.0, "percentage": 1.0},
+        "dedicatedResourcePackages": [
+            {
+                "id": "pkg-1",
+                "name": "act-20260901-170",
+                "total": 2000.0,
+                "used": 189.0,
+                "remaining": 1811.0,
+                "percentage": 0.08,
+                "expiresAt": 1793212321646,
+                "available": True,
+                "displayLabels": [
+                    {"dimension": "description", "value": "qwen model series description",
+                     "valueI18n": {"zh-CN": "Qwen 专属积分：选择 Qwen 系列模型时优先抵扣。"}},
+                    {"dimension": "title", "value": "qwen model series",
+                     "valueI18n": {"en-US": "Qwen Exclusive Credits", "zh-CN": "Qwen 专属积分"}},
+                ],
+            }
+        ],
+    }
+    out = provider._format_quota(data, Credential(token="t", uid="u"))
+    by_label = {i["label"]: i for i in out["items"]}
+
+    assert "Qwen 专属积分" in by_label, "专属包必须展示，且用 displayLabels 的中文标题"
+    pkg = by_label["Qwen 专属积分"]
+    assert pkg["total"] == 2000.0
+    assert pkg["remaining"] == 1811.0
+    # 专属包自带过期时间，比账号级 expiresAt 更早——必须按包取，不能用账号级的
+    assert pkg["reset_ts"] == 1793212321, "专属包要用自己的 expiresAt"
+    assert by_label["订阅额度"]["reset_ts"] == 1793289600, "订阅额度用账号级 expiresAt"
+    # 三个节点都在，合计才对得上真实总额
+    assert sum(i["total"] for i in out["items"]) == 4300.0
+
+
+def test_quota_skips_unavailable_packages():
+    """已失效（``available: false``）的专属包不展示——它不占额度。"""
+    from buddy_proxy.qoder.provider import QoderProvider
+
+    provider = QoderProvider(Region("cn", "Qoder CN", "https://a", "https://b", "https://c", ".qoder-cn"))
+    data = {
+        "userQuota": {"total": 100.0, "used": 0.0, "remaining": 100.0},
+        "addOnQuota": {},
+        "dedicatedResourcePackages": [
+            {"name": "expired-pkg", "total": 500.0, "used": 0.0,
+             "remaining": 0.0, "available": False},
+        ],
+    }
+    out = provider._format_quota(data, Credential(token="t", uid="u"))
+    labels = [i["label"] for i in out["items"]]
+    assert "expired-pkg" not in labels
+    assert sum(i["total"] for i in out["items"]) == 100.0
+
+
+def test_pkg_label_fallback_chain():
+    """专属包标题：zh-CN → en-US → value → name → 通用名，逐级回退。"""
+    from buddy_proxy.qoder.provider import _pkg_label
+
+    # 完整多语言：取 zh-CN
+    assert _pkg_label({"displayLabels": [
+        {"dimension": "title", "valueI18n": {"zh-CN": "中文标题", "en-US": "EN"}},
+    ]}) == "中文标题"
+    # 只有 en-US
+    assert _pkg_label({"displayLabels": [
+        {"dimension": "title", "valueI18n": {"en-US": "EN Only"}},
+    ]}) == "EN Only"
+    # 没有 i18n，用 value
+    assert _pkg_label({"displayLabels": [
+        {"dimension": "title", "value": "raw title"},
+    ]}) == "raw title"
+    # 没有 title 维度，回退 name
+    assert _pkg_label({"name": "act-2026", "displayLabels": [
+        {"dimension": "description", "value": "desc"},
+    ]}) == "act-2026"
+    # 啥都没有
+    assert _pkg_label({}) == "专属积分"
+
+
 def test_build_upstream_includes_attribution_envelope():
     """归因信封缺了会被上游业务路由拒（no flow nodes found）。"""
     from buddy_proxy.qoder.provider import QoderProvider
