@@ -680,6 +680,23 @@ async def ui_model_schedule(request: Request):
             "open": settings_mod.model_schedule_open(windows) if windows else None}
 
 
+def _canonical_order_target(provider: str, model: str, state: Any) -> str:
+    """把一个候选目标校验并归一成 ``provider/裸模型名``（model_order 存储口径）。
+
+    **必须按「对外发布的 id」校验，而不是 ``_normalize_model_ref`` 的结果**：后者会把
+    名字再过一遍通道的 ``resolve_model``，那是**转发期**的映射（qoder 把对外名
+    ``glm-5.3`` 归一成上游内部 key ``gmodel``），拿它去比对通道目录必然失败——
+    目录里发布的是 ``glm-5.3``。用 ``_normalize_model_ref`` 校验会让「选择器给出的、
+    ``/v1/models`` 也确认存在的」目标被 400 拒掉。
+
+    转发侧会自己对裸名做同样的归一，所以这里存对外名是安全的、也是可读的。
+    """
+    pid = (provider or "").strip() or "codebuddy"
+    bare = _bare_model_id((model or "").strip(), pid) if provider else (model or "").strip()
+    _validate_model(pid, bare, state)
+    return settings_mod.model_key(pid, bare)
+
+
 @app.post("/ui/api/model-order")
 async def ui_model_order(request: Request):
     """设置/清除模型的候选上游顺序（按序尝试、未提交即失败就换下一档）。
@@ -688,10 +705,12 @@ async def ui_model_order(request: Request):
               "targets": [{"provider": "zcode", "model": "glm-5.3"},
                           {"provider": "traepat", "model": "glm-5.3"}]}``
 
-    每个目标经 :func:`_normalize_model_ref` + :func:`_validate_model` 校验真实存在，
-    非法目标 400。``targets`` 为空列表或缺省 → 删除该键（恢复历史路由）并顺带清掉
-    该模型的冷却标记——用户显式改顺序 = 重置健康判断。持久化到 settings.json 的
-    ``model_order`` 并热更新运行态。
+    键与每个目标都经 :func:`_canonical_order_target` 校验并归一成
+    ``provider/对外发布名``（**不是** ``_normalize_model_ref``：那会套用通道转发期的
+    ``resolve_model`` 映射，qoder 上会把 ``glm-5.3`` 变成上游内部 key ``gmodel``，
+    再拿去比对通道目录必然 400——见 helper 的注释）。非法目标 400。``targets`` 为空
+    列表或缺省 → 删除该键（恢复历史路由）并顺带清掉该模型的冷却标记——用户显式改顺序
+    = 重置健康判断。持久化到 settings.json 的 ``model_order`` 并热更新运行态。
     """
     _ensure_local(request)
     state = get_state()
@@ -700,10 +719,11 @@ async def ui_model_order(request: Request):
     model = (body.get("model") or "").strip()
     if not model:
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
-    provider, model = _normalize_model_ref(provider, model, state)
-    _validate_model(provider or "codebuddy", model, state)
 
-    key = settings_mod.model_key(provider, model)
+    # 键与目标同一口径：都按对外发布名校验后再拼 model_key。
+    # 只剥通道前缀（`_canonical_order_target` 内部做），不套 resolve_model——
+    # 否则 qoder 的键会变成 qoder/gmodel，而转发侧用裸名 glm-5.3 去查，条目成死键。
+    key = _canonical_order_target(provider, model, state)
     raw_targets = body.get("targets")
     targets: list[str] = []
     if isinstance(raw_targets, list):
@@ -713,10 +733,9 @@ async def ui_model_order(request: Request):
             t_model = (item.get("model") or "").strip()
             if not t_model:
                 continue
-            t_provider, t_model = _normalize_model_ref(
-                (item.get("provider") or "").strip(), t_model, state)
-            _validate_model(t_provider or "codebuddy", t_model, state)
-            targets.append(settings_mod.model_key(t_provider or "codebuddy", t_model))
+            # 按对外发布名校验（不走过 resolve_model 的上游 key 映射，见 helper 注释）
+            targets.append(_canonical_order_target(
+                (item.get("provider") or "").strip(), t_model, state))
     targets = settings_mod.normalize_order(list(dict.fromkeys(targets)))
 
     current = getattr(state, "model_order", None) or {}
@@ -808,15 +827,18 @@ async def ui_model_order_mark_clear(request: Request):
         cleared = cooldown_mod.clear()
         return {"ok": True, "marks_cleared": cleared}
 
-    provider, model = _normalize_model_ref(provider, model, state)
-    key = settings_mod.model_key(provider, model)
+    # 与保存端点同一口径（对外发布名，不套 resolve_model），否则查不到刚存的键
+    key = _canonical_order_target(provider, model, state)
     order_targets = (getattr(state, "model_order", None) or {}).get(key) or []
     cleared = 0
     for item in order_targets:
         if "/" in item:
             cleared += cooldown_mod.clear(*item.split("/", 1))
-    if not order_targets:
-        cleared = cooldown_mod.clear(provider or "codebuddy", model)
+    if order_targets:
+        return {"ok": True, "model": key, "marks_cleared": cleared}
+    # 没配顺序的模型：按裸名清一次（转发侧 mark_failed 用的就是裸名）
+    pid, _, bare = key.partition("/")
+    cleared = cooldown_mod.clear(pid, bare)
     return {"ok": True, "model": key, "marks_cleared": cleared}
 
 
