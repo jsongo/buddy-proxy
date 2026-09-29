@@ -238,6 +238,9 @@ async def ui_overview(request: Request):
         "default_provider": getattr(state, "default_provider", "codebuddy"),
         "default_model": {"provider": provider, "model": model, "raw": default_model},
         "runtime": getattr(state, "runtime_info", {}),
+        # 设置文件健康度：损坏时前端顶部弹红色条幅。load_settings 会静默吞掉
+        # 语法错误（容错需要），若不显式告知，用户只会看到「设置项全没了」。
+        "settings": settings_mod.settings_health(),
     }
 
 
@@ -260,7 +263,13 @@ async def ui_models(request: Request):
     order = getattr(state, "model_order", None) or {}
     for group in groups:
         for m in group["models"]:
-            st = stat_map.get((group["id"], m["id"])) or {}
+            # 指标也用**裸名**查：埋点记的 model_id 来自转发链路，是剥了通道前缀的
+            # 裸名（qoder 目录里的 id 是 `qoder/deepseek-v4.1-flash`，记的是
+            # `deepseek-v4.1-flash`）。用带前缀的 m["id"] 查会让这一列的计数几乎
+            # 恒为 0——用户反馈「14d 请求数字一直很小」就是这个（实测 qoder 的
+            # deepseek-v4.1-flash 真实 2234 次，表里显示 1）。
+            bare = _bare_model_id(m["id"], group["id"])
+            st = stat_map.get((group["id"], bare)) or {}
             m["stats"] = {
                 "count": st.get("count", 0),
                 "errors": st.get("errors", 0),
@@ -271,7 +280,7 @@ async def ui_models(request: Request):
             # （qoder/qoder/qfmodel 形态），而转发侧一律用剥前缀的裸名
             # （_reject_if_disabled 拿到的是裸名），两处口径必须一致，否则
             # 「停用了却还能用」/「时段不生效」。
-            key = settings_mod.model_key(group["id"], _bare_model_id(m["id"], group["id"]))
+            key = settings_mod.model_key(group["id"], bare)
             m["is_default"] = default_model in (key, m["id"])
             m["disabled"] = key in disabled
             # 候选上游顺序：有配置则附目标列表 + 各目标当前冷却标记，供前端渲染徽标/编辑器
