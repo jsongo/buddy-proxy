@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -629,6 +630,32 @@ def test_model_table_has_no_inline_order_entry(env):
     # 徽标保留：模型表仍要知道这个模型配了几档、几档在冷却
     assert "ordTag" in ui and "⇄ " in ui, "「已配顺序」的徽标不该一起删掉"
     assert "clearOrderMarks" in ui, "「清冷却」按钮是这张表唯一的顺序相关操作，应保留"
+
+
+def test_order_save_wont_post_empty_targets_when_dom_desynced(env):
+    """保存必须区分「用户真的清空了」和「界面状态不可信」，后者绝不发空 targets。
+
+    真机现象：`orderPageSync` 找不到 `.order-rows` 容器时直接 return，折叠卡片
+    上那时残留的 `[]`（刷新后 orderPage 的 not-open 分支会把它当占位写回草稿）
+    就被当成用户输入 POST 出去，服务端配置**静默抹平**——实测
+    qoder/qwen3.8-max 的 `["qoder/qwen3.8-max","trae/qwen3.8-max"]` 就这样没了。
+    """
+    ui = env.client.get("/ui").text
+    start = ui.index("function orderPageIntendedItems(")
+    body = ui[start:ui.index("\n}", start)]
+    # 折叠态：只有草稿存在才认它（那是这轮编辑的结果），没有草稿就是不可信
+    assert "ORDER_DRAFT[key] ? ORDER_DRAFT[key].filter" in body, "折叠态要区分「编辑过」与「没展开过」"
+    assert "return null" in body, "不可信时必须返回 null，不能悄悄当成空列表"
+    sstart = ui.index("async function orderPageSave(")
+    sbody = ui[sstart:ui.index("\n}", sstart)]
+    assert "orderPageIntendedItems(key)" in sbody and "=== null" in sbody, (
+        "保存要拦住不可信状态，而不是发出去"
+    )
+    # 「清空」是显式意图：绕开依赖 DOM 的 orderPageSync，且不可逆、要先问一句
+    cstart = ui.index("async function orderPageClear(")
+    cbody = ui[cstart:ui.index("\n}", cstart)]
+    assert "orderPageSync" not in cbody, "清空应显式表达意图，不靠 DOM 反写"
+    assert "confirm(" in cbody, "清空是不可逆操作，得先问一句"
 
 
 def test_scheduled_model_call_blocked_outside_window(env, monkeypatch):

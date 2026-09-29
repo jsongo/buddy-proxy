@@ -2128,7 +2128,7 @@ function orderPageAdd(key) {
 function orderPageReset(key) {
   delete ORDER_DRAFT[key];
   renderOrderRows(key);
-  renderOrderPage();
+  renderOrderPageHead(key);
 }
 
 // 拖拽：与弹窗版同一套语义，只是作用域换成单张卡片的 .order-rows
@@ -2193,9 +2193,41 @@ function renderOrderPageHead(key) {
   }
 }
 
+// 保存时读的「真源」。卡片**展开**时 DOM 是编辑真源（输入框里的字可能还没回写草稿）；
+// **折叠**时没有输入框，能代表这轮意图的只有 `ORDER_DRAFT[key]`。
+//
+// 这里返回 null 表示「拿不到可信的界面状态」——两种情况：
+//   1. 既没展开、也没有草稿（比如刚刷新完页面，orderPage() 的 not-open 分支把
+//      `ORDER_DRAFT[key]` 重置成了 `[]`）。此时 `[]` 只是占位，不代表用户想清空。
+//   2. 展开着但行数对不上（渲染竞态）。宁可就地提示重来，也不要把空数组当成
+//      用户输入发出去，把服务端配置**静默抹平**——这正是「折叠态保存一下配置就没了」
+//      的成因。返回 [] 才是用户真的把行都删光了，那是合法的「恢复历史路由」。
+function orderPageIntendedItems(key) {
+  const el = document.querySelector(`.order-rows[data-key="${CSS.escape(key)}"]`);
+  if (!el) {
+    // 折叠态：没有 DOM 可读。只有草稿存在（说明这轮编辑过）才认它；
+    // 连草稿都没有就是「没展开过」，不可信。
+    return ORDER_DRAFT[key] ? ORDER_DRAFT[key].filter(it => it.model) : null;
+  }
+  const rows = Array.from(el.querySelectorAll('.order-row'));
+  const items = rows.map(r => ({
+    provider: r.querySelector('.order-provider').value,
+    model: (r.querySelector('.order-model').value || '').trim(),
+  })).filter(it => it.model);
+  // 输入框里已经填了名的行数，和草稿里的行数对不上 → 渲染竞态，不可信
+  const draft = (ORDER_DRAFT[key] || []).filter(it => it.model);
+  if (rows.length && items.length !== draft.length && draft.length) return null;
+  return items;
+}
+
 async function orderPageSave(key) {
   orderPageSync(key);
-  const items = (ORDER_DRAFT[key] || []).filter(it => it.model);
+  const items = orderPageIntendedItems(key);
+  if (items === null) {
+    toast('界面还没同步好，请重新展开这张卡片再保存', true);
+    return;
+  }
+  const asked = items.map(t => `${t.provider}/${t.model}`);
   const [provider, ...rest] = key.split('/');
   const model = rest.join('/');
   try {
@@ -2203,7 +2235,9 @@ async function orderPageSave(key) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ provider, model, targets: items })});
     const saved = r.targets || [];
-    const asked = items.map(t => `${t.provider}/${t.model}`);
+    // 按下标一对一比是够的：服务端回的是**已经归一化过**的列表（去重/别名/截断都在
+    // 写盘时做完），所以 `saved` 与 `asked` 逐项不同就代表真的被规范化过。实测别名
+    // 撞车（草稿里加 workbuddy/glm-5.3）时它会正确地报出来——那不是误报。
     const changed = asked.some((a, i) => saved[i] !== a);
     toast(items.length
       ? `${key} 候选顺序：${saved.join(' → ')}` + (changed ? '（已按通道目录规范化）' : '')
@@ -2215,8 +2249,13 @@ async function orderPageSave(key) {
   } catch (e) { toast('保存失败: ' + e.message, true); }
 }
 
+// 「清空」= 明确表达「恢复历史路由」的意图，绕开 orderPageSync（它靠 DOM 反写草稿，
+// 折叠态没容器时会把那时的 `[]` 原样当成用户输入）。这是不可逆操作，先问一句。
 async function orderPageClear(key) {
+  if (!confirm(`清空 ${key} 的全部候选，恢复按模型 id 自动匹配的历史路由？`)) return;
   ORDER_DRAFT[key] = [];
+  const el = document.querySelector(`.order-rows[data-key="${CSS.escape(key)}"]`);
+  if (el) renderOrderRows(key);   // 展开态让界面立刻反映清空，再走保存
   await orderPageSave(key);
 }
 
