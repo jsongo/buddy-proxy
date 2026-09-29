@@ -162,7 +162,7 @@ Open <http://127.0.0.1:8787/ui> in a browser (or just run `buddy start` / `buddy
 - **Quota** — remaining allowance per provider at a glance: CodeBuddy credit packs (total remaining + per-pack detail), Trae total allowance + entitlement pack expiry, ZCode 5-hour / weekly windows with reset times, MiMo weekly quota + plan validity. Quota responses are cached for 5 minutes. The Trae PAT standard pool has no active query API — its usage is collected **passively** from the `4031` (quota exhausted) error body, and because that error only fires when the pool is already full, a snapshot that is past its `reset_ts` is shown as "reset · pending confirmation" rather than as a stale 100%. The quota page is the only network-touching endpoint in the admin UI, so its queries are bounded four ways: the gateway is probed for reachability first (DNS+TCP precheck — if unreachable the whole round is skipped and per-account caches are served instead), each account request times out after 6 seconds, accounts are queried concurrently on a shared thread pool, and the whole round is capped at 8 seconds (accounts that miss it fall back to their caches while their requests finish in the background) so latency does not grow with the account count. When the gateway is unreachable or some accounts fail, the page shows an explicit "n/m accounts got no fresh data" notice in a warning colour instead of spinning indefinitely; such failures are cached for only 30 seconds (successes keep the 5-minute cache) so a brief network blip self-heals on the next round.
 - **Trae PAT accounts** — per-account cards showing local credential and cooldown state (read purely locally, never touching the network), one-click token refresh that only fills in missing/expiring tokens, and the upstream's per-model load status for the PAT channel (cached for 10 minutes).
 - **Model toggle & schedule** — disable/enable an individual `(provider, model)` pair (a disabled pair fails fast), and restrict one to time windows such as `22:00–08:00` or `12:00–14:00`. Both persist to the settings file.
-- **Request log** — paginated request log read from `logs/metrics.jsonl` plus the 30-day archive, filtered by date range, provider and model.
+- **Request log** — paginated request log read from `logs/metrics.jsonl` plus the 30-day archive, filtered by date range, provider and model. The **Credit** column shows the per-request amount when the upstream reports it (CodeBuddy, Qoder, and any channel that fills `usage`), falling back to a `≈` estimate where a multiplier table exists, and `—` when the upstream gives no per-request figure at all. Shown to 2 decimals like Qoder's own site; the raw value stays in `logs/metrics.jsonl`. Note **cached tokens are nearly free**: a 164k-input request that hit ~99% cache cost 0.12 credits, while a 12k-input request with no cache cost 0.31 — so a large input column does not imply a large bill.
 
 The admin UI also lets you switch the **fallback provider** (used when a request matches no model); it persists in the same settings file.
 
@@ -327,6 +327,29 @@ Upstream in-band errors carry the real cause in a `details` field (`message` alo
 `Error in upstream response`); `_describe_upstream_error` surfaces it, and failures are
 returned in Anthropic's `{"type":"error","error":{...}}` shape so Claude Code recognises them
 as terminal instead of retrying ten times.
+
+### Per-request credit cost
+
+Qoder's upstream returns the **exact** amount charged, so nothing is estimated: every SSE
+stream ends with a usage chunk carrying `credits`, `original_credits` and `billable`
+alongside the token counts. The proxy reads it through and the admin UI's **Credit** column
+shows it directly (2 decimals; the full-precision value stays in `logs/metrics.jsonl`).
+
+Note the field is spelled **`credits`** (plural) here and **`credit`** (singular) on
+CodeBuddy — reading only one silently drops the other channel's data, which is exactly why
+Qoder requests used to log `credit: null`. `core/metrics._credit_field` accepts both, plus
+`original_credits` as a fallback.
+
+**Cached tokens are nearly free**, which is why a request with a huge input column can still
+cost almost nothing. Measured on a live account:
+
+| input | cached | uncached | output | credits |
+|---:|---:|---:|---:|---:|
+| 164,166 | 163,968 | 198 | 525 | 0.124 |
+| 12,030 | 0 | 12,030 | 505 | 0.312 |
+
+So ~136k-input requests billed at 0.07–0.13 are expected, not a bug: roughly 99% of the
+input hit cache.
 
 ### Daily activity credits (check-in)
 

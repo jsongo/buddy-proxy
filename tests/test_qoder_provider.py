@@ -126,6 +126,44 @@ def test_anthropic_stream_survives_malformed_chunk():
     assert "event: content_block_stop" in text
 
 
+def test_anthropic_stream_carries_qoder_credits():
+    """Qoder 的积分字段是 ``credits``（复数），必须原样带到 message_delta。
+
+    之前只认 ``credit``（CodeBuddy 的拼写），Qoder 每次请求都记成 null——
+    积分就在 usage 里躺着没人取。usage 形态照抄实测抓到的原始 SSE：
+
+        "usage": {"billable": true, "credits": 0.008510259999999999,
+                  "original_credits": 0.008510259999999999,
+                  "prompt_tokens": 35, "completion_tokens": 87,
+                  "prompt_tokens_details": {"cached_tokens": 0}}
+    """
+    usage = {
+        "billable": True,
+        "completion_tokens": 87,
+        "completion_tokens_details": {"reasoning_tokens": 85},
+        "credits": 0.008510259999999999,
+        "original_credits": 0.008510259999999999,
+        "prompt_tokens": 35,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "total_tokens": 122,
+    }
+    final = {
+        "id": "chatcmpl-1", "object": "chat.completion.chunk", "model": "qfmodel",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": usage,
+    }
+    text = _anth_text([_chunk({"content": "hi"}), f"data: {json.dumps(final)}\n\n".encode()])
+
+    delta = [json.loads(line[6:]) for line in text.splitlines()
+             if line.startswith("data: {") and '"message_delta"' in line]
+    assert delta, "没有 message_delta 事件"
+    got = delta[-1]["usage"]
+    assert got["credit"] == pytest.approx(0.008510259999999999), \
+        "Qoder 的 credits（复数）丢了，日志里又会是 null"
+    assert got["output_tokens"] == 87
+    assert got["input_tokens"] == 35
+
+
 # --- 上游带内错误：必须带出真实原因 ----------------------------------------
 
 

@@ -537,6 +537,38 @@ def test_normalize_usage_shapes():
     assert r["cached_tokens"] == 7 and r["credit"] == 0.3
 
 
+def test_normalize_usage_accepts_plural_credits():
+    """上游积分字段拼写不统一：CodeBuddy 给 ``credit``，Qoder 给 ``credits``。
+
+    只认单数会把 Qoder 的积分整条丢掉——实测它的 usage 长这样（字段就在眼皮
+    底下，``original_credits``/``billable`` 一起摆着，但之前一直记成 null）：
+
+        {"billable": true, "credits": 0.008510259999999999,
+         "original_credits": 0.008510259999999999,
+         "completion_tokens": 87, "prompt_tokens": 35,
+         "prompt_tokens_details": {"cached_tokens": 0}}
+    """
+    q = normalize_usage({
+        "billable": True,
+        "prompt_tokens": 35,
+        "completion_tokens": 87,
+        "credits": 0.008510259999999999,
+        "original_credits": 0.008510259999999999,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    })
+    assert q["credit"] == 0.008510259999999999, "Qoder 的 credits（复数）必须被认出来"
+
+    # 只有 original_credits 时也兜住（上游折扣场景下 credits 可能是 0 或缺省）
+    assert normalize_usage({"original_credits": 0.5})["credit"] == 0.5
+
+    # 两个都在时以 credit 为准（CodeBuddy 是实际扣费口径）
+    assert normalize_usage({"credit": 0.2, "credits": 0.9})["credit"] == 0.2
+
+    # 布尔不是数字：True 不能被当成 1 积分
+    assert normalize_usage({"credit": True})["credit"] is None
+    assert normalize_usage({})["credit"] is None
+
+
 def test_responses_converter_carries_credit_and_cache():
     """Responses 流式转换完成事件要带真实 cached_tokens 与 credit。"""
     from buddy_proxy.protocols.responses_adapter import ResponsesStreamConverter

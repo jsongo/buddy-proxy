@@ -14,6 +14,8 @@ import os
 import time
 from typing import Any
 
+from buddy_proxy.core.metrics import _credit_field
+
 
 def _rand_id(prefix: str = "msg_") -> str:
     """生成随机ID"""
@@ -640,8 +642,11 @@ class AnthropicStreamConverter:
             usage_delta["input_tokens"] = max(0, self.usage.get("prompt_tokens", 0) - cached)
             if cached:
                 usage_delta["cache_read_input_tokens"] = cached
-            if self.usage.get("credit") is not None:
-                usage_delta["credit"] = self.usage["credit"]
+            # 用共享的取数器：CodeBuddy 给 credit、Qoder 给 credits，只认一个
+            # 就会把另一家的积分整条丢掉（详见 core/metrics._credit_field）
+            credit = _credit_field(self.usage)
+            if credit is not None:
+                usage_delta["credit"] = credit
         
         # 发出message_delta
         events.append(("message_delta", {
@@ -725,8 +730,9 @@ def chat_completion_to_anthropic_message(
     }
     if cached:
         usage_out["cache_read_input_tokens"] = cached
-    if usage.get("credit") is not None:
-        usage_out["credit"] = usage["credit"]
+    credit = _credit_field(usage)
+    if credit is not None:
+        usage_out["credit"] = credit
     return {
         "id": _rand_id("msg_"),
         "type": "message",

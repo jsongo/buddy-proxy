@@ -325,6 +325,14 @@ function fmtNum(n) {
   if (!isFinite(x)) return String(n);
   return x >= 100 ? Math.round(x).toLocaleString() : String(Math.round(x * 10) / 10);
 }
+// 积分只留 2 位小数展示：上游给的是完整浮点（0.008510259999999999 这种），
+// 直接铺在表格里又长又晃眼。Qoder 官网自己也是 2 位（0.12 / 0.07），对齐它。
+// 只截展示，JSONL 里存的仍是原值——精度丢了就没法再算总账。
+function fmtCredit(v) {
+  if (v == null) return null;
+  const x = Number(v);
+  return isFinite(x) ? x.toFixed(2) : String(v);
+}
 function fmtTime(ts) {
   if (!ts) return '—';
   const d = new Date(ts * 1000);
@@ -722,7 +730,7 @@ function renderBenefits() {
   const dowOf = ds => DOW_FULL[(new Date(ds + 'T12:00:00').getDay() + 6) % 7];
   days.forEach(d => {
     const lines = (d.providers || []).map(pid => {
-      const credit = (d.credits || {})[pid];
+      const credit = fmtCredit((d.credits || {})[pid]);
       return `<div class="t-p"><i style="background:${pcolor(pid)}"></i>${esc(pid)}${credit != null ? ` <b style="color:var(--ok)">+${esc(credit)}</b>` : ''}</div>`;
     });
     window._calTips[d.date] =
@@ -735,7 +743,7 @@ function renderBenefits() {
     const c = p.checkin;
     const bits = [];
     if (c.streak_days >= 2) bits.push(`连续 ${c.streak_days} 天`);
-    if (c.daily_credit > 0) bits.push(`每日 +${c.daily_credit}`);
+    if (c.daily_credit > 0) bits.push(`每日 +${fmtCredit(c.daily_credit)}`);
     const extra = bits.length ? ` · ${bits.join(' · ')}` : '';
     const st = c.error ? `<span class="tag bad" title="${esc(c.error)}">状态未知</span>`
       : c.inactive ? '<span class="tag">今日无签到活动</span>'
@@ -1445,7 +1453,8 @@ async function renderRecent() {
       tok = `↑${fmtNum(r.prompt_tokens)} ↓${fmtNum(r.completion_tokens)}`;
       tokTitle = `输入 ${r.prompt_tokens}（↑ 含缓存命中）· 输出 ${r.completion_tokens}${cacheTxt}`;
     }
-    const creditTxt = r.credit != null ? r.credit
+    // 实扣积分留 2 位展示；credits_map 那档本来就是 "×1.62" 这种字符串，原样带过
+    const creditTxt = r.credit != null ? fmtCredit(r.credit)
                     : cmap[r.provider + '/' + r.model] || null;
     // 多账号通道（traepat）：括号内展示账号缩略，hover 看完整 id；≤10 字符直接全显
     const acct = r.account
@@ -1460,8 +1469,8 @@ async function renderRecent() {
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
       <td class="num mono">${r.credit != null ? (r.credit_estimated
-          ? `<b style="color:var(--ok)" title="按 token 粗估：(输入+输出)/1M × 100 × 模型倍率；与真实扣费可能有偏差（会话首请求实测偏高约 2~3 倍）">≈${r.credit}</b>`
-          : `<b style="color:var(--ok)" title="上游实扣积分">${r.credit}</b>`)
+          ? `<b style="color:var(--ok)" title="按 token 粗估：(输入+输出)/1M × 100 × 模型倍率；与真实扣费可能有偏差（会话首请求实测偏高约 2~3 倍）">≈${creditTxt}</b>`
+          : `<b style="color:var(--ok)" title="上游实扣积分（原始值 ${esc(r.credit)}）">${creditTxt}</b>`)
         : (creditTxt ? `<span class="tag" title="仅倍率参考（×基准单价），非本次实际消耗；${esc(r.provider)} 不提供单次消耗">${esc(creditTxt)}</span>` : '<span class="muted" title="该上游未提供单次积分消耗">—</span>')}</td>
       <td>${bad ? `<span class="tag bad" title="${esc(r.error || '')}">${r.status || 'ERR'}</span>` : '<span class="tag ok">OK</span>'}</td>
     </tr>`;

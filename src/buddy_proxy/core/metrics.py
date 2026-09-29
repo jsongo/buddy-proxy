@@ -41,6 +41,21 @@ def _date_str(ts: float) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
+def _credit_field(u: dict[str, Any]) -> Any:
+    """取单次请求的积分消耗，兼容两种拼写。
+
+    **CodeBuddy 给 ``credit``（单数），Qoder 给 ``credits``（复数）**——只读一个
+    就会把另一家的数据整条丢掉（Qoder 的积分此前一直记成 null 就是这个原因，
+    连 ``original_credits``/``billable`` 一起摆在 usage 里没人取）。
+    两个都在时以 ``credit`` 为准（CodeBuddy 的实际扣费口径）。
+    """
+    for key in ("credit", "credits", "original_credits"):
+        value = u.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+    return None
+
+
 def normalize_usage(u: dict[str, Any]) -> dict[str, Any]:
     """把 OpenAI / CodeBuddy / Anthropic 三种 usage 形态归一化。
 
@@ -48,11 +63,12 @@ def normalize_usage(u: dict[str, Any]) -> dict[str, Any]:
     - 缓存：OpenAI 在 prompt_tokens_details.cached_tokens（prompt 含缓存），
       Anthropic 是 cache_read_input_tokens（input 不含缓存，单列）——
       统一输出 OpenAI 口径：prompt_tokens = input + cache_read + cache_creation
-    - credit：CodeBuddy usage 里的单次积分消耗（其他上游没有 → None）
+    - credit：单次积分消耗。上游命名不统一（见 :func:`_credit_field`），
+      都没有 → None（由上层决定是否估算）
     """
     details = (u.get("prompt_tokens_details")
                or u.get("input_tokens_details") or {})
-    credit = u.get("credit")
+    credit = _credit_field(u)
     prompt = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
     cached = int(u.get("cached_tokens") or details.get("cached_tokens")
                  or u.get("cache_read_input_tokens") or 0)
