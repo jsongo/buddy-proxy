@@ -34,10 +34,6 @@ PROVIDER_ALIASES: dict[str, str] = {
     "qder": "qoder",
     "qodercn": "qoder",
     "qoder-cn": "qoder",
-    # MiMo 也常被打成 memo（同一个音，`login memo` 照着日常发音敲很自然），
-    # 打错了要报「未知 provider」，不如直接认了这个别名。
-    "memo": "mimo",
-    "mimocode": "mimo",
 }
 
 KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder")

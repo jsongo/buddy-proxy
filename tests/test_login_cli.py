@@ -6,8 +6,8 @@
    官网签发的 coding-plan API key，签发入口得人工点），所以这个子命令的全部
    价值就是「把怎么拿到 key 说清楚」。早期版本只打印一个文件路径——用户根本
    不知道该去哪儿取 key，等于没说。
-2. **``memo`` 是 mimo 的别名**。``login memo`` 是照着日常发音敲出来的，
-   打错了才报「未知 provider」很别扭。
+2. **指引里的写文件命令是覆盖而不是追加**。读取只认第一个非空行，追加会让
+   旧 key 继续生效。
 
 运行：
     .venv/bin/python -m pytest tests/test_login_cli.py -v
@@ -125,19 +125,32 @@ def test_every_known_channel_has_enable_hint():
 @pytest.mark.parametrize(
     "typed,expected",
     [
-        ("memo", "mimo"),
-        ("mimocode", "mimo"),
         ("MIMO", "mimo"),
-        ("MEMO", "mimo"),  # 大小写归一后照样命中 memo 别名
+        ("mimo", "mimo"),
         ("workbuddy", "codebuddy"),
         ("cb", "codebuddy"),
         ("quoder", "qoder"),
     ],
 )
 def test_aliases_resolve(typed, expected):
-    """别名归一：大小写不敏感，敲错音近的名字也有救。"""
+    """别名归一：大小写不敏感，历史别称照样命中。"""
     got = auth_login.PROVIDER_ALIASES.get(typed.strip().lower(), typed.strip().lower())
     assert got == expected
+
+
+def test_alias_table_is_pinned():
+    """钉住别名表的完整集合：新增别名是一个需要想清楚的决定，不该顺手加。
+
+    （``workbuddy`` 是 codebuddy 的旧产品名，``quoder`` 等是既有拼法；
+    表里没有的写法一律报「未知 provider」——这是用户发现敲错了的信号，
+    收进表里反而把它盖掉了。）
+    """
+    assert set(auth_login.PROVIDER_ALIASES) == {
+        "workbuddy", "cb",
+        "quoder", "qodor", "qder", "qodercn", "qoder-cn",
+    }
+    for alias, target in auth_login.PROVIDER_ALIASES.items():
+        assert target in auth_login.KNOWN_PROVIDERS, f"{alias} 指向了未知通道"
 
 
 def test_every_alias_target_is_dispatchable():
