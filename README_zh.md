@@ -523,10 +523,14 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 
 | 接口 | 说明 |
 | --- | --- |
-| 凭据 | `ZCODE_API_KEY` → 项目 secrets → `~/.zcode/v2/config.json`（ZCode CLI 同款配置） |
+| 凭据 | `ZCODE_API_KEY` → `~/.buddy-proxy/zcode_api_key`（目录可用 `BUDDY_PROXY_STATE_DIR` 整体挪走）→ `~/.zcode/v2/config.json`（ZCode CLI 同款配置） |
 | 端点 | 智谱 GLM Coding Plan 的 Anthropic 兼容端点直通；`ZCODE_OPENAI_BASE` 可覆盖 |
 | 模型 | 以 `zcode/<id>` 寻址（如 `zcode/glm-5.3`），经 `/v1/models` 一并列出 |
-| 登录 | `buddy login zcode`（凭据落在 `~/.zcode/v2/config.json`） |
+| 登录 | `buddy login zcode`：**没有可自动化的浏览器登录**（凭据是智谱控制台签发的 coding-plan API key，得人工点），所以这条命令负责把「去哪领 key、怎么配」打印清楚 |
+
+领 key：<https://bigmodel.cn/usercenter/proj-mgmt/apikeys>（还没套餐先开通 <https://bigmodel.cn/glm-coding>），
+配到本机任选一种：`export ZCODE_API_KEY=<key>` / 写进 `~/.buddy-proxy/zcode_api_key` / 在本机 ZCode CLI 登录
+coding-plan，然后 `buddy restart`。
 
 ### 5. MiMo Provider（`mimo/` 子包）
 

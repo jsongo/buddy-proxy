@@ -344,3 +344,71 @@ def test_saved_file_wins_over_desktop_cookie_db(state_dir, tmp_path, monkeypatch
     assert acct2 is not None
     assert acct2.pass_token == "from-login", "文件应优先于桌面 cookie 库"
     assert acct2.user_id == "login-user"
+
+
+# ---------------------------------------------------------------------------
+# serviceToken 缓存必须绑定账号
+# ---------------------------------------------------------------------------
+
+
+def test_token_cache_rejects_other_account(state_dir):
+    """换号后旧 serviceToken 不得命中——它只对签发它的那个账号有效。
+
+    缓存文件是全局一份，早期实现只校验 sid。于是 ``buddy login mimo`` 换个
+    账号之后，网关仍会把上一个账号的票发出去（额度记到别人头上，或者直接
+    401——而那时已经白跑了一轮才发现）。这里钉住 user_id 校验。
+    """
+    from buddy_proxy.mimo import sso
+
+    st = sso.ServiceToken(sid=sso.SSO_SID, token="tok-A", obtained_at=sso.time.time())
+    sso.save_cached_token(st, user_id="user-A")
+
+    # 同一账号：命中
+    got = sso.load_cached_token(sso.SSO_SID, user_id="user-A")
+    assert got is not None and got.token == "tok-A"
+
+    # 换了账号：必须判失效
+    assert sso.load_cached_token(sso.SSO_SID, user_id="user-B") is None
+
+    # 不传 user_id（旧调用形态）：维持原行为，仍可命中
+    assert sso.load_cached_token(sso.SSO_SID) is not None
+
+
+def test_token_cache_without_user_id_field_is_stale(state_dir):
+    """老缓存文件没有 user_id 字段 → 判失效，宁可多换一次票。
+
+    字段缺失意味着无法确认它属于谁。放行就等于把「未知归属的票」当成当前
+    账号的票用——正是要修的 bug，所以缺字段时一律不认。
+    """
+    from buddy_proxy.mimo import sso
+
+    path = state_dir / "mimo_sso_token.json"
+    path.write_text(json.dumps({
+        "sid": sso.SSO_SID, "token": "tok-legacy",
+        "extra_cookies": {}, "obtained_at": sso.time.time(),
+    }))
+    assert sso.load_cached_token(sso.SSO_SID, user_id="user-A") is None
+
+
+def test_login_invalidates_stale_token_cache(state_dir, monkeypatch):
+    """登录完成后清掉旧的 serviceToken 缓存（换号场景的兜底）。"""
+    from buddy_proxy.mimo import sso
+
+    sso.save_cached_token(
+        sso.ServiceToken(sid=sso.SSO_SID, token="tok-old", obtained_at=sso.time.time()),
+        user_id="user-old",
+    )
+    monkeypatch.setattr(
+        login, "start_login",
+        lambda **kw: login.LoginSession(
+            login_url="http://x/login", poll_url="http://x/poll", expires_in=300),
+    )
+    monkeypatch.setattr(
+        login, "poll_login",
+        lambda session, on_tick=None: AccountCookies(
+            pass_token="p", user_id="user-new", c_user_id="c"),
+    )
+    login.login_interactive(open_browser=False)
+
+    assert sso.load_cached_token(sso.SSO_SID, user_id="user-old") is None, \
+        "换号后旧票必须作废"

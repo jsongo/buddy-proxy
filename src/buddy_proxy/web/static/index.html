@@ -117,7 +117,10 @@
                     z-index: 11; cursor: pointer; background: #12161d; color: #d3dae3;
                     border-bottom: 1px solid #2d3846; }
   .group thead th:hover { color: var(--accent); }
-  .sec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 22px; }
+  /* 下方留白与 .group 的 margin-bottom 同值（14px）：否则「全部展开/折叠」
+     这些右对齐按钮会紧贴下面第一张卡片，看着像粘在一起。 */
+  .sec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+              margin: 22px 0 14px; }
   .sec-head:first-child { margin-top: 0; }
   .sec-head h2 { margin: 0; }
   .sec-head .sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }

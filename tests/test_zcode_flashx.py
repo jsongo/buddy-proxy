@@ -107,3 +107,53 @@ def test_normalize_model_format_keeps_flashx_fields():
     assert entry["id"] == "glm-5.3-flashx"
     assert entry["tool_call"] is True
     assert entry["reasoning"] is True
+
+
+# ---------------------------------------------------------------------------
+# 凭据文件位置：只认本项目自己的状态目录
+# ---------------------------------------------------------------------------
+
+
+def test_secret_file_lives_in_project_state_dir(tmp_path, monkeypatch):
+    """zcode 的 key 文件放在本项目状态目录下，可被 BUDDY_PROXY_STATE_DIR 挪走。
+
+    以前指向别人的 secrets 目录（``~/.ethan/.secrets``），那是别的工具的私有
+    目录、不归本项目管：混读会让「这个文件到底谁负责写」说不清，也容易和那边
+    的同名文件互相踩。现在与其它状态文件同源（``core.paths.state_file``），
+    环境变量一改就整体搬家。
+    """
+    from buddy_proxy.providers import zcode
+
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(tmp_path))
+    path = zcode.secret_file_path()
+    assert path.parent == tmp_path, f"应落在状态目录下，实际 {path}"
+    assert path.name == "zcode_api_key"
+    assert ".ethan" not in str(path), "不得再引用外部 agent 的 secrets 目录"
+
+
+def test_secret_file_is_read_from_state_dir(tmp_path, monkeypatch):
+    """写进状态目录的 key 要能被真正读出来（裸 key 与 name=value 两种形态）。"""
+    from buddy_proxy.providers import zcode
+
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("ZCODE_API_KEY", raising=False)
+
+    zcode.secret_file_path().write_text("abc123.def456\n", encoding="utf-8")
+    assert zcode._load_secret_file() == "abc123.def456"
+
+    zcode.secret_file_path().write_text("ZCODE_API_KEY=xyz.789\n", encoding="utf-8")
+    assert zcode._load_secret_file() == "xyz.789"
+
+
+def test_no_ethan_secrets_reference_in_source():
+    """源码里不得再出现那个外部 secrets 目录的字面量（防止回潮）。"""
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parent.parent / "src" / "buddy_proxy"
+    hits = [
+        f"{p.relative_to(src)}:{i}"
+        for p in src.rglob("*.py")
+        for i, line in enumerate(p.read_text("utf-8").splitlines(), 1)
+        if ".ethan/.secrets" in line
+    ]
+    assert hits == [], f"仍在引用外部 secrets 目录: {hits}"

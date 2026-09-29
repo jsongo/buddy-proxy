@@ -110,6 +110,22 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+#: 本项目**认得的**通道 id（含只在特定配置下才注册的 traepat）。
+#:
+#: 与 ``state.providers`` 的区别：那个是「本次启动实际注册了哪些」，会随
+#: ``--zcode`` / ``--mimo`` 之类的开关变化；这里是「这些名字属于本项目的通道
+#: 命名空间」。路由要用它区分两种 ``xxx/model``：
+#:
+#: - ``xxx`` 是通道名但这次没启用 → 该报「通道未启用」，而不是把整个
+#:   ``xxx/model`` 漏给兜底通道（上游只会回一句「模型不存在」）；
+#: - ``xxx`` 压根不是通道名（如 ``openrouter/...``）→ 才轮到兜底逻辑。
+#:
+#: ``workbuddy`` 是 ``codebuddy`` 的旧称，不单列：归一在 ``model_key`` 里做。
+KNOWN_PROVIDER_IDS = frozenset(
+    {"codebuddy", "zcode", "mimo", "qoder", "doubao", "trae", "traepat"}
+)
+
+
 def normalize_default_model(raw: str) -> str:
     """归一化默认模型字符串：去空白、provider 别名归一。"""
     value = (raw or "").strip()
