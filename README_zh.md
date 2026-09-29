@@ -597,7 +597,7 @@ uv run python -m buddy_proxy --desensitize --mimo
 | 聊天面 | `/algo/api/v2/service/pro/sse/agent_chat_generation`（官方 IDE 同一个端点，也是**唯一**提供 Qwen3.8 的入口） |
 | 签名 | **COSY 签名纯 Python 复刻**（无额外依赖、不打包官方 wasm）：`Authorization: Bearer COSY.<payload>.<sig>` + 必需的 `Cosy-User` 头，body 走 Qoder 私有字母表编码。国际版与国内版**都要签名**，区域只影响**取 token 的方式** |
 | 凭据 | `buddy login qoder`（设备码流程 PKCE S256，可选区域）；也支持 `QODER_TOKEN` 等环境变量 |
-| 额度 | 管理页额度面板：订阅额度 + 加油包（含套餐等级、到期时间） |
+| 额度 | 管理页额度面板：订阅额度 + 加油包 + 专属资源包（活动赠送，如「Qwen 专属积分」；各自带到期时间）（含套餐等级） |
 | **Anthropic（`/v1/messages`）** | 上游无 Anthropic 原生端点，故**响应反向转换**为 Anthropic 事件（`message_start`/`content_block_delta`/`message_stop`，推理内容转 `thinking` 块），供 Claude Code 使用 |
 
 **三条上游怪癖**在 `_build_upstream` 里逐条消息归一化（不这么干整个请求会被拒；三条都是
