@@ -88,6 +88,7 @@ def _make_state(providers, tmp_path):
         default_model=None,
         disabled_models=set(),
         model_schedules={},
+        model_order={},
         metrics=MetricsCollector(tmp_path / "metrics.jsonl"),
         write_log=mock.MagicMock(),
         ensure_auth=mock.MagicMock(),
@@ -319,6 +320,181 @@ def test_model_schedule_rejects_unknown(env):
                         json={"provider": "fakeprov", "model": "nope",
                               "windows": [["22:00", "08:00"]]})
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 候选上游顺序（model_order）
+# ---------------------------------------------------------------------------
+def test_model_order_set_persist_and_expose(env):
+    """设置顺序：落键、写盘（直接存字符串数组）、并在 /ui/api/models 透出。"""
+    r = env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": [{"provider": "fakeprov", "model": "fake-model"},
+                                          {"provider": "fakestream",
+                                           "model": "fake-stream-model"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["targets"] == ["fakeprov/fake-model", "fakestream/fake-stream-model"]
+    assert env.state.model_order["fakeprov/fake-model"] == [
+        "fakeprov/fake-model", "fakestream/fake-stream-model"]
+    # 存储形状与手写配置一致：直接是数组，不包一层
+    saved = settings_mod.load_settings()["model_order"]
+    assert saved["fakeprov/fake-model"] == [
+        "fakeprov/fake-model", "fakestream/fake-stream-model"]
+
+    fp = next(g for g in env.client.get("/ui/api/models").json()["groups"]
+              if g["id"] == "fakeprov")
+    got = next(m for m in fp["models"] if m["id"] == "fake-model")["order"]
+    assert got["targets"] == ["fakeprov/fake-model", "fakestream/fake-stream-model"]
+    assert got["marks"] == []
+
+
+def test_model_order_exposes_cooldown_marks(env):
+    """被冷却的目标要在 /ui/api/models 的 order.marks 里可见（供前端显示 ⏸）。"""
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    try:
+        env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": [{"provider": "fakeprov", "model": "fake-model"},
+                                          {"provider": "fakestream",
+                                           "model": "fake-stream-model"}]})
+        cooldown_mod.mark_failed("fakestream", "fake-stream-model", status=502)
+        fp = next(g for g in env.client.get("/ui/api/models").json()["groups"]
+                  if g["id"] == "fakeprov")
+        got = next(m for m in fp["models"] if m["id"] == "fake-model")["order"]
+        assert [k["target"] for k in got["marks"]] == ["fakestream/fake-stream-model"]
+        assert got["marks"][0]["cooldown_s"] > 0
+    finally:
+        cooldown_mod._reset_for_tests()
+
+
+def test_model_order_clear_removes_key_and_marks(env):
+    """targets 为空 → 删键 + 清该模型的冷却标记。"""
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    try:
+        env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": [{"provider": "fakestream",
+                                           "model": "fake-stream-model"}]})
+        cooldown_mod.mark_failed("fakestream", "fake-stream-model")
+        r = env.client.post("/ui/api/model-order",
+                            json={"provider": "fakeprov", "model": "fake-model",
+                                  "targets": []})
+        assert r.status_code == 200
+        assert r.json()["marks_cleared"] == 1
+        assert "fakeprov/fake-model" not in env.state.model_order
+        assert "fakeprov/fake-model" not in (settings_mod.load_settings()
+                                            .get("model_order") or {})
+        assert cooldown_mod.is_marked("fakestream", "fake-stream-model") is False
+    finally:
+        cooldown_mod._reset_for_tests()
+
+
+def test_model_order_rejects_unknown_target(env):
+    """目标必须真实存在于该通道的模型列表，否则 400（避免写入死键）。"""
+    r = env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": [{"provider": "fakeprov", "model": "nope"}]})
+    assert r.status_code == 400
+    assert "不在 fakeprov 通道的模型列表中" in r.text
+
+
+def test_model_order_rejects_unknown_provider_target(env):
+    r = env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": [{"provider": "ghost", "model": "m"}]})
+    assert r.status_code == 400
+
+
+def test_model_order_mark_clear_endpoint(env):
+    """mark-clear：清该模型候选列表里全部目标的冷却标记，不动顺序。"""
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    try:
+        env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": [{"provider": "fakeprov", "model": "fake-model"},
+                                          {"provider": "fakestream",
+                                           "model": "fake-stream-model"}]})
+        cooldown_mod.mark_failed("fakeprov", "fake-model")
+        cooldown_mod.mark_failed("fakestream", "fake-stream-model")
+        r = env.client.post("/ui/api/model-order/mark-clear",
+                            json={"provider": "fakeprov", "model": "fake-model"})
+        assert r.status_code == 200
+        assert r.json()["marks_cleared"] == 2
+        assert cooldown_mod.snapshot() == {}
+        # 顺序不受影响
+        assert env.state.model_order["fakeprov/fake-model"]
+    finally:
+        cooldown_mod._reset_for_tests()
+
+
+def test_model_order_options_lists_selectable_targets(env):
+    """选择器数据源：每个通道给出可选的模型名，且是「可写进 model_order 的规范名」。
+
+    这是「添加目标时能选」的后端支撑——前端下拉/以数据列表渲染它。
+    """
+    body = env.client.get("/ui/api/model-order/options").json()
+    by_provider = {g["provider"]: g["models"] for g in body["groups"]}
+    assert set(by_provider) == {"codebuddy", "fakeprov", "fakestream"}
+
+    fake = by_provider["fakeprov"][0]
+    assert fake["id"] == "fake-model"
+    # target 必须是 settings.model_key 口径（provider/model），否则前端拼错写进去就是死条目
+    assert fake["target"] == settings_mod.model_key("fakeprov", "fake-model")
+    assert "fake-stream-model" in [m["id"] for m in by_provider["fakestream"]]
+
+    # 名称与 id 不同才带 label（给人看的名）；fake-model 的 description 是 "Fake Model"
+    assert fake.get("label") == "Fake Model"
+
+
+def test_model_order_options_targets_are_accepted_by_setter(env):
+    """闭环：选择器给出的 target 拆开后喂给 POST /ui/api/model-order 必须被接受。
+
+    这条防止两个接口漂移——如果 options 返回的名字不是保存接口认的名字，
+    用户「选了却保存失败」（或更糟：静默写进一个永不生效的键）。
+    """
+    groups = env.client.get("/ui/api/model-order/options").json()["groups"]
+    targets = []
+    for g in groups:
+        for m in g["models"]:
+            target = m["target"]
+            assert target.startswith(g["provider"] + "/")
+            targets.append({"provider": target.split("/", 1)[0],
+                            "model": target.split("/", 1)[1]})
+    assert targets, "选择器不该是空的"
+    # 选择器会列出全部模型（可能上百个），而 model_order 单键上限 _MAX_ORDER_TARGETS。
+    # 这里只取前几个验证「选出来的名字保存接口认」——超量截断是 normalize_order 的事，
+    # 已由 tests/test_model_order.py 覆盖。
+    targets = targets[: settings_mod._MAX_ORDER_TARGETS]
+    r = env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": targets})
+    assert r.status_code == 200, r.text
+    # 后端返回规范化后的目标，供前端提示「已规范化」
+    assert r.json()["targets"] == [t["provider"] + "/" + t["model"] for t in targets]
+
+
+def test_order_modal_provider_list_not_from_MODELS(env):
+    """顺序弹窗的通道下拉必须来自选项接口，不能依赖 MODELS。
+
+    MODELS 只在「模型」标签页加载过才有值；若弹窗从它取通道列表，从其它入口
+    打开时下拉框会是空的（下拉即不可用），等于「添加时不能选」。这条把它钉死。
+    """
+    ui = env.client.get("/ui").text
+    start = ui.index("async function openOrderModal(")
+    end = ui.index("async function saveOrder(", start)
+    body = ui[start:end]
+    assert "Object.keys(ORDER_OPTIONS)" in body, "通道列表应优先来自选项接口"
+    # 兜底可以读 MODELS，但必须在 ORDER_OPTIONS 为空之后，且带 null 守卫
+    assert "MODELS && MODELS.groups" in body
+    # 选项接口本身要有数据，否则下拉依旧是空的
+    opts = env.client.get("/ui/api/model-order/options").json()["groups"]
+    assert {g["provider"] for g in opts} == {"codebuddy", "fakeprov", "fakestream"}
 
 
 def test_scheduled_model_call_blocked_outside_window(env, monkeypatch):

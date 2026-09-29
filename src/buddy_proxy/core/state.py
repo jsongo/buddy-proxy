@@ -74,6 +74,7 @@ class ProxyState:
         default_model: Optional[str] = None,
         disabled_models: Optional[set[str]] = None,
         model_schedules: Optional[dict[str, list]] = None,
+        model_order: Optional[dict[str, list[str]]] = None,
         metrics: Optional[Any] = None,
         benefits: Optional[Any] = None,
         interactive_login: bool = True,
@@ -99,6 +100,12 @@ class ProxyState:
         # 命中的模型仅在窗口内放行、窗口外 403（与 disabled_models 并存，disabled
         # 优先级更高）。settings.py 持久化，/ui 可改。空 dict = 所有模型不受时段限制。
         self.model_schedules: dict[str, list] = dict(model_schedules or {})
+        # 每模型的候选上游顺序：键为 settings.model_key 口径的 "provider/model"，值为
+        # 有序的 "provider/model" 目标列表。命中时按序尝试、**仅当未向客户端提交任何
+        # 字节就失败**才换下一个（见 codebuddy_provider/forward.py 的重试规则）；失败
+        # 的目标由 core/cooldown.py 打短期标记，后续请求自动跳过。空 dict = 不启用
+        # 排序，路由行为与历史完全一致。settings.py 持久化，/ui 可改。
+        self.model_order: dict[str, list[str]] = dict(model_order or {})
         # 请求指标收集器（metrics.MetricsCollector，供 /ui 图表聚合）
         self.metrics = metrics
         # 打卡/额度管理器（benefits.BenefitsManager，供 /ui 打卡日历与额度展示）

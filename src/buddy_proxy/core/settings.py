@@ -26,6 +26,8 @@ _SCHEDULE_TZ = ZoneInfo("Asia/Shanghai")
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 # 单模型最多允许的时间窗数量；防止 UI/配置写入超长列表。
 _MAX_WINDOWS = 8
+# 单模型最多允许的候选上游数量（model_order）；防止 UI/配置写入超长列表。
+_MAX_ORDER_TARGETS = 8
 
 
 def settings_path() -> pathlib.Path:
@@ -89,6 +91,56 @@ def model_key(provider: str, model: str) -> str:
     provider = (provider or "codebuddy").strip()
     provider = {"workbuddy": "codebuddy"}.get(provider, provider)
     return f"{provider}/{(model or '').strip()}"
+
+
+def normalize_order(raw: Any) -> list[str]:
+    """校验并归一化候选上游列表 ``["zcode/glm-5.3", "traepat/glm-5.3"]``。
+
+    - 每项形如 ``provider/model``（两侧均非空）或裸 ``model``；provider 别名归一
+      （``workbuddy`` → ``codebuddy``）。
+    - 去重**保序**（同一目标重复出现只留首次）。
+    - 最多保留 ``_MAX_ORDER_TARGETS`` 个，超量截断。
+    - 输入不是 list、项非法一律跳过，**绝不抛异常**（配置层容错，与
+      :func:`normalize_windows` 同款）。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        value = normalize_default_model(item)
+        if not value:
+            continue
+        # `provider/` 两侧任一为空（如 "zcode/"、"/m1"）都视为非法
+        if "/" in value:
+            head, tail = value.split("/", 1)
+            if not head.strip() or not tail.strip():
+                continue
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+        if len(out) >= _MAX_ORDER_TARGETS:
+            break
+    return out
+
+
+def normalize_order_key(raw: str) -> str:
+    """把 ``model_order`` 的键归一成 :func:`model_key` 口径。
+
+    裸模型名（无 ``/``）按 codebuddy 兜底——与 ``__main__`` 加载
+    ``disabled_models`` 的处理一致（``settings.json`` 里写裸名是历史/手写配置的常见
+    形态）。注意：裸键归一到 codebuddy 意味着它**只**对该通道生效，若用户本意是别的
+    通道，顺序永远不会触发；UI 一律写全 ``provider/model`` 键以避免这种静默错配。
+    """
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if "/" in value:
+        return model_key(*value.split("/", 1))
+    return model_key("codebuddy", value)
 
 
 def _to_minutes(hhmm: str) -> int | None:

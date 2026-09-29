@@ -379,12 +379,21 @@ def test_codebuddy_guard_applies_only_to_alias_round():
 
     精确轮是各通道按自己发布的 id 认领，模型名与静态表重合是正常的（两边都真
     有这个模型），此时让该通道照常先认领。
+
+    断言对象是 ``_resolve_auto`` 而非 ``forward_chat``：两轮匹配逻辑已作为纯重构
+    搬进该 helper（``forward_chat`` 与「为取 model_order 键而解析归属」共用它），
+    语义完全不变。真正锁行为的是下面 ``test_real_qoder_*`` 那几条。
     """
     from buddy_proxy.codebuddy_provider import forward as fwd
 
-    src = inspect.getsource(fwd.forward_chat)
-    # 守卫必须在 allow_aliases 为真的分支里
-    assert "if allow_aliases and _is_codebuddy_model(requested_model):" in src
+    for fn in (fwd._resolve_auto, fwd.forward_chat):
+        src = inspect.getsource(fn)
+        if fn is fwd._resolve_auto:
+            # 守卫必须在 allow_aliases 为真的分支里
+            assert "if allow_aliases and _is_codebuddy_model(requested_model):" in src
+        else:
+            # forward_chat 必须调用它，不能把两轮逻辑再复制一份
+            assert "_resolve_auto(state, requested_model)" in src
 
 
 # --- 真实通道：Qoder 不得在精确轮抢走属于别人的名字 -------------------------
