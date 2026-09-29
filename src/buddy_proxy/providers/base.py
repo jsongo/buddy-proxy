@@ -100,7 +100,19 @@ class BaseProvider(abc.ABC):
     def checkin_status(self) -> dict[str, Any] | None:
         """查询今日签到状态。返回 ``{"checked_in": bool, "claimable": bool,
         "inactive": bool, "streak_days": int, "message": str}``（claimable/
-        inactive 缺省视为 True/False）；不支持签到时返回 None。"""
+        inactive 缺省视为 True/False）；不支持签到时返回 None。
+
+        可选再带两个字段说明「下次什么时候能再打」，管理页据此显示倒计时：
+
+        - ``next_ts``：当前状态翻转时刻的 epoch 秒。已签到时是下一轮开始，
+          未签到时正好也是本轮截止，所以一个字段够用。
+        - ``next_ts_source``：``"upstream"``（上游给了时间窗）或
+          ``"inferred"``（上游没有每日轮换字段、按实测的零点轮换推断）。
+          界面用它决定要不要标注「推断」，别把猜出来的时刻说成上游契约。
+
+        算不出下次时刻（活动已结束/档期已过）就不要给这两个字段，界面自然
+        不显示——比显示一个已经过期的时刻诚实。辅助函数见
+        :mod:`buddy_proxy.core.checkin`。"""
         return None
 
     def checkin_claim(self) -> dict[str, Any] | None:

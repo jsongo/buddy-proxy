@@ -152,7 +152,10 @@
   .cal-head label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
   .cal-head input[type="time"] { background: var(--card2); border: 1px solid var(--line); color: var(--text);
                                  border-radius: 6px; padding: 3px 8px; font-size: 12.5px; }
+  /* flex-wrap：一行最多有 通道名 + 活动档期 + 签到态 + 下次时间 四个 tag，
+     窄屏不换行会把「立即打卡」按钮挤出可视区 */
   .benefit-row { display: flex; align-items: center; gap: 10px; padding: 9px 0;
+                 flex-wrap: wrap;
                  border-bottom: 1px solid rgba(38,47,60,.55); }
   .benefit-row:last-child { border-bottom: none; }
   .grow { flex: 1; }
@@ -692,12 +695,79 @@ function switchTab(name) {
   try { localStorage.setItem('bp-tab', name); } catch (e) {}
   refreshStickyVars();
   if (typeof syncPatStatusAuto === 'function') syncPatStatusAuto();  // 进/离额度页 → 起停模型负载自动刷新
+  if (typeof syncNextTimeAuto === 'function') syncNextTimeAuto();   // 同上：起停打卡倒计时（离开即停，不空转）
 
   // 懒加载：进入页签时补齐该页所需数据，拉回后 render() 会渲染该页
   loadData(dataForTab(name)).catch(() => {});
 }
 document.querySelectorAll('.tab').forEach(
   b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+// ---- 打卡「下次时间」----
+// 后端给 next_ts（epoch 秒）+ next_ts_source（upstream=上游时间窗 /
+// inferred=上游没给、按实测零点轮换推断）。推断的要标出来：那是我们从打卡
+// 记录反推的，不是上游契约，说成准点会误导。
+function fmtNextClock(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  const hhmm = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return `今天 ${hhmm}`;
+  const tmr = new Date(now); tmr.setDate(now.getDate() + 1);
+  if (d.toDateString() === tmr.toDateString()) return `明天 ${hhmm}`;
+  return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${hhmm}`;
+}
+function fmtCountdown(ts) {
+  let s = Math.floor(ts - Date.now() / 1000);
+  if (s <= 0) return '即将刷新';
+  if (s < 60) return `${s} 秒后`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} 分钟后`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} 小时 ${m % 60} 分后`;
+  return `${Math.floor(h / 24)} 天后`;
+}
+function nextTimeHtml(c) {
+  if (!c || c.next_ts == null) return '';
+  const inferred = c.next_ts_source === 'inferred';
+  // 未签到时 next_ts 是本轮**截止**（qoder 的窗口此刻过期即失效），措辞要区分：
+  // 「可打卡中，X 后截止」比「下次 X」更贴合用户当下该做的事。
+  const verb = (c.claimable && !c.done_today) ? '截止' : '下次';
+  const tip = inferred
+    ? '上游未提供每日轮换时刻，按打卡记录推断为本地零点'
+    : '时刻来自上游返回的时间窗';
+  return `<span class="tag" title="${esc(tip)}" data-next-ts="${c.next_ts}">` +
+    `${verb} <b data-next-clock>${esc(fmtNextClock(c.next_ts))}</b>` +
+    `<span class="muted" data-next-cd> · ${esc(fmtCountdown(c.next_ts))}</span>` +
+    `${inferred ? '<span class="muted" title="推断值">≈</span>' : ''}</span>`;
+}
+// 倒计时每秒走一格（纯本地计算，不打上游）；只在打卡页可见且真有元素时跑。
+let NEXT_TIME_TIMER = null;
+function nextTimeWanted() {
+  const page = document.getElementById('page-benefits');
+  return !!page && page.classList.contains('active')
+    && document.visibilityState === 'visible'
+    && !!document.querySelector('[data-next-ts]');
+}
+function renderNextTimes() {
+  document.querySelectorAll('[data-next-ts]').forEach(el => {
+    const ts = Number(el.dataset.nextTs);
+    const cd = el.querySelector('[data-next-cd]');
+    if (cd) cd.textContent = ' · ' + fmtCountdown(ts);
+    const clock = el.querySelector('[data-next-clock]');
+    // 过点后本地时钟文案也要跟上（数据要等下一轮刷新才换）
+    if (clock) clock.textContent = fmtNextClock(ts);
+  });
+}
+function syncNextTimeAuto() {
+  if (nextTimeWanted()) {
+    renderNextTimes();                       // 立刻算一次，别等第一秒
+    if (!NEXT_TIME_TIMER) NEXT_TIME_TIMER = setInterval(renderNextTimes, 1000);
+  } else if (NEXT_TIME_TIMER) {
+    clearInterval(NEXT_TIME_TIMER);
+    NEXT_TIME_TIMER = null;
+  }
+}
+document.addEventListener('visibilitychange', syncNextTimeAuto);
 
 // ---- 打卡日历 + 自动打卡 + 各通道额度 ----
 function renderBenefits() {
@@ -754,10 +824,12 @@ function renderBenefits() {
       : `<span class="tag">未签到${extra}</span>`;
     const act = c.activity_name ? `<span class="tag ok" title="签到活动档期">${esc(c.activity_name)}</span>` : '';
     return `<div class="benefit-row">
-      <span class="mono">${esc(p.id)}</span>${act}${st}<span class="grow"></span>
+      <span class="mono">${esc(p.id)}</span>${act}${st}${nextTimeHtml(c)}<span class="grow"></span>
       <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
     </div>`;
   }).join('') : '<div class="empty" style="padding:14px 0">当前没有支持打卡的通道</div>';
+  // 数据换了新的一批 data-next-ts，重算一次并决定要不要起 ticker
+  syncNextTimeAuto();
 
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
   const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat');

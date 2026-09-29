@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, Sequence
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..core.checkin import SOURCE_INFERRED, next_daily_reset
 from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
 from ..providers.base import BaseProvider
 from .benefits_api import claim_checkin_credits, fetch_checkin_status, fetch_ent_usage
@@ -126,12 +127,22 @@ class TraeProvider(BaseProvider):
     def checkin_status(self) -> dict[str, Any] | None:
         data = fetch_checkin_status()
         checked_in = bool(data.get("checked_in"))
-        return {
+        enabled = bool(data.get("enable", True))
+        status: dict[str, Any] = {
             "checked_in": checked_in,
-            "claimable": bool(data.get("enable", True)) and not checked_in,
-            "inactive": not bool(data.get("enable", True)),
+            "claimable": enabled and not checked_in,
+            "inactive": not enabled,
             "message": data.get("message", ""),
         }
+        # trae 的 ``/ug/checkin_credits/status`` 返回里**没有任何时间字段**
+        # （实测只有 checked_in / enable / credits / message），连档期都不给。
+        # 轮换时刻只能按 logs/checkin.jsonl 反推的本地零点算（09-27 01:56、
+        # 02:20 这类凌晨领取也被记为新一天 → 零点轮换），故标 inferred。
+        # 活动未开（enable=false）时不给：那会儿连有没有下一轮都不知道。
+        if enabled:
+            status["next_ts"] = next_daily_reset()
+            status["next_ts_source"] = SOURCE_INFERRED
+        return status
 
     def checkin_claim(self) -> dict[str, Any] | None:
         data = claim_checkin_credits()
