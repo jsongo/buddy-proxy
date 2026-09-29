@@ -81,6 +81,9 @@
   h2 { font-size: 14.5px; margin: 26px 0 10px; color: var(--text); }
   h2 .sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  /* 打卡页两栏高度差很大（日历矮、额度列表长）：默认 stretch 会把日历那张卡
+     拉到与右栏等高，底部留出一大块空白。top 让各卡按自身内容高 */
+  .grid2.top { align-items: start; }
   @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
   .chart-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   .legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
@@ -140,7 +143,10 @@
   .num { text-align: right; white-space: nowrap; }
   .empty { color: var(--muted); text-align: center; padding: 26px 0; font-size: 13px; }
   /* 打卡 & 额度 */
-  .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin: 12px 0 4px; }
+  /* max-width：窄屏时 .grid2 收成单栏，日历会撑满整宽 → 每格跟着变成 100px
+     见方的大方块。限宽后格子维持正常大小，多出来的空档留在右侧 */
+  .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px;
+         margin: 12px 0 4px; max-width: 460px; }
   .cal .dow { display: flex; align-items: center; justify-content: center;
               font-size: 10.5px; color: var(--muted); }
   .cal .day { aspect-ratio: 1; border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
@@ -152,12 +158,73 @@
   .cal-head label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
   .cal-head input[type="time"] { background: var(--card2); border: 1px solid var(--line); color: var(--text);
                                  border-radius: 6px; padding: 3px 8px; font-size: 12.5px; }
-  /* flex-wrap：一行最多有 通道名 + 活动档期 + 签到态 + 下次时间 四个 tag，
-     窄屏不换行会把「立即打卡」按钮挤出可视区 */
-  .benefit-row { display: flex; align-items: center; gap: 10px; padding: 9px 0;
-                 flex-wrap: wrap;
-                 border-bottom: 1px solid rgba(38,47,60,.55); }
+  /* 打卡行：左侧通道标识（色块 + 名字 + 活动档期）｜中间状态与下次时间｜右侧动作。
+     三列用 grid 而不是 flex：各行的 tag 数量不一样（trae 没有活动档期），
+     flex 一换行右边缘就对不齐——按钮会掉到第二行、各行参差（02:14 那版就是这样）。
+     minmax(0,1fr) 让中列可压缩，长活动名不会把按钮挤出卡片。 */
+  .benefit-row { display: grid; align-items: center; gap: 10px 14px;
+                 grid-template-columns: auto minmax(0, 1fr) auto;
+                 padding: 12px 0; border-bottom: 1px solid rgba(38,47,60,.55); }
   .benefit-row:last-child { border-bottom: none; }
+  .br-id { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  /* 通道色块：用 pcolor() 上色，与日历 tooltip / 图表里的同通道颜色一致 */
+  .br-dot { flex: none; width: 9px; height: 9px; border-radius: 3px; }
+  .br-name { font-weight: 600; font-size: 13px; letter-spacing: .2px;
+             font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .br-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .br-act { display: flex; align-items: center; justify-content: flex-end; }
+  .benefit-row button { padding: 5px 15px; font-size: 12.5px; white-space: nowrap; }
+  /* 签到态徽标：比 .tag 更醒目一点，带状态点 */
+  .br-state { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+              padding: 2px 10px; border-radius: 999px; background: var(--bg);
+              color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
+  .br-state::before { content: ''; width: 5px; height: 5px; border-radius: 50%;
+                      background: currentColor; opacity: .85; flex: none; }
+  .br-state.ok { color: var(--ok); border-color: rgba(62,207,142,.35);
+                 background: rgba(62,207,142,.09); }
+  .br-state.pending { color: var(--accent); border-color: rgba(79,140,255,.4);
+                      background: rgba(79,140,255,.1); }
+  .br-state.bad { color: var(--err); border-color: rgba(255,107,107,.35);
+                  background: rgba(255,107,107,.09); }
+  .br-state .sep { opacity: .45; margin: 0 1px; }
+  /* 活动档期 / 连续天数等次要信息：不抢签到态的视觉重量 */
+  .br-chip { font-size: 11px; padding: 2px 9px; border-radius: 999px;
+             background: rgba(255,255,255,.035); color: var(--muted);
+             border: 1px solid var(--line); white-space: nowrap; }
+  /* 「下次时间」：招牌信息，给它一块独立的底，倒计时比时刻淡一点 */
+  .br-next { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+             padding: 3px 11px; border-radius: 999px; white-space: nowrap;
+             background: var(--card2); border: 1px solid var(--line); color: var(--text); }
+  .br-next .lbl { color: var(--muted); font-size: 11px; }
+  .br-next .at { font-weight: 600; font-variant-numeric: tabular-nums;
+                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .br-next .cd { color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* 推断值：整块换成虚边框，替掉原先贴在「分后」后面的那个「≈」——
+     贴尾巴上读着像错字，虚线框能同时表达「不确定」且不打扰阅读 */
+  .br-next.inferred { border-style: dashed; }
+  .br-next.inferred .at { font-style: italic; }
+  .benefit-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+                  margin-bottom: 2px; }
+  .benefit-head .bh-title { font-weight: 600; font-size: 13px; }
+  /* 左栏两张卡竖排（日历 + 通道签到） */
+  .col-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  /* 打卡行的排布按**卡片自身宽度**决定，不看视口——两栏布局下这张卡只有
+     约 560px，而单栏时反而是整宽。视口宽 → 卡窄，media query 的直觉正好
+     是反的，所以用容器查询：窄时折成两行（通道 + 按钮一行，状态/时间另起
+     一行），宽时三列一行排开，两种情况按钮都贴右对齐。 */
+  .rows-card { container-type: inline-size; }
+  @container (max-width: 640px) {
+    .benefit-row { grid-template-columns: minmax(0, 1fr) auto; }
+    /* 显式定位：只写 .br-meta{grid-column:1/-1} 的话，它跨行占掉第二行，
+       自动排布就把按钮挤到第三行、右边那列塌成 0 宽（实测 512px 0px，
+       按钮掉到 top 79），得把「通道 + 按钮」钉在同一行、状态另起一行。
+       ⚠ 按钮**只占第 1 行**（不要写 1/2/3/3 跨两行去居中）：br-meta 横跨整行
+       时，跨行的按钮会与它在第 2 行右半区重叠，把「22 小时 18 分后」压在按钮
+       底下。两者必须错开行。 */
+    .br-id  { grid-area: 1 / 1; }
+    .br-act { grid-area: 1 / 2; }
+    .br-meta { grid-area: 2 / 1 / 2 / -1; }
+  }
   .grow { flex: 1; }
   .qitem { margin: 9px 0; }
   .qitem .qhead { display: flex; justify-content: space-between; gap: 8px; font-size: 12px;
@@ -279,16 +346,31 @@
 
   <section class="page" id="page-benefits">
     <h2>打卡 &amp; 额度 <span class="sub">自动打卡 · 最近 35 天 · 按通道额度</span></h2>
-    <div class="grid2">
-      <div class="chart-card">
-        <div class="cal-head">
-          <label><input type="checkbox" id="auto-checkin"> 自动打卡</label>
-          <input type="time" id="checkin-time" value="09:30">
-          <button onclick="saveCheckinSettings()">保存</button>
-          <span class="muted" style="font-size:12px" id="checkin-hint"></span>
+    <div class="grid2 top">
+      <!-- 左栏两张卡竖排：日历 + 各通道签到。签到行必须紧挨日历（都在左上，
+           一进页面就能看到「今天签没签、能不能领」），别让它们排到长长的额度
+           列表底下；同时左栏也因此不会被右栏拉得空出一大块 -->
+      <div class="col-stack">
+        <div class="chart-card">
+          <div class="benefit-head">
+            <span class="bh-title">打卡日历</span>
+            <span class="muted" style="font-size:12px">最近 35 天</span>
+          </div>
+          <div class="cal-head">
+            <label><input type="checkbox" id="auto-checkin"> 自动打卡</label>
+            <input type="time" id="checkin-time" value="09:30">
+            <button onclick="saveCheckinSettings()">保存</button>
+            <span class="muted" style="font-size:12px" id="checkin-hint"></span>
+          </div>
+          <div class="cal" id="cal"><div class="empty" style="grid-column:1/-1">加载中…</div></div>
         </div>
-        <div class="cal" id="cal"><div class="empty" style="grid-column:1/-1">加载中…</div></div>
-        <div id="checkin-rows"></div>
+        <div class="chart-card rows-card">
+          <div class="benefit-head">
+            <span class="bh-title">各通道签到</span>
+            <span class="muted" style="font-size:12px">每天自动领取，也可手动打</span>
+          </div>
+          <div id="checkin-rows"></div>
+        </div>
       </div>
       <div id="quota-list"><div class="chart-card"><div class="empty">加载中…</div></div></div>
     </div>
@@ -735,10 +817,13 @@ function nextTimeHtml(c) {
   const tip = inferred
     ? '上游未提供每日轮换时刻，按打卡记录推断为本地零点'
     : '时刻来自上游返回的时间窗';
-  return `<span class="tag" title="${esc(tip)}" data-next-ts="${c.next_ts}">` +
-    `${verb} <b data-next-clock>${esc(fmtNextClock(c.next_ts))}</b>` +
-    `<span class="muted" data-next-cd> · ${esc(fmtCountdown(c.next_ts))}</span>` +
-    `${inferred ? '<span class="muted" title="推断值">≈</span>' : ''}</span>`;
+  // 推断值用虚线框 + 斜体表示「不确定」，替掉原先贴在「分后」后面的「≈」：
+  // 那个位置读着像错字，而且它只区分了来源，没说清「哪里不确定」。
+  // data-next-* 三件套保持不变（renderNextTimes 与测试都依赖）。
+  return `<span class="br-next${inferred ? ' inferred' : ''}" title="${esc(tip)}" data-next-ts="${c.next_ts}">` +
+    `<span class="lbl">${verb}</span>` +
+    `<b class="at" data-next-clock>${esc(fmtNextClock(c.next_ts))}</b>` +
+    `<span class="cd" data-next-cd>${esc(fmtCountdown(c.next_ts))}</span></span>`;
 }
 // 倒计时每秒走一格（纯本地计算，不打上游）；只在打卡页可见且真有元素时跑。
 let NEXT_TIME_TIMER = null;
@@ -752,7 +837,8 @@ function renderNextTimes() {
   document.querySelectorAll('[data-next-ts]').forEach(el => {
     const ts = Number(el.dataset.nextTs);
     const cd = el.querySelector('[data-next-cd]');
-    if (cd) cd.textContent = ' · ' + fmtCountdown(ts);
+    // 分隔符由 CSS 的 gap 承担，这里只写文案（原先手写 ' · ' 是给平铺 tag 用的）
+    if (cd) cd.textContent = fmtCountdown(ts);
     const clock = el.querySelector('[data-next-clock]');
     // 过点后本地时钟文案也要跟上（数据要等下一轮刷新才换）
     if (clock) clock.textContent = fmtNextClock(ts);
@@ -814,18 +900,26 @@ function renderBenefits() {
   const rows = (BENEFITS.providers || []).filter(p => p.checkin.supported);
   document.getElementById('checkin-rows').innerHTML = rows.length ? rows.map(p => {
     const c = p.checkin;
-    const bits = [];
-    if (c.streak_days >= 2) bits.push(`连续 ${c.streak_days} 天`);
-    if (c.daily_credit > 0) bits.push(`每日 +${fmtCredit(c.daily_credit)}`);
-    const extra = bits.length ? ` · ${bits.join(' · ')}` : '';
-    const st = c.error ? `<span class="tag bad" title="${esc(c.error)}">状态未知</span>`
-      : c.inactive ? '<span class="tag">今日无签到活动</span>'
-      : c.done_today ? `<span class="tag ok">已签到${extra}</span>`
-      : `<span class="tag">未签到${extra}</span>`;
-    const act = c.activity_name ? `<span class="tag ok" title="签到活动档期">${esc(c.activity_name)}</span>` : '';
+    // 签到态做成带状态点的徽标；「连续 N 天 / 每日 +X」降级成旁边的小 chip，
+    // 别和状态挤在同一个 tag 里（那行本来就长，挤一起更难扫）
+    const st = c.error ? `<span class="br-state bad" title="${esc(c.error)}">状态未知</span>`
+      : c.inactive ? '<span class="br-state">今日无签到活动</span>'
+      : c.done_today ? '<span class="br-state ok">已签到</span>'
+      : '<span class="br-state pending">未签到</span>';
+    const chips = [];
+    if (c.daily_credit > 0) chips.push(`每日 +${fmtCredit(c.daily_credit)}`);
+    if (c.streak_days >= 2) chips.push(`连续 ${c.streak_days} 天`);
+    if (c.activity_name) chips.push(c.activity_name);
+    const meta = chips.map(t => `<span class="br-chip">${esc(t)}</span>`).join('');
     return `<div class="benefit-row">
-      <span class="mono">${esc(p.id)}</span>${act}${st}${nextTimeHtml(c)}<span class="grow"></span>
-      <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
+      <div class="br-id">
+        <i class="br-dot" style="background:${pcolor(p.id)}"></i>
+        <span class="br-name">${esc(p.id)}</span>
+      </div>
+      <div class="br-meta">${st}${meta}${nextTimeHtml(c)}</div>
+      <div class="br-act">
+        <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
+      </div>
     </div>`;
   }).join('') : '<div class="empty" style="padding:14px 0">当前没有支持打卡的通道</div>';
   // 数据换了新的一批 data-next-ts，重算一次并决定要不要起 ticker
