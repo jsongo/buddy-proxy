@@ -536,6 +536,33 @@ def test_model_order_accepts_published_name_not_resolve_model_output(alias_env):
     assert r.json()["model"] == "fakealias/glm-5.3"
 
 
+def test_mark_clear_does_not_validate_against_catalog(alias_env):
+    """清冷却是纯缓存操作，目录里没有这个名字也不该 400。
+
+    真机场景：qoder 的标记可能落在上游内部 key 上（``resolve_model`` 的产物），
+    而``_canonical_order_target`` 只认对外发布名。若这里跟着 400，用户点「清冷却」
+    会看到「模型不在通道的模型列表中」——像是保存失败，其实什么都没坏。
+    """
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    try:
+        # fakealias 目录里只有 glm-5.3，没有 gmodel（它是 resolve_model 的产物）
+        cooldown_mod.mark_failed("fakealias", "gmodel")
+        r = alias_env.client.post("/ui/api/model-order/mark-clear",
+                                  json={"provider": "fakealias", "model": "gmodel"})
+        assert r.status_code == 200, r.text
+        assert r.json()["marks_cleared"] == 1
+        assert cooldown_mod.snapshot() == {}
+        # 未知通道同理：清不到就返回 0，不报错
+        r = alias_env.client.post("/ui/api/model-order/mark-clear",
+                                  json={"provider": "ghost", "model": "m"})
+        assert r.status_code == 200
+        assert r.json()["marks_cleared"] == 0
+    finally:
+        cooldown_mod._reset_for_tests()
+
+
 def test_order_modal_provider_list_not_from_MODELS(env):
     """顺序弹窗的通道下拉必须来自选项接口，不能依赖 MODELS。
 

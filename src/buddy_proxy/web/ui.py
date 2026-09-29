@@ -827,18 +827,23 @@ async def ui_model_order_mark_clear(request: Request):
         cleared = cooldown_mod.clear()
         return {"ok": True, "marks_cleared": cleared}
 
-    # 与保存端点同一口径（对外发布名，不套 resolve_model），否则查不到刚存的键
-    key = _canonical_order_target(provider, model, state)
+    # 键与保存端点同一口径（对外发布名，不套 resolve_model），否则查不到刚存的键。
+    # 但**校验失败不报错**：清冷却是个纯缓存操作，跟「模型是否还在目录里」无关——
+    # 报「模型不在通道的模型列表中」会让人以为保存失败了跑去翻配置，而实际什么都没坏
+    # （模型下架后想清掉残留标记是完全合理的）。所以校验不过就退回原始名字清一次。
+    try:
+        key = _canonical_order_target(provider, model, state)
+    except HTTPException:
+        key = settings_mod.model_key(provider or "codebuddy", model)
     order_targets = (getattr(state, "model_order", None) or {}).get(key) or []
     cleared = 0
     for item in order_targets:
         if "/" in item:
             cleared += cooldown_mod.clear(*item.split("/", 1))
-    if order_targets:
-        return {"ok": True, "model": key, "marks_cleared": cleared}
-    # 没配顺序的模型：按裸名清一次（转发侧 mark_failed 用的就是裸名）
-    pid, _, bare = key.partition("/")
-    cleared = cooldown_mod.clear(pid, bare)
+    if not order_targets:
+        # 没配顺序的模型：按裸名清一次（转发侧 mark_failed 用的就是裸名）
+        pid, _, bare = key.partition("/")
+        cleared = cooldown_mod.clear(pid, bare)
     return {"ok": True, "model": key, "marks_cleared": cleared}
 
 
