@@ -83,6 +83,9 @@ workers, or explicit provider shutdown lifecycles.
   bypassing it can make UI policy and runtime routing disagree.
 - `core/settings.py` owns local settings path, normalization, and atomic
   persistence. Callers must not open or write the settings JSON directly.
+  Every overwrite keeps the previous version as `settings.json.bak` first, so a
+  UI write is always reversible. Backing up is best-effort and must never make
+  a save fail.
 - `model_order` (settings key) maps a `model_key` to an ordered list of
   `provider/model` candidates, tried top-down by `forward._forward_with_order`.
   **Failover is only legal when an attempt failed before any byte was committed

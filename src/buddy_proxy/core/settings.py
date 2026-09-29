@@ -44,16 +44,51 @@ def load_settings() -> dict[str, Any]:
         return {}
 
 
+def _backup_settings(path: pathlib.Path, previous: dict[str, Any]) -> None:
+    """覆盖前把**上一版**留一份 ``<name>.bak``，让 UI 写操作可回滚。
+
+    这是护栏而非版本管理：只留最近一份、原地覆盖。**失败语义由调用方兜底**
+    （见 :func:`save_settings`）——本函数负责清理自己写了一半的临时文件后就上抛，
+    让「备份失败」与「保存失败」两件事可以被分别断言。
+    """
+    if not previous:
+        return  # 还没有设置文件（或读不出来）：没有可备份的「上一版」
+    bak = path.with_name(path.name + ".bak")
+    tmp = bak.with_name(f".{bak.name}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(previous, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, bak)
+    except Exception:
+        # 清掉可能写了一半的临时文件，别在目录里留残渣
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def save_settings(update: dict[str, Any]) -> dict[str, Any]:
-    """合并并原子写入设置，避免半写入或同进程更新互相覆盖。"""
+    """合并并原子写入设置，避免半写入或同进程更新互相覆盖。
+
+    写入前会把上一版存一份 ``settings.json.bak``（见 :func:`_backup_settings`）。
+    备份是**尽力而为**：它失败绝不能连累保存本身——管理页一次「改默认模型」因为
+    备份路径写不出就 500，是把护栏变成了新故障点。
+    """
     path = settings_path()
     with _SETTINGS_LOCK:
+        previous = load_settings()
         merged = {
-            **load_settings(),
+            **previous,
             **update,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _backup_settings(path, previous)
+        except Exception:  # noqa: BLE001 - 见 docstring：备份失败不阻断保存
+            pass
         tmp_name = ""
         try:
             with tempfile.NamedTemporaryFile(
