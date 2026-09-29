@@ -237,11 +237,43 @@ uv run python -m buddy_proxy --desensitize --mimo
 Two auth modes, tried in order:
 
 1. **API key** — `MIMO_API_KEY` (plus `MIMO_BASE_URL` to pick the billing / token-plan host), `~/.mimocode/auth.json` (written by MiMo Desktop's "API Key" mode), or `~/.buddy-proxy/mimo_api_key.json`.
-2. **Xiaomi SSO** — reuses the login state of an installed **MiMo Desktop** app. The proxy reads its account cookies and performs the same two-stage exchange the app does to obtain a short-lived `serviceToken`; tokens are refreshed automatically and a stale one is retried once. No clipboard or cookie export needed.
+2. **Xiaomi SSO** — sign in with `buddy login mimo` (credentials land in `~/.buddy-proxy/mimo_account.json`); if you have never logged in, the proxy falls back to reusing the login state of an installed **MiMo Desktop** app. Either way it performs the same two-stage exchange the app does to obtain a short-lived `serviceToken`; tokens are refreshed automatically and a stale one is retried once. No clipboard or cookie export needed.
 
 ```bash
-uv run buddy login mimo     # reports which mode is in use, or how to configure one
+uv run buddy login mimo     # opens a browser; the CLI picks up the result automatically
 ```
+
+#### Sign-in (`buddy login mimo`)
+
+Log in with a Xiaomi account in the browser — **nothing to paste, nothing to do back in
+the terminal**. Same shape as `buddy login qoder` (device flow): generate a login link →
+open the browser → long-poll for the result → write `~/.buddy-proxy/mimo_account.json` (`0600`).
+
+> **Why not a local callback server** (the way `buddy login trae` works): Xiaomi's
+> `callback` parameter is **server-side signed** and only whitelisted domains are accepted.
+> A self-hosted `http://127.0.0.1:xxxx/cb` is rejected outright — `{"code":10025,
+> "desc":"Callback连接不合法"}` — and so is Xiaomi's own `https://account.xiaomi.com/sts`
+> (the signature is recomputed per request and can't be forged). So this uses the official
+> `longPolling/loginUrl` endpoint instead (**no `callback`**, ticket-based).
+
+Two details worth knowing (both found the hard way, 2026-09):
+
+- **`loginUrl` is an API endpoint, not a page.** Opening it in a browser shows a raw
+  `{"code":70016,"desc":"登录验证失败"}` blob. The real sign-in page (a SPA that renders
+  the QR code client-side) is in that same response's `location` field
+  (`account.xiaomi.com/fe/service/login?...`) — the CLI follows one hop to get it.
+- **A browser User-Agent is required.** With a client UA the request 302s instead of
+  returning the `location`-bearing body.
+
+The ticket is valid for **300 s** (Qoder's device flow gets 10 minutes). The CLI pins its
+poll deadline to that `expires_in` rather than a fixed constant — once a ticket expires,
+the long-poll still hangs without returning any error, so there is nothing to react to but
+your own clock.
+
+Credential precedence: **the file written by the login flow wins**, and only if it's absent
+does the proxy fall back to the desktop cookie DB — so a **fresh machine works without MiMo
+Desktop installed**, and machines that do have it behave exactly as before. API keys still
+outrank both (if you have one configured, logging in has no effect).
 
 MiMo is OpenAI-shaped upstream, so requests are forwarded as-is — **except** Anthropic (`/v1/messages`) clients such as Claude Code, where the response is converted back into Anthropic events (streaming `message_start` / `content_block_delta` / `message_stop`, plus `thinking` and `tool_use` blocks) because MiMo has no native Anthropic endpoint.
 

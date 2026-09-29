@@ -531,10 +531,43 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 | 接口 | 说明 |
 | --- | --- |
 | 凭据（方式一） | API key：`MIMO_API_KEY`（配 `MIMO_BASE_URL` 可切 billing/token-plan）、`~/.mimocode/auth.json`（MiMo 桌面「API Key」模式写入）、`~/.buddy-proxy/mimo_api_key.json` |
-| 凭据（方式二） | **小米 SSO**：复用本机 MiMo 桌面登录态——自动读取其账号 cookie，并复刻桌面端的「两阶段换 `serviceToken`」，过期自动刷新、被拒自动重试一次 |
+| 凭据（方式二） | **小米 SSO**：`buddy login mimo` 登录，凭据落 `~/.buddy-proxy/mimo_account.json`；没登录过则回退复用本机 MiMo 桌面登录态（读其账号 cookie），复刻桌面端的「两阶段换 `serviceToken`」，过期自动刷新、被拒自动重试一次 |
 | 端点 | OpenAI 形态 `/chat/completions` 直通（流式/非流式） |
 | **Anthropic（`/v1/messages`）** | 上游无 Anthropic 原生端点，故**响应反向转换**为 Anthropic 事件（`message_start`/`content_block_delta`/`message_stop`，含 `thinking` 与 `tool_use` 块），供 Claude Code 使用 |
-| 登录 | `buddy login mimo`（打印当前生效模式或配置指引；本 provider 无交互式登录） |
+| 登录 | `buddy login mimo` —— 打开浏览器用小米账号登录，命令行自动接住结果（同 `buddy login qoder`） |
+
+#### 登录（`buddy login mimo`）
+
+打开浏览器登录小米账号即可，**不用回终端做任何事**，也不用手工复制 cookie：
+
+```bash
+uv run buddy login mimo       # 打开浏览器 → 登录 → 命令行自动继续
+```
+
+流程与 `buddy login qoder` 同构（device flow 那套）：生成登录链接 → 打开浏览器 →
+长轮询等结果 → 落盘 `~/.buddy-proxy/mimo_account.json`（`0600`）。
+
+> **为什么不用本地回调服务**（像 `buddy login trae` 那样）：小米的 `callback` 参数是
+> 服务端**带签名**生成的，只认它自己白名单内的域。自建 `http://127.0.0.1:xxxx/cb`
+> 会被直接拒——`{"code":10025,"desc":"Callback连接不合法"}`；拿它自己生成的
+> `https://account.xiaomi.com/sts` 去试同样被拒（签名每次现算，外部无法伪造）。
+> 所以走官方给第三方留的 `longPolling/loginUrl`（**不传 callback**，用 ticket 机制）。
+
+两个踩出来的细节（2026-09 实测）：
+
+- **`loginUrl` 是 API 端点，不是给人看的页面。** 浏览器直接开只会看到一段
+  `{"code":70016,"desc":"登录验证失败"}` 的 JSON。真正的登录页（一个 SPA，二维码
+  由 JS 渲染）藏在同一个响应的 `location` 字段里（`account.xiaomi.com/fe/service/login?...`），
+  CLI 会跟一次跳转把它取出来。
+- **必须用浏览器 UA。** 用客户端 UA 请求会直接 302，拿不到带 `location` 的那个响应体。
+
+ticket 有效期 **300 秒**（Qoder 的 device flow 有 10 分钟）。CLI 的轮询截止时间锚定
+链接自带的 `expires_in`，而不是拍脑袋的常量——ticket 过期后长轮询**依然挂住不返回任何
+错误**，除了自己掐表没有别的信号可依赖。
+
+凭据读取优先级：**登录落盘的文件优先**，没有才回退桌面 cookie 库——这样**新机器上不装
+MiMo 桌面也能用**，装了桌面的老机器行为不变。API key 仍然优先于两者（配了 key 就别登录了，
+登录了也不生效）。
 
 管理页的额度面板给两行：**周额用量**与**套餐有效期**。注意这俩是**不同周期**——
 额度窗口是「以订阅 `startTime` 为锚点的 7 天」，而套餐期限通常是 **30 天**。

@@ -7,7 +7,7 @@
     python -m buddy_proxy.auth.login trae                # Trae Work (SOLO)：浏览器登录后粘贴回调链接
     python -m buddy_proxy.auth.login zcode               # 检查并打印 zcode 凭据配置指引（API key，无交互登录）
     python -m buddy_proxy.auth.login doubao              # 打印豆包（CDP）说明
-    python -m buddy_proxy.auth.login mimo                # 检查并打印 mimo 凭据配置指引（API key 或桌面登录态）
+    python -m buddy_proxy.auth.login mimo                # 小米账号浏览器登录（同 qoder 的 device flow）
 
 可选参数：
     --no-browser    codebuddy 登录不自动打开浏览器，只打印授权链接
@@ -261,32 +261,45 @@ def _login_doubao(**_kwargs) -> int:
     return 0
 
 
-def _login_mimo(**_kwargs) -> int:
-    """mimo 无交互登录：API key 或复用 MiMo 桌面的小米账号登录态。"""
+def _login_mimo(open_browser: bool = True, **_kwargs) -> int:
+    """mimo 登录：浏览器登录小米账号（官方 longPolling，免回调）。
+
+    与 Qoder 同构——打开链接、用户登录、命令行轮询到结果自动继续，不需要
+    本地回调服务（小米的 ``callback`` 要服务端签名，自建地址会被 10025 拒掉，
+    见 ``mimo/login.py`` 的模块说明）。
+
+    已经配好 API key 时不走登录：key 优先级高于 SSO，登录了也不会生效。
+    """
     from buddy_proxy.mimo.credentials import resolve_api_key
+    from buddy_proxy.mimo.login import LoginError, login_interactive
     from buddy_proxy.mimo.sso import load_account_cookies
 
     key, base = resolve_api_key()
     if key:
         print(f"[OK] mimo 凭据已配置(API key): {key[:4]}…{key[-2:]}  base: {base}")
-        print("    如需换号，改下面任意一处配置即可：")
-        print("    1. 环境变量 MIMO_API_KEY（配 MIMO_BASE_URL 可切 billing/token-plan）")
-        print("    2. ~/.mimocode/auth.json（MiMo 桌面「API Key」模式会写这份）")
-        print("    3. ~/.buddy-proxy/mimo_api_key.json")
+        print("     API key 优先于 SSO 登录态；如需改用小米账号登录，请先清除：")
+        print("     环境变量 MIMO_API_KEY / ~/.mimocode/auth.json / ~/.buddy-proxy/mimo_api_key.json")
         return 0
 
     account = load_account_cookies()
     if account is not None:
-        print(f"[OK] mimo 将复用 MiMo 桌面登录态: userId={account.user_id}")
-        print("    （本 provider 自动两阶段换 mimopc serviceToken，无需额外配置）")
-        print("    若要改用 API key，配置 MIMO_API_KEY 或上述文件即可。")
-        return 0
+        print(f"[OK] mimo 已有可用凭据: userId={account.user_id}")
+        print("     如需换号，重新运行本命令即可（会覆盖为新账号）。")
 
-    print("[!] mimo 未配置凭据，按以下任意一种方式配置：")
-    print("    1. 环境变量 MIMO_API_KEY=<platform.xiaomimimo.com 开的 key>")
-    print("    2. 在本机 MiMo Desktop 登录小米账号（本 provider 自动读取其 cookie）")
-    print("    3. 写入 ~/.buddy-proxy/mimo_api_key.json: {\"api_key\": \"...\", \"base_url\": \"...\"}")
-    return 1
+    try:
+        cred, path = login_interactive(open_browser=open_browser)
+    except KeyboardInterrupt:
+        print("\n[Mimo] 已取消。")
+        return 1
+    except LoginError as exc:
+        print(f"\n[X] mimo 登录失败: {exc}")
+        return 1
+
+    print(f"[OK] mimo 登录成功: userId={cred.user_id}")
+    print(f"     凭据文件: {path}")
+    print("     启动代理时加 --mimo（或 MIMO_ENABLED=1）即可启用该通道。")
+    print("     若网关正在运行，需 `buddy restart` 才会加载新凭据。")
+    return 0
 
 
 def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
@@ -373,7 +386,7 @@ def main() -> int:
     parser.add_argument("provider", nargs="?", default="codebuddy",
                         help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder)，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
-                        help="codebuddy/trae 登录不自动打开浏览器，只打印链接")
+                        help="codebuddy/trae/mimo/qoder 登录不自动打开浏览器，只打印链接")
     args = parser.parse_args()
 
     provider = PROVIDER_ALIASES.get(args.provider.strip().lower(), args.provider.strip().lower())

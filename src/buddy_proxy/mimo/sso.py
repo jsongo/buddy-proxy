@@ -106,12 +106,22 @@ class ServiceToken:
 
 
 def load_account_cookies(db_path: Path | None = None) -> AccountCookies | None:
-    """从 MiMo 桌面 cookie 库读 passToken/userId/cUserId。
+    """读小米账号凭据：**先看 ``buddy login mimo`` 落盘的文件，再退回桌面 cookie 库**。
 
-    2026-09-22 实测：这几个 cookie 存在 ``value`` 列且为明文
+    文件优先是有意的：新机器上不装 MiMo 桌面也能用（登录一次即可），装了桌面的
+    老机器行为不变（没有文件就照旧读 cookie 库）。
+
+    桌面 cookie 库路径下：2026-09-22 实测这几个 cookie 存在 ``value`` 列且为明文
     （``encrypted_value`` 长度为 0），直接 sqlite 读即可。库被 Electron
     持有时用只读 URI 打开，避免锁冲突。
     """
+    # 延迟 import：login.py 从本模块取 AccountCookies，模块级互相 import 会成环
+    from .login import load_saved_account
+
+    saved = load_saved_account()
+    if saved is not None:
+        return saved
+
     path = db_path or cookie_db_path()
     if not path:
         return None
