@@ -266,16 +266,17 @@ def test_narrow_layout_keeps_button_off_the_meta_row():
         ``grid-area`` 的四个值是 ``行起 / 列起 / 行止 / 列止``，所以行止是
         第 3 个值，不是第 2 个。
 
-        解析不出来就断言失败，**不要**退回「一行」了事：那样一旦写法变了，
-        断言会算出「不重叠」把 bug 放过去，比不写还坏。
+        ``1 / 2``（只给行起和列起）是合法且在本例里正常的写法——按钮本来只要
+        占一行，行止省略即跨一行。所以这里默认按跨一行处理，只把**看不出行
+        跨度**的写法判失败：没写 ``grid-area``、行止是 ``-1`` 这类负值。
         """
         m = re.search(r"grid-area:\s*([^;}]+)", decl)
-        assert m, f"没写 grid-area: {decl}"
+        assert m, f"这段规则里没写 grid-area，行跨度无从判断（容易又重叠）: {decl.strip()!r}"
         parts = [p.strip() for p in m.group(1).split("/")]
         start = int(parts[0])                    # 行起
-        end = start + 1                          # 没写行止就是跨一行
+        end = start + 1                          # 没写行止 = 跨一行（合法）
         if len(parts) >= 3:
-            tail = parts[2]
+            tail = parts[2]                      # 行止（第 3 个值）
             if tail.startswith("span"):
                 end = start + int(re.findall(r"\d+", tail)[0])
             elif tail.startswith("-"):
