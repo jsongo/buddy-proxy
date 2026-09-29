@@ -18,6 +18,7 @@ import time
 from types import SimpleNamespace
 from unittest import mock
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -100,6 +101,12 @@ class _Provider(BaseProvider):
                           "total_tokens": 2}})
         if self.behavior == "raise502":
             raise HTTPException(status_code=502, detail="upstream boom")
+        if self.behavior == "bug_typeerror":
+            # 真编程错误（不是上游故障）：换档**不得**掩盖它
+            raise TypeError("cannot unpack non-sequence NoneType")
+        if self.behavior == "raise_httpx":
+            # 传输层异常：换档应当接住（通道没自己转成 HTTPException 的漏网情形）
+            raise httpx.ConnectError("connection refused")
         if self.behavior == "raise400":
             raise HTTPException(status_code=400, detail="bad params")
         if self.behavior == "json429":
@@ -214,6 +221,33 @@ def test_non_retryable_http_exception_propagates(tmp_path, monkeypatch):
     assert cooldown_mod.is_marked("pa", "m1") is False, "确定性错误不该打冷却标记"
 
 
+def test_programming_error_is_not_masked_as_failover(tmp_path, monkeypatch):
+    """**承重测试**：真编程错误必须原样暴露，不得被当成上游故障换档掩盖。
+
+    裸 ``except Exception`` 会把 ``TypeError`` 之类判成「可换档失败」：打冷却标记、
+    换到下一档，客户端拿到 200，真因只剩一行日志（且非 ``HTTPException`` 不进
+    ``_instrument``，指标里也看不到）。真 bug 被换档「治好」比直接报错更难排查。
+    """
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="bug_typeerror")
+    with pytest.raises(TypeError):
+        _post(client)
+    assert len(a.calls) == 1
+    assert b.calls == [], "编程错误不得换档"
+    assert cooldown_mod.is_marked("pa", "m1") is False, "编程错误不该把通道打成冷却"
+
+
+def test_transport_error_still_fails_over(tmp_path, monkeypatch):
+    """收窄 ``except`` 后，传输层异常仍要能换档（通道没自己包成 HTTPException 时）。"""
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="raise_httpx")
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] == "from-pb"
+    assert len(a.calls) == 1 and len(b.calls) == 1
+    assert cooldown_mod.is_marked("pa", "m1") is True
+
+
 def test_disabled_target_is_skipped_not_fatal(tmp_path, monkeypatch):
     """候选里被停用的目标跳过并继续（决策：跳过而非把整个模型打成 403）。"""
     client, state, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"])
@@ -303,6 +337,41 @@ def test_clear_and_snapshot():
     assert set(cooldown_mod.snapshot()) == {"pb/m2"}
     assert cooldown_mod.clear("pb") == 1
     assert cooldown_mod.snapshot() == {}
+
+
+def test_natural_expiry_also_clears_escalation_count(monkeypatch):
+    """自然到期与显式 clear 语义一致：都算「目标恢复了」，升级计数一并归零。
+
+    否则会出现「同样的好了又坏，走 UI 清冷却与等它自己过期，升级起点不同」的怪事。
+    """
+    now = [1_000_000.0]
+    monkeypatch.setattr(cooldown_mod.time, "time", lambda: now[0])
+    cooldown_mod.mark_failed("p", "m")
+    assert cooldown_mod._hits.get(("p", "m"))
+
+    # 推进到标记过期之后，读一次触发惰性回收
+    now[0] += cooldown_mod._TARGET_COOLDOWN_S + 1
+    assert cooldown_mod.remaining("p", "m") == 0
+    assert ("p", "m") not in cooldown_mod._marks
+    assert ("p", "m") not in cooldown_mod._hits, "自然到期应连带清掉升级计数"
+
+    # 之后一次失败重新从第 1 次起算，而不是接着旧的计数直接升级
+    now[0] += 1
+    cooldown_mod.mark_failed("p", "m")
+    assert cooldown_mod.remaining("p", "m") == cooldown_mod._TARGET_COOLDOWN_S
+    assert len(cooldown_mod._hits[("p", "m")]) == 1
+
+
+def test_clear_by_provider_also_drops_orphan_hit_counters(monkeypatch):
+    """按通道清理时，只残留升级计数（标记已过期）的键也要清掉。"""
+    now = [1_000_000.0]
+    monkeypatch.setattr(cooldown_mod.time, "time", lambda: now[0])
+    cooldown_mod.mark_failed("pa", "m1")
+    # 手工制造「标记没了、计数还在」的状态（模拟清理只动 _marks 的旧行为）
+    cooldown_mod._marks.pop(("pa", "m1"), None)
+    assert ("pa", "m1") in cooldown_mod._hits
+    cooldown_mod.clear("pa")
+    assert ("pa", "m1") not in cooldown_mod._hits
 
 
 # --- 4. 未配顺序时行为不变（回归护栏）----------------------------------------

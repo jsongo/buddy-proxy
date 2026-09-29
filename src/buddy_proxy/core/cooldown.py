@@ -47,8 +47,27 @@ _lock = threading.Lock()
 def _prune_hits(key: tuple[str, str], now: float) -> list[float]:
     """返回窗口内的失败时间戳（顺带丢弃过期的）。调用方须持有 ``_lock``。"""
     hits = [t for t in _hits.get(key, []) if now - t < _ESCALATE_WINDOW_S]
-    _hits[key] = hits
+    if hits:
+        _hits[key] = hits
+    else:
+        # 别留空列表：没有窗口内失败时把键删掉，dict 保持有界（否则每个失败过的目标
+        # 都留一条空记录，虽然键空间受 model_order 限制、不会真无界，但没必要留着）
+        _hits.pop(key, None)
     return hits
+
+
+def _drop_expired(now: float) -> None:
+    """惰性回收：``_marks`` 已过期的条目连同其升级计数一并删除。
+
+    两条路径必须**一致**：显式 ``clear()`` 本来就同时清 ``_marks`` 与 ``_hits``，
+    而自然到期若只清 ``_marks``，就会出现「同样的好了又坏，走 UI 清冷却与等它自己过期
+    得到的升级计数起点不同」的不一致。这里让到期等价于「这个目标恢复了」，计数归零。
+
+    调用方须持有 ``_lock``。
+    """
+    for key in [k for k, until in _marks.items() if until <= now]:
+        _marks.pop(key, None)
+        _hits.pop(key, None)
 
 
 def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -> float:
@@ -63,8 +82,11 @@ def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -
     key = (provider_id, model_id)
     now = time.time()
     with _lock:
+        # 注意：_prune_hits 返回的是**新列表**（且空时会删键），append 后必须写回 dict，
+        # 否则本次失败不会被计入，升级永远触发不了。
         hits = _prune_hits(key, now)
         hits.append(now)
+        _hits[key] = hits
         escalated = len(hits) >= _ESCALATE_HITS
         span = _ESCALATE_COOLDOWN_S if escalated else _TARGET_COOLDOWN_S
         until = max(_marks.get(key, 0.0), now + span)
@@ -88,19 +110,21 @@ def remaining(provider_id: str, model_id: str) -> int:
     key = (provider_id, model_id)
     now = time.time()
     with _lock:
-        until = _marks.get(key, 0.0)
-        if until <= now:
-            _marks.pop(key, None)
+        if _marks.get(key, 0.0) <= now:
+            _drop_expired(now)
             return 0
-        return max(0, int(round(until - now)))
+        return max(0, int(round(_marks[key] - now)))
 
 
 def clear(provider_id: str | None = None, model_id: str | None = None) -> int:
     """清除标记，返回被清除的目标数。
 
-    - 两者都给 → 只清该目标；
-    - 只给 ``provider_id`` → 清该通道下所有目标（含其升级计数）；
+    - 两者都给 → 只清该目标（含其升级计数）；
+    - 只给 ``provider_id`` → 清该通道下所有目标（含只残留计数的键）；
     - 都不给 → 全清（供 UI「全部重试」与测试隔离用）。
+
+    清标记**一律连带清升级计数**，与自然到期（:func:`_drop_expired`）保持同语义：
+    两者都表示「这个目标恢复了」。
     """
     with _lock:
         if provider_id is None:
@@ -112,7 +136,9 @@ def clear(provider_id: str | None = None, model_id: str | None = None) -> int:
             removed = 1 if _marks.pop((provider_id, model_id), None) is not None else 0
             _hits.pop((provider_id, model_id), None)
             return removed
-        keys = [k for k in _marks if k[0] == provider_id]
+        # 同时扫 _hits：该通道下可能只留有升级计数、标记已自然过期（那些键不在 _marks 里）
+        keys = {k for k in _marks if k[0] == provider_id}
+        keys |= {k for k in _hits if k[0] == provider_id}
         for k in keys:
             _marks.pop(k, None)
             _hits.pop(k, None)
@@ -124,9 +150,7 @@ def snapshot() -> dict[str, int]:
     now = time.time()
     out: dict[str, int] = {}
     with _lock:
-        expired = [k for k, until in _marks.items() if until <= now]
-        for k in expired:
-            _marks.pop(k, None)
+        _drop_expired(now)
         for (provider_id, model_id), until in _marks.items():
             out[f"{provider_id}/{model_id}"] = max(0, int(round(until - now)))
     return out

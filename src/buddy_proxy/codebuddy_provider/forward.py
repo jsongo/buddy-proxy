@@ -3,11 +3,15 @@
 所有路径统一经 :func:`observability._instrument` 记录请求指标（/ui 图表数据源）。
 
 **候选顺序（``state.model_order``）的重试规则**：一个模型的候选上游按序尝试，但
-**只有**当一次尝试在**向客户端提交任何字节之前**失败时才换下一档——即抛异常，或拿到
-非 2xx 的 ``JSONResponse``。一旦返回的是 ``StreamingResponse``，字节即将/已经开始流向
-客户端，重放有重复计费风险，绝不换档（同 ``trae/pat/chat.py`` 的「首个语义事件提交后
-绝不重放」不变量）。已知盲区：codebuddy 流式把上游错误做成了**带内错误 chunk**
+**只有**当一次尝试在**向客户端提交任何字节之前**失败时才换下一档——即抛
+``HTTPException(可换档状态码)``、抛传输层异常（``_RETRYABLE_EXC``），或拿到非 2xx 的
+``JSONResponse``。一旦返回的是 ``StreamingResponse``，字节即将/已经开始流向客户端，
+重放有重复计费风险，绝不换档（同 ``trae/pat/chat.py`` 的「首个语义事件提交后绝不重放」
+不变量）。已知盲区：codebuddy 流式把上游错误做成了**带内错误 chunk**
 （``pipeline.stream_upstream``），路由器无从察觉，故第一档为 codebuddy 时流式失败不换档。
+
+反过来，**编程错误不换档**：``TypeError`` / ``KeyError`` 这类 bug 若被当成上游故障，
+就会被冷却标记掩盖、客户端反而拿到 200，真因极难发现。
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import json
 import pathlib
 from typing import Any
 
+import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -35,6 +40,18 @@ from .provider import _default_codebuddy
 #: 刻意**不含** 400/401/403/404：那些是确定性错误（参数错、模型不存在、被停用、
 #: 凭据无效），换谁都不会成功，重试只会拖时间并掩盖真因。
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+#: 允许换档的**异常**类型：只认传输层故障，不认编程错误。
+#:
+#: 刻意**不用**裸 ``except Exception``：那会把 ``TypeError`` / ``KeyError`` 这类真 bug 也
+#: 当成「上游故障」——打上冷却标记、静默换到下一档，客户端拿到 200，真因只剩一行
+#: ``error=TypeError`` 日志（而且非 ``HTTPException`` 不会进 ``_instrument``，连指标都
+#: 没有）。真 bug 被换档「治好」比直接报错更难排查。
+#:
+#: 这样收窄是安全的：本仓库的通道在各自 ``forward`` 里已把传输异常统一转成
+#: ``HTTPException(502/504/429)``（见 zcode/trae pat 的做法），所以绝大多数失败走上面
+#: 的 ``HTTPException`` 分支；这里兜的是漏网的上游连接层异常。
+_RETRYABLE_EXC = (httpx.HTTPError, OSError)
 
 
 @functools.lru_cache(maxsize=1)
@@ -281,9 +298,11 @@ async def _forward_with_order(
             diagnostic("model_order_failover", model=key, target=target,
                        status=exc.status_code)
             continue
-        except Exception as exc:  # noqa: BLE001 - 传输类异常（httpx/OSError 等）
+        except _RETRYABLE_EXC as exc:  # httpx 传输层 / OSError：上游不可达
             # 注意：asyncio.CancelledError 是 BaseException 子类，不被这里捕获——
             # 客户端断连必须原样向上传播，不能当成可换档失败重试。
+            # 其余 Exception（TypeError/KeyError 等）同样不在这里捕获，原样上抛成 500：
+            # 那是代码 bug，不该被换档掩盖（见 _RETRYABLE_EXC 注释）。
             last_note = f"{type(exc).__name__}"
             cooldown_mod.mark_failed(provider_id, model)
             diagnostic("model_order_failover", model=key, target=target,

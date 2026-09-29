@@ -86,11 +86,15 @@ workers, or explicit provider shutdown lifecycles.
 - `model_order` (settings key) maps a `model_key` to an ordered list of
   `provider/model` candidates, tried top-down by `forward._forward_with_order`.
   **Failover is only legal when an attempt failed before any byte was committed
-  to the client** — an exception, or a non-2xx `JSONResponse`. A
-  `StreamingResponse` is never replayed (double-billing risk; same invariant as
-  `trae/pat/chat.py`). Known blind spot: codebuddy reports upstream stream
-  errors as an *in-band* error chunk, so its stream failures are undetectable
-  and never fail over.
+  to the client** — a retryable `HTTPException`, a transport-level exception
+  (`_RETRYABLE_EXC`: `httpx.HTTPError` / `OSError`), or a non-2xx
+  `JSONResponse`. A `StreamingResponse` is never replayed (double-billing risk;
+  same invariant as `trae/pat/chat.py`). Known blind spot: codebuddy reports
+  upstream stream errors as an *in-band* error chunk, so its stream failures are
+  undetectable and never fail over.
+  Conversely, **programming errors are not failover material**: a `TypeError`
+  escaping a provider is re-raised, not treated as an upstream outage, so a real
+  bug surfaces as a 500 instead of being masked by a working fallback channel.
 - Routing precedence: an explicit `provider/model` prefix in the request is a
   deliberate instruction and returns before `model_order` is consulted, so a
   prefixed request never fails over. Failover applies to bare model names,
