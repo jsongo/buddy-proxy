@@ -632,6 +632,30 @@ def test_model_table_has_no_inline_order_entry(env):
     assert "clearOrderMarks" in ui, "「清冷却」按钮是这张表唯一的顺序相关操作，应保留"
 
 
+def test_order_page_renders_pending_draft_cards(env):
+    """顺序页的渲染源必须**包含**「还没保存过、正在编辑」的模型。
+
+    真机现象：用户「+ 新增模型」选 kimi-k3 完全没反应。`orderAddModelPick` 确实
+    写好了 `ORDER_OPEN` / `ORDER_DRAFT`，但页面只从 `orderedModels()`（= 只收
+    `m["order"]` 存在的、**已配置**的模型）渲染，未曾保存过的模型卡片永远建不
+    出来，看起来就是点了没反应。新增的 `pageRows()` 把草稿里的键并进渲染源。
+    """
+    ui = env.client.get("/ui").text
+    # 页面渲染走 pageRows，而不是只认已配置的 orderedModels
+    start = ui.index("function renderOrderPage()")
+    body = ui[start:ui.index("\n}", start)]
+    assert "pageRows()" in body, "渲染源要用 pageRows（已配置 ∪ 编辑中的草稿）"
+    # pageRows 必须并入 ORDER_DRAFT 的键
+    pstart = ui.index("function pageRows()")
+    pbody = ui[pstart:ui.index("\n}", pstart)]
+    assert "ORDER_DRAFT" in pbody, "pageRows 要把草稿里的键并进来"
+    # 选中即展开（否则用户还得再点一下才知道加上了）
+    astart = ui.index("function orderAddModelPick(")
+    abody = ui[astart:ui.index("\n}", astart)]
+    assert "ORDER_OPEN.add(key)" in abody, "选中的模型应自动展开"
+    assert "renderOrderPage()" in abody, "选完要重绘（否则卡片不出现）"
+
+
 def test_order_save_wont_post_empty_targets_when_dom_desynced(env):
     """保存必须区分「用户真的清空了」和「界面状态不可信」，后者绝不发空 targets。
 
