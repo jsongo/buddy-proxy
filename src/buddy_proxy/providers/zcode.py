@@ -18,12 +18,12 @@ bigmodel-coding-plan 通道同款）：
 
 认证（凭据来源优先级）：
 1. 环境变量 ``ZCODE_API_KEY``
-2. secrets ``zcode_api_key``（~/.ethan/.secrets/zcode_api_key）
+2. 本项目的 key 文件 ``~/.buddy-proxy/zcode_api_key``（``buddy login zcode`` 会打印）
 3. 本机 ZCode CLI 配置 ``~/.zcode/v2/config.json`` 中已启用的
    ``builtin:bigmodel-coding-plan`` / ``builtin:zai`` 等 provider 的 apiKey
    （格式 ``<apiKey>.<secretKey>``，即智谱官网 coding-plan API Key）
 
-安全：API key 只在服务端使用，绝不明文进日志；secrets 文件 chmod 600。
+安全：API key 只在服务端使用，绝不明文进日志；状态目录 0700、文件 0600。
 
 套餐权限（2026-09-19 实测）：模型出现在上游 ``/models`` 列表 ≠ 当前订阅可用。
 ``glm-5.3-flashx`` 已在端点模型表中，但本机订阅调它被拒为
@@ -47,6 +47,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .base import BaseProvider
+from ..core.paths import state_file
 
 log = logging.getLogger(__name__)
 
@@ -144,19 +145,27 @@ def _quota_items(data: dict[str, Any]) -> list[dict[str, Any]]:
 # 凭证解析
 # ---------------------------------------------------------------------------
 
-def _secret_file_path() -> Path:
-    """secrets 约定路径：~/.ethan/.secrets/zcode_api_key。"""
-    return Path.home() / ".ethan" / ".secrets" / "zcode_api_key"
+def secret_file_path() -> Path:
+    """本项目自己的 key 文件：``~/.buddy-proxy/zcode_api_key``。
+
+    与其它状态文件同目录（``core.paths.state_file``），可用
+    ``BUDDY_PROXY_STATE_DIR`` 整体挪走。不读任何外部工具/其它 agent 的
+    secrets 目录——那些文件不归本项目管，混读会让「谁该写这个文件」变得
+    说不清。
+
+    对外公开（``_login_zcode`` 要把它打印给用户看），所以不带下划线。
+    """
+    return state_file("zcode_api_key")
 
 
 def _load_secret_file() -> str:
-    """secrets 约定文件 ~/.ethan/.secrets/zcode_api_key，支持 'name=value' 或裸 value。
+    """读上面的 key 文件，支持 ``name=value`` 或裸 value。
 
-    只取首行、且按行切分：secrets 文件若真有多行，把整块文本当 key 发给
-    上游必然 401（单行文件不受影响）。按行解析天然规避该问题。
+    只取首行、且按行切分：文件若真有多行，把整块文本当 key 发给上游必然
+    401（单行文件不受影响）。按行解析天然规避该问题。
     """
     try:
-        for raw in _secret_file_path().read_text().splitlines():
+        for raw in secret_file_path().read_text().splitlines():
             line = raw.strip()
             if not line:
                 continue
@@ -285,7 +294,7 @@ class ZcodeProvider(BaseProvider):
                     "error": {
                         "message": (
                             "zcode 未配置认证：请设置 ZCODE_API_KEY / "
-                            "~/.ethan/.secrets/zcode_api_key，或在本机 ZCode CLI "
+                            "~/.buddy-proxy/zcode_api_key，或在本机 ZCode CLI "
                             "登录 coding-plan（凭据存于 ~/.zcode/v2/config.json，"
                             "本 provider 会自动读取）"
                         ),

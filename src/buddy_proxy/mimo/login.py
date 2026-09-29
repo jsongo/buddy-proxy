@@ -310,5 +310,14 @@ def login_interactive(
 
     account = poll_login(session, on_tick=_tick)
     path = save_account(account)
+    # 换号后旧的 serviceToken 必须作废：它只对上一个账号有效，而网关可能
+    # 已经把它缓存下来了（见 sso.load_cached_token 的 user_id 校验）。
+    # 这里主动清一次，省得等下次请求 401 才发现用的是别人的票。
+    try:
+        from .sso import invalidate_cache
+
+        invalidate_cache()
+    except Exception:  # noqa: BLE001 - 清缓存失败不该让登录报错
+        pass
     print()
     return account, path

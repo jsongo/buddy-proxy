@@ -34,6 +34,10 @@ PROVIDER_ALIASES: dict[str, str] = {
     "qder": "qoder",
     "qodercn": "qoder",
     "qoder-cn": "qoder",
+    # MiMo 也常被打成 memo（同一个音，`login memo` 照着日常发音敲很自然），
+    # 打错了要报「未知 provider」，不如直接认了这个别名。
+    "memo": "mimo",
+    "mimocode": "mimo",
 }
 
 KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder")
@@ -235,22 +239,48 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     return 1
 
 
+#: 智谱官网地址（取 key / 买套餐）。打印给人看，别写死在正文里。
+ZCODE_CONSOLE_URL = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys"
+ZCODE_PLAN_URL = "https://bigmodel.cn/glm-coding"
+
+
 def _login_zcode(**_kwargs) -> int:
-    """zcode 无交互登录：凭据是 API key，这里检查配置并打印指引。"""
-    from buddy_proxy.providers.zcode import resolve_credentials
+    """zcode 无交互登录：凭据是 API key，这里检查配置并打印指引。
+
+    zcode 没有可自动化的浏览器登录：它要的是智谱官网签发的 coding-plan
+    API key，而签发入口在控制台里需要人工点（本项目的 key 也不算 OAuth
+    凭据，没法用 device flow 换）。所以这个子命令的职责就是**把怎么拿到
+    key 说清楚**——光打印一个文件路径，用户不知道该去哪儿取。
+    """
+    from buddy_proxy.providers.zcode import resolve_credentials, secret_file_path
 
     key, base = resolve_credentials()
     if key:
         print(f"[OK] zcode 凭据已配置: {key[:6]}***{key[-4:]}  base: {base}")
-        print("    无需登录；如需换号，改下面任意一处配置即可：")
-        print("    1. 环境变量 ZCODE_API_KEY")
-        print("    2. ~/.ethan/.secrets/zcode_api_key")
-        print("    3. ~/.zcode/v2/config.json（ZCode CLI 登录态里的 apiKey）")
+        print("     zcode 用 API key 认证，无需登录；换 key 改下面任意一处即可：")
+        print("     1. 环境变量 ZCODE_API_KEY")
+        print(f"     2. 文件 {secret_file_path()}（首行裸 key 或 name=value）")
+        print("     3. 本机 ZCode CLI 登录 coding-plan（读 ~/.zcode/v2/config.json）")
+        print(f"     控制台（换 key）: {ZCODE_CONSOLE_URL}")
         return 0
-    print("[!] zcode 未配置凭据，按以下任意一种方式配置：")
-    print("    1. 环境变量 ZCODE_API_KEY=<智谱 coding-plan API key>")
-    print("    2. 写入文件 ~/.ethan/.secrets/zcode_api_key（首行裸 key 或 name=value）")
-    print("    3. 在本机 ZCode CLI 登录 coding-plan（自动读取 ~/.zcode/v2/config.json）")
+    print("[!] zcode 未配置凭据。它要的是智谱 coding-plan API key，不是账号密码。")
+    print()
+    print(f"    ① 领 key：{ZCODE_CONSOLE_URL}")
+    print("       登录智谱账号 → 新建 API Key → 复制（形如 xxxxxxxx.yyyyyyyy 两段）")
+    print(f"       还没有 coding-plan 套餐的话先开通：{ZCODE_PLAN_URL}")
+    print("    ② 配到本机，任选一种：")
+    print("       a) 环境变量（临时）：export ZCODE_API_KEY=<粘贴 key>")
+    # 用 `>` 不用 `>>`：读取只认第一个非空行，追加会让旧 key 继续生效，
+    # 用户换了 key 却毫无察觉。目录也一并建出来——这条命令不经过
+    # __main__.main()，新机器上 ~/.buddy-proxy 可能还不存在。
+    secret = secret_file_path()
+    print(f"       b) 写文件（长期）: mkdir -p {secret.parent} && "
+          f"echo '<粘贴 key>' > {secret}")
+    print("          然后 chmod 600（key 是明文凭据）")
+    print("          （`>` 是覆盖：重复配置时把旧 key 换掉，别用 `>>` 追加）")
+    print("       c) 已装 ZCode CLI 的话，在 CLI 里登录 coding-plan 也行 "
+          "（读 ~/.zcode/v2/config.json）")
+    print("    ③ 让网关重新读取：buddy restart")
     return 1
 
 

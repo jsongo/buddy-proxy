@@ -44,16 +44,51 @@ def load_settings() -> dict[str, Any]:
         return {}
 
 
+def _backup_settings(path: pathlib.Path, previous: dict[str, Any]) -> None:
+    """覆盖前把**上一版**留一份 ``<name>.bak``，让 UI 写操作可回滚。
+
+    这是护栏而非版本管理：只留最近一份、原地覆盖。**失败语义由调用方兜底**
+    （见 :func:`save_settings`）——本函数负责清理自己写了一半的临时文件后就上抛，
+    让「备份失败」与「保存失败」两件事可以被分别断言。
+    """
+    if not previous:
+        return  # 还没有设置文件（或读不出来）：没有可备份的「上一版」
+    bak = path.with_name(path.name + ".bak")
+    tmp = bak.with_name(f".{bak.name}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(previous, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, bak)
+    except Exception:
+        # 清掉可能写了一半的临时文件，别在目录里留残渣
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def save_settings(update: dict[str, Any]) -> dict[str, Any]:
-    """合并并原子写入设置，避免半写入或同进程更新互相覆盖。"""
+    """合并并原子写入设置，避免半写入或同进程更新互相覆盖。
+
+    写入前会把上一版存一份 ``settings.json.bak``（见 :func:`_backup_settings`）。
+    备份是**尽力而为**：它失败绝不能连累保存本身——管理页一次「改默认模型」因为
+    备份路径写不出就 500，是把护栏变成了新故障点。
+    """
     path = settings_path()
     with _SETTINGS_LOCK:
+        previous = load_settings()
         merged = {
-            **load_settings(),
+            **previous,
             **update,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _backup_settings(path, previous)
+        except Exception:  # noqa: BLE001 - 见 docstring：备份失败不阻断保存
+            pass
         tmp_name = ""
         try:
             with tempfile.NamedTemporaryFile(
@@ -73,6 +108,48 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
                 except OSError:
                     pass
     return merged
+
+
+#: 本项目**认得的**通道 id（含只在特定配置下才注册的 traepat）。
+#:
+#: 与 ``state.providers`` 的区别：那个是「本次启动实际注册了哪些」，会随
+#: ``--zcode`` / ``--mimo`` 之类的开关变化；这里是「这些名字属于本项目的通道
+#: 命名空间」。路由要用它区分两种 ``xxx/model``：
+#:
+#: - ``xxx`` 是通道名但这次没启用 → 该报「通道未启用」，而不是把整个
+#:   ``xxx/model`` 漏给兜底通道（上游只会回一句「模型不存在」）；
+#: - ``xxx`` 压根不是通道名（如 ``openrouter/...``）→ 才轮到兜底逻辑。
+#:
+#: ``workbuddy`` 是 ``codebuddy`` 的旧称，不单列：归一在 ``model_key`` 里做。
+KNOWN_PROVIDER_IDS = frozenset(
+    {"codebuddy", "zcode", "mimo", "qoder", "doubao", "trae", "traepat"}
+)
+
+#: 通道没启用时，告诉用户**怎么启用**。值是要打印给用户看的短句。
+#:
+#: 单独一张表而不是拼 ``--{prefix}`` / ``{PREFIX}_ENABLED=1``：那套命名只对
+#: 一半通道成立。``traepat`` 没有自己的开关——它挂在 ``--trae`` 分支里，由
+#: ``trae.pat.config.pat_enabled()`` 决定（配了 ``TRAE_PAT_BEARER`` 或
+#: ``TRAE_PAT_BEARER_PROFILES`` 才注册），拼出来的 ``--traepat`` 是不存在的
+#: 参数，照着敲只会落到 usage。以后再加通道时，这张表逼着把真实开关写清楚。
+PROVIDER_ENABLE_HINTS: dict[str, str] = {
+    "zcode": "加 --zcode（或设 ZCODE_ENABLED=1）",
+    "mimo": "加 --mimo（或设 MIMO_ENABLED=1）",
+    "qoder": "加 --qoder（或设 QODER_ENABLED=1）",
+    "doubao": "加 --doubao（或设 DOUBAO_ENABLED=1）",
+    "trae": "加 --trae（或设 TRAE_ENABLED=1）",
+    # traepat 没独立开关：先配 TRAE_PAT_BEARER(_PROFILES)，再开 --trae
+    "traepat": "配置 TRAE_PAT_BEARER（或 TRAE_PAT_BEARER_PROFILES）后加 --trae",
+    # codebuddy 是默认通道，进到这里只可能是「认得但没注册」的异常态
+    "codebuddy": "检查启动参数（codebuddy 是默认通道，不应缺失）",
+}
+
+
+def provider_enable_hint(prefix: str) -> str:
+    """``prefix`` 对应的启用方式短句；表里没有就退回通用措辞。"""
+    return PROVIDER_ENABLE_HINTS.get(
+        prefix, f"加 --{prefix}（或设 {prefix.upper()}_ENABLED=1）"
+    )
 
 
 def normalize_default_model(raw: str) -> str:

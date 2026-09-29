@@ -470,3 +470,75 @@ def test_normalize_order_key_bare_defaults_to_codebuddy():
     assert settings_mod.normalize_order_key("zcode/glm-5.3") == "zcode/glm-5.3"
     assert settings_mod.normalize_order_key("workbuddy/glm-5.3") == "codebuddy/glm-5.3"
     assert settings_mod.normalize_order_key("") == ""
+
+
+# --- 5. 「认得的通道名但没启用」必须当场报错 ------------------------------------
+
+
+def test_disabled_known_channel_prefix_fails_loudly(tmp_path, monkeypatch):
+    """``mimo/xxx`` 而 mimo 这次没启用 → 报「通道未启用」，不许漏给兜底通道。
+
+    这是 ``/model`` 那个报错的根因：前缀解析只在通道**已注册**时命中，否则
+    整个 ``mimo/xxx`` 原样往下走，最后落到兜底通道，被上游回一句
+    ``model [mimo/xxx] service info not found``——看起来像模型名写错了，
+    真正的原因（这个通道没开）完全看不见。
+    """
+    a = _Provider("pa", ["m1"])
+    state = _make_state({"pa": a}, tmp_path, default_provider="pa")
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="mimo/mimo-v2.6-pro")
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["error"]["type"] == "provider_disabled"
+    assert "mimo" in detail["error"]["message"]
+    assert "--mimo" in detail["error"]["message"], "要告诉用户怎么开"
+    assert a.calls == [], "不许把整个带前缀的名字漏给兜底通道"
+
+
+def test_disabled_traepat_hint_names_real_switch(tmp_path, monkeypatch):
+    """``traepat`` 没启用时的提示必须指向**真实存在**的开关。
+
+    ``traepat`` 没有自己的 ``--traepat``：它挂在 ``--trae`` 分支里，由
+    ``pat_enabled()``（``TRAE_PAT_BEARER`` / ``_PROFILES`` 有配）决定注册。
+    早期实现按 ``--{prefix}`` / ``{PREFIX}_ENABLED=1`` 拼短语，对 traepat 拼出
+    一个不存在的参数——用户照着敲只会落到 usage。
+    """
+    a = _Provider("pa", ["m1"])
+    state = _make_state({"pa": a}, tmp_path, default_provider="pa")
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="traepat/glm-5.3")
+    assert r.status_code == 400, r.text
+    msg = r.json()["detail"]["error"]["message"]
+    assert "--traepat" not in msg, "这个参数根本不存在，不能推荐"
+    assert "TRAE_PAT_BEARER" in msg, "要指向真正的启用方式"
+    assert "--trae" in msg
+    assert a.calls == []
+
+
+def test_unknown_non_channel_prefix_still_falls_back(tmp_path, monkeypatch):
+    """但 ``openrouter/xxx`` 这类**不是本项目的通道名** → 维持原有兜底行为。
+
+    ``provider/model`` 形态的 id 不只本项目通道在用（用户可能拿它当普通模型名
+    转发给某个上游），拦下来会砸掉既有用法。只有「认得出的通道名」才报错。
+    """
+    a = _Provider("pa", ["m1"])
+    state = _make_state({"pa": a}, tmp_path, default_provider="pa")
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="openrouter/some-model")
+    assert r.status_code == 200, r.text
+    assert len(a.calls) == 1, "非通道前缀照旧走兜底"
+    assert a.calls[0]["model"] == "openrouter/some-model", "模型名原样透传"
+
+
+def test_enabled_channel_prefix_still_routes(tmp_path, monkeypatch):
+    """已启用的通道带前缀调用不受影响（回归护栏）。"""
+    a = _Provider("pa", ["m1"])
+    state = _make_state({"pa": a}, tmp_path)
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="pa/m1")
+    assert r.status_code == 200, r.text
+    assert a.calls[0]["model"] == "m1", "前缀要被剥掉再转发"

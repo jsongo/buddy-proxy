@@ -83,6 +83,9 @@ workers, or explicit provider shutdown lifecycles.
   bypassing it can make UI policy and runtime routing disagree.
 - `core/settings.py` owns local settings path, normalization, and atomic
   persistence. Callers must not open or write the settings JSON directly.
+  Every overwrite keeps the previous version as `settings.json.bak` first, so a
+  UI write is always reversible. Backing up is best-effort and must never make
+  a save fail.
 - `model_order` (settings key) maps a `model_key` to an ordered list of
   `provider/model` candidates, tried top-down by `forward._forward_with_order`.
   **Failover is only legal when an attempt failed before any byte was committed
@@ -99,6 +102,18 @@ workers, or explicit provider shutdown lifecycles.
   deliberate instruction and returns before `model_order` is consulted, so a
   prefixed request never fails over. Failover applies to bare model names,
   where the router resolves the owning provider itself.
+- A prefix naming a channel in `settings.KNOWN_PROVIDER_IDS` that is *not*
+  registered this run is a **400 `provider_disabled`**, not a fallthrough.
+  Letting it fall through sent the whole `qoder/...` string to the fallback
+  channel, which the upstream rejected as `model [...] service info not found`
+  — the client then reported "model not found", hiding the real cause (the
+  channel was never enabled). Prefixes that are *not* channel names
+  (`openrouter/...`) still fall through: `provider/model` is a legal plain
+  model id, and `trae`/`traepat` exceptions aside, the router must not claim it.
+  The error text comes from `settings.PROVIDER_ENABLE_HINTS` rather than being
+  assembled from the prefix — `traepat` has no `--traepat` flag (it rides the
+  `--trae` branch, gated by `TRAE_PAT_BEARER`), so a generated hint would name
+  a flag that does not exist.
 - `core/cooldown.py` owns transient target health: a failed target is skipped
   for a short TTL (escalating on repeat failure). It is deliberately **in-memory
   and not persisted** — a restart is a legitimate reason to re-probe, and user

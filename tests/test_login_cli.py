@@ -1,0 +1,147 @@
+"""``buddy login <provider>`` 的 CLI 入口测试（离线，不访问上游）。
+
+锁住两件容易回退的事：
+
+1. **zcode 的指引要能照着做**。zcode 没有可自动化的浏览器登录（凭据是智谱
+   官网签发的 coding-plan API key，签发入口得人工点），所以这个子命令的全部
+   价值就是「把怎么拿到 key 说清楚」。早期版本只打印一个文件路径——用户根本
+   不知道该去哪儿取 key，等于没说。
+2. **``memo`` 是 mimo 的别名**。``login memo`` 是照着日常发音敲出来的，
+   打错了才报「未知 provider」很别扭。
+
+运行：
+    .venv/bin/python -m pytest tests/test_login_cli.py -v
+"""
+from __future__ import annotations
+
+import pathlib
+
+import pytest
+
+from buddy_proxy.auth import login as auth_login
+from buddy_proxy.providers import zcode
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch, tmp_path):
+    """隔离状态目录与相关环境变量，绝不碰真实的 key 文件。"""
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(tmp_path))
+    for name in ("ZCODE_API_KEY", "MIMO_API_KEY", "MIMO_ACCOUNT_JSON", "MIMO_COOKIE_DB"):
+        monkeypatch.delenv(name, raising=False)
+    # 别真去读用户主目录下的 ZCode CLI 配置（config.json 那条回退链）
+    monkeypatch.setattr(
+        zcode.Path, "home", classmethod(lambda cls: pathlib.Path(tmp_path))
+    )
+
+
+# ---------------------------------------------------------------------------
+# zcode 指引
+# ---------------------------------------------------------------------------
+
+
+def test_zcode_guide_tells_where_to_get_key(capsys):
+    """未配置时：必须给出控制台地址 + 购买入口 + 具体怎么配。"""
+    rc = auth_login._login_zcode()
+    out = capsys.readouterr().out
+
+    assert rc == 1, "没配好应当返回非零，脚本才能感知"
+    assert auth_login.ZCODE_CONSOLE_URL in out, "必须告诉用户去哪领 key"
+    assert auth_login.ZCODE_PLAN_URL in out, "没套餐的话也要知道去哪开通"
+    assert "ZCODE_API_KEY" in out, "要给出环境变量这种最快的方式"
+    assert "buddy restart" in out, "配完得知道要重启才生效"
+
+
+def test_zcode_guide_shows_secret_path_when_configured(capsys, monkeypatch):
+    """已配置时：回显打码 key，并说明换 key 改哪里。"""
+    monkeypatch.setenv("ZCODE_API_KEY", "1234567890abcdef.ABCDEFGHIJKLMNOP")
+    rc = auth_login._login_zcode()
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "1234567890abcdef.ABCDEFGHIJKLMNOP" not in out, "完整 key 绝不能回显"
+    assert "123456***MNOP" in out, "打码形式便于对照是哪把 key"
+    assert auth_login.ZCODE_CONSOLE_URL in out
+
+
+def test_zcode_guide_overwrites_instead_of_appending(capsys):
+    """写文件的指引必须是覆盖（``>``）而不是追加（``>>``）。
+
+    读取侧（``zcode._load_secret_file``）只认**第一个非空行**。用 ``>>`` 追加时
+    旧 key 依然生效——用户换了 key 却毫无察觉，排查起来毫无线索。另外这条命令
+    不经过 ``__main__.main()``，新机器上状态目录可能还不存在，所以指引里要带
+    ``mkdir -p``。
+    """
+    auth_login._login_zcode()
+    out = capsys.readouterr().out
+
+    # 只看真正让人复制的命令行：正文里那句「别用 >> 追加」是有意留的提醒
+    commands = [ln for ln in out.splitlines() if "echo" in ln]
+    assert commands, "指引里应当给出可直接复制的写文件命令"
+    for line in commands:
+        assert ">>" not in line, f"这行是追加写法，旧 key 会继续生效: {line.strip()}"
+    assert "mkdir -p" in out, "目录可能还不存在，得先建出来"
+
+
+def test_zcode_guide_survives_appended_file_documented_case(tmp_path, monkeypatch):
+    """把指引里的命令真跑一遍：落地后 ``resolve_credentials`` 读到的就是新 key。
+
+    防的是「指引看着对、但和解析逻辑对不上」——追加写法的 bug 正是这么漏过去的。
+    """
+    import subprocess
+
+    from buddy_proxy.providers import zcode
+
+    target = tmp_path / "zcode_api_key"
+    # 模拟用户照着指引操作：先建目录再覆盖写
+    subprocess.run(
+        f"mkdir -p {tmp_path} && echo 'NEWKEY_PART1.PART2' > {target}",
+        shell=True, check=True,
+    )
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(tmp_path))
+    assert zcode._load_secret_file() == "NEWKEY_PART1.PART2"
+
+
+def test_every_known_channel_has_enable_hint():
+    """每个认得的通道都要有「怎么开启」的说明，且不能推出不存在的开关。
+
+    ``traepat`` 是这条规矩的由来：它没有 ``--traepat``（挂在 ``--trae`` 分支里
+    由 ``TRAE_PAT_BEARER`` 决定），而路由报错要照着这张表给用户指路。
+    """
+    from buddy_proxy.core import settings as core_settings
+
+    for pid in core_settings.KNOWN_PROVIDER_IDS:
+        hint = core_settings.provider_enable_hint(pid)
+        assert hint, f"{pid} 没有启用说明"
+        if pid == "traepat":
+            assert "--traepat" not in hint, "这个参数不存在"
+            assert "TRAE_PAT_BEARER" in hint
+
+
+# ---------------------------------------------------------------------------
+# 别名
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "typed,expected",
+    [
+        ("memo", "mimo"),
+        ("mimocode", "mimo"),
+        ("MIMO", "mimo"),
+        ("MEMO", "mimo"),  # 大小写归一后照样命中 memo 别名
+        ("workbuddy", "codebuddy"),
+        ("cb", "codebuddy"),
+        ("quoder", "qoder"),
+    ],
+)
+def test_aliases_resolve(typed, expected):
+    """别名归一：大小写不敏感，敲错音近的名字也有救。"""
+    got = auth_login.PROVIDER_ALIASES.get(typed.strip().lower(), typed.strip().lower())
+    assert got == expected
+
+
+def test_every_alias_target_is_dispatchable():
+    """别名只能指向真实存在的 provider，否则等于把用户引到 error 分支。"""
+    for alias, target in auth_login.PROVIDER_ALIASES.items():
+        assert target in auth_login._DISPATCH, f"别名 {alias} 指向了不存在的 {target}"
+        assert target in auth_login.KNOWN_PROVIDERS

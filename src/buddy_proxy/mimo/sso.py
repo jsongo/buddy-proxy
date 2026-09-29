@@ -178,13 +178,25 @@ def _cache_path() -> Path:
     return state_file("mimo_sso_token.json")
 
 
-def load_cached_token(sid: str = SSO_SID) -> ServiceToken | None:
+def load_cached_token(
+    sid: str = SSO_SID, user_id: str | None = None
+) -> ServiceToken | None:
+    """读缓存的 serviceToken；``user_id`` 能给就给。
+
+    **必须带上 user_id**：换票结果只对签发它的那个账号有效，而缓存文件是
+    全局一份。不校验的话，``buddy login mimo`` 换号后旧 token 依然命中，
+    请求会带着 A 的票去访问 B 的账号（轻则额度统计错乱，重则 401 后
+    重换票才发现——而那时已经白跑了一轮）。缺 user_id 的老缓存直接判失效，
+    宁可多换一次票。
+    """
     path = _cache_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict) or data.get("sid") != sid:
+        return None
+    if user_id is not None and str(data.get("user_id") or "") != str(user_id):
         return None
     token = data.get("token") or ""
     if not token:
@@ -200,7 +212,8 @@ def load_cached_token(sid: str = SSO_SID) -> ServiceToken | None:
     )
 
 
-def save_cached_token(st: ServiceToken) -> None:
+def save_cached_token(st: ServiceToken, user_id: str = "") -> None:
+    """写缓存。``user_id`` 一并记下，供 ``load_cached_token`` 校验归属。"""
     path = _cache_path()
     try:
         path.write_text(
@@ -208,6 +221,7 @@ def save_cached_token(st: ServiceToken) -> None:
                 {
                     "sid": st.sid,
                     "token": st.token,
+                    "user_id": str(user_id or ""),
                     "extra_cookies": st.extra_cookies,
                     "obtained_at": st.obtained_at or time.time(),
                 },
@@ -334,7 +348,7 @@ async def fetch_service_token(
         st = ServiceToken(
             sid=sid, token=token, extra_cookies=extra, obtained_at=time.time()
         )
-        save_cached_token(st)
+        save_cached_token(st, user_id=account.user_id)
         return st
     finally:
         if owns:
@@ -346,12 +360,13 @@ async def ensure_service_token(
     client: httpx.AsyncClient | None = None,
     force: bool = False,
 ) -> ServiceToken:
-    """取 serviceToken：优先本地缓存，miss/过期则现换。"""
+    """取 serviceToken：优先本地缓存，miss/过期/**换号**则现换。"""
+    account = load_account_cookies()
     if not force:
-        cached = load_cached_token(sid)
+        # 带上当前账号校验：缓存只对签发它的账号有效，换号后必须重换票
+        cached = load_cached_token(sid, user_id=account.user_id if account else None)
         if cached:
             return cached
-    account = load_account_cookies()
     if account is None:
         raise SsoError(
             "未找到 MiMo 桌面登录态（passToken/userId），请先在 MiMo Desktop 登录小米账号"

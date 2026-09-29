@@ -390,6 +390,22 @@ async def forward_chat(
             diagnostic("provider_route", provider="codebuddy", model=real_model,
                        protocol=protocol, via="prefix")
             return await _dispatch_once(state, "codebuddy", real_model, body, protocol, original)
+        elif prefix in settings_mod.KNOWN_PROVIDER_IDS:
+            # 认得出是通道名、但该通道这次没启用（启动没加 --mimo 之类）。
+            # 必须在这里报错——否则整个 name 会原样漏到兜底通道，被上游
+            # 拒成 11102「service info not found」，看起来像模型名拼错了，
+            # 真因（通道没开）完全看不见。
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "message": f"通道 {prefix} 未启用（当前请求带 {prefix}/ 前缀）。"
+                                   f"请在启动时{settings_mod.provider_enable_hint(prefix)}"
+                                   f"，然后重启网关。",
+                        "type": "provider_disabled",
+                    }
+                },
+            )
 
     # 2) 候选顺序：为该模型配了 model_order 时按序尝试（未配则整段跳过，行为与历史一致）
     if provider is None:

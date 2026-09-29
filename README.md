@@ -224,7 +224,11 @@ Zhipu **GLM Coding Plan** via its Anthropic-compatible endpoint, passed through 
 uv run python -m buddy_proxy --desensitize --zcode
 ```
 
-Credentials come from `ZCODE_API_KEY`, the project's secrets, or `~/.zcode/v2/config.json`. `ZCODE_OPENAI_BASE` overrides the base URL. Models are listed by `/v1/models` and appear under the `zcode/` prefix (e.g. `zcode/glm-5.3`).
+Credentials come from `ZCODE_API_KEY`, `~/.buddy-proxy/zcode_api_key` (override the directory with `BUDDY_PROXY_STATE_DIR`), or `~/.zcode/v2/config.json`. `ZCODE_OPENAI_BASE` overrides the base URL. Models are listed by `/v1/models` and appear under the `zcode/` prefix (e.g. `zcode/glm-5.3`).
+
+There is no browser login to automate: the credential is an API key issued in the Zhipu console, and minting one is a manual click. `buddy login zcode` therefore just reports the current state and prints how to get a key — the console URL (<https://bigmodel.cn/usercenter/proj-mgmt/apikeys>), the plan purchase page (<https://bigmodel.cn/glm-coding>), and the three ways to configure it. Already have the ZCode CLI logged into coding-plan? That path works too; the key is read from its config.
+
+When writing the key file, use `>` (overwrite) rather than `>>` (append): only the first non-empty line is read, so appending leaves the old key in effect and changing keys silently does nothing. Run `mkdir -p ~/.buddy-proxy` first if the directory does not exist yet.
 
 ## MiMo provider (optional)
 
