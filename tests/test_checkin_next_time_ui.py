@@ -93,7 +93,12 @@ console.log(JSON.stringify({
 
 
 def test_inferred_source_is_marked_but_upstream_is_not():
-    """推断值必须加「≈」——那是我们从打卡记录反推的，不是上游契约。"""
+    """推断值必须有可辨识的标记——那是从打卡记录反推的，不是上游契约。
+
+    标记从「贴在末尾的 ≈」换成了 ``.inferred`` 类（虚线框 + 斜体）：贴尾巴上
+    读着像错字，而且说不清「哪里不确定」。断言仍要盯住「用户能不能看出来」，
+    所以这里查类名而不是某个具体字形。
+    """
     out = _run_js("""
 const now = Math.floor(Date.now() / 1000);
 console.log(JSON.stringify({
@@ -102,8 +107,8 @@ console.log(JSON.stringify({
 }));
 """)
     data = json.loads(out.strip().splitlines()[-1])
-    assert "≈" in data["inferred"], "推断值必须标出来"
-    assert "≈" not in data["upstream"], "上游给的不该标推测"
+    assert "br-next inferred" in data["inferred"], "推断值必须标出来"
+    assert "inferred" not in data["upstream"], "上游给的不该标推测"
     assert "本地零点" in data["inferred"], "推断值的 tooltip 要说明依据"
 
 
@@ -227,5 +232,88 @@ console.log(JSON.stringify({tsAfter: ELS[0].dataset.nextTs, cd: cd.textContent,
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["tsAfter"] == data["orig"], "不该改写 data-next-ts"
-    assert data["cd"].startswith(" · "), f"倒计时前缀不对: {data['cd']}"
+    # 倒计时文案里不再手写 ' · ' 前缀（分隔交给 CSS 的 gap），只写内容本身
+    assert data["cd"].endswith("后") or data["cd"] == "即将刷新", f"倒计时文案不对: {data['cd']}"
     assert data["clock"], "时钟文案要被刷新"
+
+
+# --- 布局（静态断言，无需浏览器）--------------------------------------------
+
+
+def test_narrow_layout_keeps_button_off_the_meta_row():
+    """窄卡片的容器查询里，按钮与状态必须**错开行**，否则会重叠。
+
+    实测过的 bug：曾把按钮写成 ``grid-area: 1 / 2 / 3 / 3``（跨两行居中），
+    而 ``.br-meta`` 是 ``2 / 1 / 2 / -1`` 横跨整行——两者在第 2 行右半区相交，
+    「22 小时 18 分后」被压在按钮底下（用户截图报的重叠就是这个）。
+    grid 不做重叠检测，重叠了也不报错，所以只能用静态断言盯住行号。
+    """
+    text = INDEX.read_text(encoding="utf-8")
+    block = re.search(r"@container \(max-width: 640px\)\s*\{(.*?)\n  \}", text, re.S)
+    assert block, "找不到窄卡片那段容器查询（改过选择器？）"
+    # 必须剥掉注释再匹配：那段块的注释里为了说明来龙去脉，恰好写了
+    # `.br-meta{grid-column:1/-1}` 这种**反例**写法，不剥注释就会先命中它，
+    # 断言于是去检查一句注释——真实声明反而没被看见。
+    css = re.sub(r"/\*.*?\*/", "", block.group(1), flags=re.S)
+
+    act = re.search(r"\.br-act\s*\{([^}]*)\}", css)
+    meta = re.search(r"\.br-meta\s*\{([^}]*)\}", css)
+    assert act and meta, "容器查询里应同时定位 .br-act 与 .br-meta"
+
+    def row_span(decl: str) -> tuple[int, int]:
+        """把 ``grid-area`` 解析成行区间 ``[start, end)``。
+
+        ``grid-area`` 的四个值是 ``行起 / 列起 / 行止 / 列止``，所以行止是
+        第 3 个值，不是第 2 个。
+
+        ``1 / 2``（只给行起和列起）是合法且在本例里正常的写法——按钮本来只要
+        占一行，行止省略即跨一行。所以这里默认按跨一行处理，只把**看不出行
+        跨度**的写法判失败：没写 ``grid-area``、行止是 ``-1`` 这类负值。
+
+        注意 ``1 / 2`` 与 ``1 / 2 / 2 / 3`` 在本例**同义**（都占一行），别以为
+        省略行止和明写行止会被区别对待。反过来说：``.br-meta`` 那种要**横跨
+        整行**的规则必须明写行止（``2 / 1 / 2 / -1``），照「省略即跨一行」的
+        直觉省掉它就会踩空。
+        """
+        m = re.search(r"grid-area:\s*([^;}]+)", decl)
+        assert m, f"这段规则里没写 grid-area，行跨度无从判断（容易又重叠）: {decl.strip()!r}"
+        parts = [p.strip() for p in m.group(1).split("/")]
+        start = int(parts[0])                    # 行起
+        end = start + 1                          # 没写行止 = 跨一行（合法）
+        if len(parts) >= 3:
+            tail = parts[2]                      # 行止（第 3 个值）
+            if tail.startswith("span"):
+                end = start + int(re.findall(r"\d+", tail)[0])
+            elif tail.startswith("-"):
+                raise AssertionError(
+                    f"行止写成负值（-1 = 最后一行）没法比大小，"
+                    f"请改成明确行号: grid-area: {m.group(1)!r}"
+                )
+            else:
+                end = int(tail)
+        if end == start:
+            # 行起 == 行止（如 ``2 / 1 / 2 / -1``）：浏览器**不是**当成零高，
+            # 而是照第 start 行放一行。实测过，别按直觉改：
+            # getComputedStyle 仍是 row-start:2/row-end:2，但和显示写 3 的
+            # 对照组渲染位置完全一致（都在 top 21，第 1 行 17px + 4px gap 之后）。
+            end = start + 1
+        assert end > start, f"解析不出行区间: grid-area: {m.group(1)!r}"
+        return start, end
+
+    act_rows, meta_rows = row_span(act.group(1)), row_span(meta.group(1))
+    overlap = act_rows[0] < meta_rows[1] and meta_rows[0] < act_rows[1]
+    assert not overlap, (
+        f"按钮行 {act_rows} 与状态行 {meta_rows} 相交 → 窄屏下会重叠"
+    )
+
+
+def test_rows_card_declares_a_container():
+    """``.rows-card`` 必须声明 container-type，否则那条 @container 永不生效。
+
+    （不声明的话窄栏仍走三列布局，按钮又会被挤走——即最初那个 bug 复发。）
+    """
+    text = INDEX.read_text(encoding="utf-8")
+    assert re.search(r"\.rows-card\s*\{[^}]*container-type:\s*inline-size", text), \
+        ".rows-card 没声明 container-type: inline-size，容器查询不会生效"
+    # 卡片上真的挂了这个类，否则声明了也没用
+    assert 'class="chart-card rows-card"' in text, "打卡行卡片没挂 .rows-card"
