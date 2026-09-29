@@ -479,6 +479,90 @@ def test_model_order_options_targets_are_accepted_by_setter(env):
     assert r.json()["targets"] == [t["provider"] + "/" + t["model"] for t in targets]
 
 
+class FakeAliasProvider(FakeProvider):
+    """模拟 qoder：**对外发布的 id** 与 ``resolve_model`` 的转发期映射不是一回事。
+
+    真实例：目录发布 ``glm-5.3``，而 ``resolve_model("glm-5.3") -> "gmodel"``（上游内部
+    key）。保存候选顺序时必须按发布名校验，否则「选择器/``/v1/models`` 都确认存在」的
+    目标会被 400 拒掉。
+    """
+
+    id = "fakealias"
+    name = "Fake Alias Provider"
+
+    def models(self):
+        return [{"id": "fakealias/glm-5.3", "description": "GLM 5.3"}]
+
+    def resolve_model(self, model):
+        return "gmodel" if model == "glm-5.3" else model
+
+
+@pytest.fixture()
+def alias_env(tmp_path, monkeypatch):
+    """带「发布名 ≠ 转发期 key」通道的假 state（复现 qoder 的 400）。"""
+    alias = FakeAliasProvider()
+    state = _make_state({"fakealias": alias}, tmp_path)
+    monkeypatch.setattr(st, "proxy_state", state)
+    return SimpleNamespace(state=state, alias=alias, client=TestClient(m.app))
+
+
+def test_model_order_accepts_published_name_not_resolve_model_output(alias_env):
+    """回归：候选目标按**对外发布名**校验，而不是通道 ``resolve_model`` 的返回值。
+
+    真机现象（PR #46 合并后实测）：``POST /ui/api/model-order`` 带
+    ``{"provider": "qoder", "model": "glm-5.3"}`` 返回 400「模型 gmodel 不在 qoder
+    通道的模型列表中」——``_normalize_model_ref`` 先按转发期映射把名字换成上游内部
+    key，再去比对按发布名登记的目录，必然失败。选择器给出的、``/v1/models`` 也确认
+    存在的目标必须能存进去。
+    """
+    r = alias_env.client.post(
+        "/ui/api/model-order",
+        json={"provider": "fakealias", "model": "glm-5.3",
+              "targets": [{"provider": "fakealias", "model": "glm-5.3"}]})
+    assert r.status_code == 200, r.text
+    # 存的是发布名（转发侧会自己做同样的归一），不是 gmodel
+    assert r.json()["model"] == "fakealias/glm-5.3"
+    assert r.json()["targets"] == ["fakealias/glm-5.3"]
+    assert alias_env.state.model_order["fakealias/glm-5.3"] == ["fakealias/glm-5.3"]
+
+    # 键也要能与 /ui/api/models 暴露的键对上（否则前端徽标永远不显示）
+    models = alias_env.client.get("/ui/api/models").json()["groups"]
+    ids = {m["id"] for g in models if g["id"] == "fakealias" for m in g["models"]}
+    assert "fakealias/glm-5.3" in ids
+    # 清标记端点同一口径：能查到刚存的键
+    r = alias_env.client.post("/ui/api/model-order/mark-clear",
+                              json={"provider": "fakealias", "model": "glm-5.3"})
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "fakealias/glm-5.3"
+
+
+def test_mark_clear_does_not_validate_against_catalog(alias_env):
+    """清冷却是纯缓存操作，目录里没有这个名字也不该 400。
+
+    真机场景：qoder 的标记可能落在上游内部 key 上（``resolve_model`` 的产物），
+    而``_canonical_order_target`` 只认对外发布名。若这里跟着 400，用户点「清冷却」
+    会看到「模型不在通道的模型列表中」——像是保存失败，其实什么都没坏。
+    """
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    try:
+        # fakealias 目录里只有 glm-5.3，没有 gmodel（它是 resolve_model 的产物）
+        cooldown_mod.mark_failed("fakealias", "gmodel")
+        r = alias_env.client.post("/ui/api/model-order/mark-clear",
+                                  json={"provider": "fakealias", "model": "gmodel"})
+        assert r.status_code == 200, r.text
+        assert r.json()["marks_cleared"] == 1
+        assert cooldown_mod.snapshot() == {}
+        # 未知通道同理：清不到就返回 0，不报错
+        r = alias_env.client.post("/ui/api/model-order/mark-clear",
+                                  json={"provider": "ghost", "model": "m"})
+        assert r.status_code == 200
+        assert r.json()["marks_cleared"] == 0
+    finally:
+        cooldown_mod._reset_for_tests()
+
+
 def test_order_modal_provider_list_not_from_MODELS(env):
     """顺序弹窗的通道下拉必须来自选项接口，不能依赖 MODELS。
 
