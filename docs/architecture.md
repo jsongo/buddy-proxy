@@ -13,7 +13,7 @@ src/buddy_proxy/
   __main__.py            # CLI entry + repo-root resolution (parents[2])
   trae_provider.py       # published trae-cli entrypoint + trae façade
   core/                  # state, settings, paths, logging_setup, metrics,
-                         #   credit_estimate, desensitize
+                         #   credit_estimate, desensitize, checkin
   protocols/             # anthropic_adapter, responses_adapter,
                          #   responses_projection, dsml_parser
   web/                   # routes, ui, model_list + models_config.json + static/
@@ -123,6 +123,44 @@ workers, or explicit provider shutdown lifecycles.
   `MODELS` is only populated once the models tab has loaded, so the editor must
   not depend on it). Targets are picked from that list but remain free-text,
   because an upstream may accept an id its catalog does not advertise.
+
+## Check-in rotation
+
+Check-in ("打卡") is per-provider: a provider opts in with
+`supports_checkin = True` and implements `checkin_status` / `checkin_claim` /
+`quota`. `benefits.BenefitsManager` aggregates them for the admin UI and runs
+the auto-claim loop. Two invariants matter because getting them wrong is
+silent:
+
+- **A provider's rotation period is not necessarily a calendar day.** Qoder's
+  campaign window is `10:00 → 09:59` next day (verified 2026-09), while
+  CodeBuddy / Trae rotate at local midnight. Local history
+  (`logs/checkin.jsonl`) dedupes by *calendar day*, so an early-morning poll
+  can record the previous Qoder round as "today's claim" and make the rest of
+  the day look done. **Anything the upstream reports as claimable therefore
+  wins over the local record** (`benefits.claimable_now`) — both for the UI's
+  `done_today` and for the auto-claim loop. A provider that contradicts itself
+  (`checked_in` *and* `claimable`) is treated as already claimed, so a
+  malformed reply costs at most a skipped round rather than a claim request
+  per poll.
+- **The timestamp source must be reported, not assumed.** `core/checkin.py`
+  computes `next_ts` (the moment the current state flips) plus
+  `next_ts_source`. Only Qoder's upstream actually returns a window
+  (`startAt`/`endAt`, so `upstream`); CodeBuddy returns only the whole campaign
+  season and Trae no time fields at all, so midnight is *inferred* from the
+  real claim timestamps and must be labelled `inferred` — the UI shows "≈".
+  When `next_ts` cannot be computed (season over, campaign inactive), the field
+  is omitted rather than filled with a stale timestamp.
+- **A cached status snapshot expires at its own rotation, not just its TTL.**
+  The UI counts down to `next_ts`, so the refresh right after that moment must
+  actually show the new state — but the 300 s snapshot cache would otherwise
+  serve the pre-rotation state, leaving "已签到" and a disabled button for up to
+  five more minutes (long enough for Qoder to lose a whole round, since its
+  window expires on miss). `benefits._state_flipped` therefore treats a *past*
+  `next_ts` as an earlier expiry, which is free: the cached entry already
+  carries the moment it stops being true. Bounded by `FLIP_GRACE_S` (1 h) so an
+  upstream that keeps returning a long-past timestamp cannot render the cache
+  permanently useless and hammer the upstream on every poll.
 
 ## Logging and privacy
 

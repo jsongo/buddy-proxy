@@ -12,6 +12,12 @@ from typing import Any
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.providers.base import BaseProvider
+from buddy_proxy.core.checkin import (
+    SOURCE_INFERRED,
+    SOURCE_UPSTREAM,
+    daily_reset_within_season,
+    parse_upstream_datetime,
+)
 from buddy_proxy.core.state import diagnostic
 
 from .observability import body_summary
@@ -118,7 +124,7 @@ class CodeBuddyProvider(BaseProvider):
         data = payload.get("data") or {}
         active = bool(data.get("active"))
         checked_in = bool(data.get("today_checked_in"))
-        return {
+        status: dict[str, Any] = {
             "checked_in": checked_in,
             "claimable": active and not checked_in,
             "inactive": not active,
@@ -128,6 +134,24 @@ class CodeBuddyProvider(BaseProvider):
             "activity_name": data.get("activity_name") or "",
             "message": payload.get("msg", ""),
         }
+        # 上游只给**整个档期**（``start_time``/``end_time``，实测
+        # ``2026-09-30 00:00:00`` ~ ``2026-10-15 23:59:59``），没有每日轮换
+        # 字段。轮换时刻按 logs/checkin.jsonl 反推的本地零点算，并受档期约束
+        # （档期最后一天之后就没有「下次」了）。因为是推断而非上游契约，
+        # source 标 inferred，界面会注明。
+        if active:
+            next_ts = daily_reset_within_season(data.get("end_time"))
+            if next_ts is not None:
+                status["next_ts"] = next_ts
+                status["next_ts_source"] = SOURCE_INFERRED
+        else:
+            # 档期未开：「下次」就是开打时刻，这个是上游给的、不用推断。
+            # 档期已过时 start_time 在过去，自然算不出来（不显示，见 base 契约）。
+            opens = parse_upstream_datetime(data.get("start_time"))
+            if opens is not None and opens > time.time():
+                status["next_ts"] = opens
+                status["next_ts_source"] = SOURCE_UPSTREAM
+        return status
 
     def checkin_claim(self) -> dict[str, Any] | None:
         state = get_state()

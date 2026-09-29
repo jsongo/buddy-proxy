@@ -28,6 +28,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from buddy_proxy.core.checkin import SOURCE_UPSTREAM, next_from_window
 from buddy_proxy.providers.base import BaseProvider
 
 from .campaigns import CLAIM_ACTION, CampaignClient
@@ -247,6 +248,20 @@ class QoderProvider(BaseProvider):
                     "ends_at": today.end_at or None,
                 }
             )
+            # 「下次」= 当前状态翻转的时刻，两种状态翻转点不同：
+            # - 已领取：下一轮开始。窗口实测是 ``10:00:00 → 次日 09:59:00``，
+            #   故 ``endAt + 60`` 正是下一轮的 10:00（上游不给未来那条，只能推）。
+            # - 还没领：本轮**截止**。此刻用户该去点「立即打卡」而不是等，显示
+            #   截止时间才有意义（错过就没了）；显示下一轮开始反而误导。
+            if claimable:
+                if today.end_at > 0:
+                    status["next_ts"] = int(today.end_at)
+                    status["next_ts_source"] = SOURCE_UPSTREAM
+            else:
+                window_next = next_from_window(today.start_at, today.end_at)
+                if window_next is not None:
+                    status["next_ts"] = window_next
+                    status["next_ts_source"] = SOURCE_UPSTREAM
         if claimable:
             status["message"] = f"今日可领 {claimable[0].amount or ''} Credits".strip()
         elif claimed:
