@@ -1087,6 +1087,28 @@ def test_quota_skips_unavailable_packages():
     assert sum(i["total"] for i in out["items"]) == 100.0
 
 
+def test_pkg_active_checks_status_and_available():
+    """``status`` 与 ``available`` 双信号判活：任一说不活跃就跳过。
+
+    失效时上游翻哪个字段没有真样本（活跃包实测同时带 ``available: true``
+    和 ``status: QUOTA_DETAIL_STATUS_ACTIVE``），只信一个可能把过期包算进
+    总额度。未知 ``status`` 放行——宁可多显示，不能误杀活跃包。
+    """
+    from buddy_proxy.qoder.provider import _pkg_active
+
+    assert _pkg_active({"available": True, "status": "QUOTA_DETAIL_STATUS_ACTIVE"})
+    # available 翻 false -> 跳过
+    assert not _pkg_active({"available": False, "status": "QUOTA_DETAIL_STATUS_ACTIVE"})
+    # 只有 status 说不活跃（available 缺失/仍为 true）-> 也跳过
+    assert not _pkg_active({"available": True, "status": "QUOTA_DETAIL_STATUS_EXPIRED"})
+    assert not _pkg_active({"status": "QUOTA_DETAIL_STATUS_INVALID"})
+    assert not _pkg_active({"status": "QUOTA_DETAIL_STATUS_INACTIVE"})
+    # 未知枚举放行；status 缺失也放行（老版本/不同区域可能没有该字段）
+    assert _pkg_active({"available": True, "status": "QUOTA_DETAIL_STATUS_WHATEVER_NEW"})
+    assert _pkg_active({"available": True})
+    assert _pkg_active({})
+
+
 def test_pkg_label_fallback_chain():
     """专属包标题：zh-CN → en-US → value → name → 通用名，逐级回退。"""
     from buddy_proxy.qoder.provider import _pkg_label

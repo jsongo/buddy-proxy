@@ -416,7 +416,7 @@ class QoderProvider(BaseProvider):
         for pkg in data.get("dedicatedResourcePackages") or []:
             if not isinstance(pkg, dict):
                 continue
-            if not pkg.get("available", True):
+            if not _pkg_active(pkg):
                 continue  # 已失效/过期的包不占额度，不展示
             items.append(_item(
                 pkg, _pkg_label(pkg), reset_ts=_reset_ts(pkg),
@@ -964,6 +964,31 @@ def _last_user_text(messages: list[Any]) -> str:
             )
         return ""
     return ""
+
+
+#: 专属资源包 ``status`` 枚举里明确表示「不占额度」的片段。活跃态实测是
+#: ``QUOTA_DETAIL_STATUS_ACTIVE``，失效态没有真样本（手上只有一个活跃包，
+#: 过期/作废长什么样抓不到），所以按「含这些词就算失效」匹配。
+_PKG_INACTIVE_HINTS = (
+    "EXPIRED", "INVALID", "INACTIVE", "DISABLED", "USED_UP", "DEPLETED",
+)
+
+
+def _pkg_active(pkg: dict[str, Any]) -> bool:
+    """专属资源包是否还占额度。
+
+    ``available``（布尔）和 ``status``（``QUOTA_DETAIL_STATUS_*`` 枚举）两个
+    信号一起看——失效时上游到底翻哪个字段，没有真样本能证。只信
+    ``available`` 的话，万一它只改 ``status``，过期包就会被算进总额度，
+    从「少显示」翻车成「多显示」。
+
+    ``status`` 只排除明确不活跃的枚举，**未知值放行**：上游加新状态时宁可
+    多显示一行，也不要把活跃包误杀（漏显额度正是这条链路修过的老 bug）。
+    """
+    if not pkg.get("available", True):
+        return False
+    status = str(pkg.get("status") or "").upper()
+    return not any(hint in status for hint in _PKG_INACTIVE_HINTS)
 
 
 def _pkg_label(pkg: dict[str, Any]) -> str:
