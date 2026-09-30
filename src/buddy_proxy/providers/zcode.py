@@ -197,10 +197,12 @@ def _fmt_num(value: float) -> str:
 def _quota_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     """把 /api/monitor/usage/quota/limit 的 limits 归一化为管理页额度条目。
 
-    按窗口**由小到大**排：小的（5 小时）在前、大的（月）在后，这样用户先
-    看到最容易撞到的那一档。**不能**按 ``nextResetTime`` 排——5 小时档上游
-    不给这个字段（值恒为 0），按时间排会把它甩到末位，正好和「先看小窗口」
-    的意图相反，还会让标题行去显示月档而不是更紧迫的 5 小时档。
+    **顺序即语义**：ZCode 没有 ``sum_items``（两档是各自独立的额度，不能相加），
+    所以管理页标题行取 ``items[0]``。这里按窗口**由小到大**排——小的（5 小时）
+    在前、大的（月）在后，用户与标题行先看到最容易撞到的那一档。
+
+    **不要**改回按 ``nextResetTime`` 排：5 小时档上游不给这个字段（值恒为 0），
+    按时间排会把它甩到末位，标题行转而去显示月档——一个不常撞到的数。
 
     CREDIT_LIMIT：usage=窗口总额度，currentValue=已用；TIME_LIMIT 单位为次数。
     """
