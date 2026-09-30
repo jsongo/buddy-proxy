@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import inspect
 import pathlib
 import re
 import shutil
@@ -35,10 +36,23 @@ def _git(*args: str, cwd: pathlib.Path) -> None:
 
 
 def _make_repo(root: pathlib.Path) -> pathlib.Path:
-    """建一个「上游裸仓库 + 工作克隆」，克隆里放好 buddy 脚本。"""
+    """建一个「上游裸仓库 + 工作克隆」，克隆里放好 buddy 脚本。
+
+    ``init.defaultBranch`` 必须**显式钉成 main**，不能靠环境默认值：CI 上
+    默认是 ``master``，于是裸仓库的 HEAD 指向 ``refs/heads/master``，而这里
+    第一个提交推的是 ``main``——裸仓库就有了「HEAD 指向一个不存在的分支」
+    这种状态。之后的 ``side`` 克隆 checkout 不出任何东西（工作区全空、
+    HEAD 悬空），在那里提交会造出一个**无关的根提交**，再推给 ``main``
+    自然被拒（non-fast-forward）。本机默认恰好是 main 所以一直没暴露——
+    CI 上才炸（``test_fast_forwards_when_clean`` / ``_diverged_branch``）。
+
+    用 ``-c init.defaultBranch=main`` 传给 ``git init`` 而不是设全局配置：
+    只影响这条命令，不污染跑测试的机器。
+    """
     upstream = root / "upstream.git"
     work = root / "work"
-    _git("init", "--quiet", "--bare", str(upstream), cwd=root)
+    _git("-c", "init.defaultBranch=main", "init", "--quiet", "--bare", str(upstream),
+         cwd=root)
     _git("clone", "--quiet", str(upstream), str(work), cwd=root)
     _git("config", "user.email", "t@example.com", cwd=work)
     _git("config", "user.name", "t", cwd=work)
@@ -167,6 +181,28 @@ def test_no_bare_variable_before_a_multibyte_char() -> None:
         for m in re.finditer(r"\$([A-Za-z_][A-Za-z0-9_]*)([^\s\x00-\x7F])", line):
             offenders.append(f"{i}: ${m.group(1)}{m.group(2)}  <- {line.strip()}")
     assert not offenders, "变量名后紧跟多字节字符，需改用 ${var}：\n" + "\n".join(offenders)
+
+
+def test_repo_builder_pins_the_branch_name() -> None:
+    """建测试仓库时必须显式钉 ``init.defaultBranch=main``。
+
+    这些测试靠**真实 git** 跑，所以不能被「跑测试的机器怎么配的」左右。
+    漏掉这个钉法的后果（CI 上实测）：默认分支为 ``master`` 时，裸仓库 HEAD
+    指向不存在的 ``refs/heads/master``，于是 ``side`` 克隆 checkout 不出东西、
+    在那里提交会造出**无关的根提交**，推给 ``main`` 被拒（non-fast-forward）
+    —— ``test_fast_forwards_when_clean`` 与 ``test_diverged_branch_fails_loudly``
+    在 CI 上红，而本机（默认 main）全绿。这种「只在别人机器上失败」最难查。
+    """
+    # 必须扫 *_make_repo 自己的源码*，不能读整个测试文件：断言里的字面量会
+    # 自己命中自己，变异成别的名字也照样通过（第一版就是这么写的，靠变异
+    # 测试才发现恒真）。inspect 拿到的是真函数体，不含这条断言。
+    src = inspect.getsource(_make_repo)
+    assert "init.defaultBranch=main" in src, (
+        "建仓库时没钉 init.defaultBranch；CI（默认 master）上会挂"
+    )
+    assert re.search(r'"-c",\s*"init\.defaultBranch=main"', src), (
+        "应该用 git -c init.defaultBranch=main init 的形式传给 init 本身"
+    )
 
 
 def test_no_duplicate_function_definitions() -> None:
