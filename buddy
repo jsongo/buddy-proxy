@@ -224,7 +224,21 @@ cmd_update() {
     if tree_dirty; then
         log "工作树有未提交改动，已中止更新（避免覆盖它们）："
         git -C "$BUDDY_HOME" status --short | sed 's/^/  /'
-        log "处理完再试：git -C \"$BUDDY_HOME\" stash  或提交后重跑 buddy update"
+        # 按类型给对应的处理办法。只写 `git stash` 是不够的：脏判定用的是
+        # `status --porcelain`（含未跟踪文件），而 `git stash` 默认不收未跟踪
+        # 文件——用户照着做完会得到 "No local changes to save"，再跑 update
+        # 被同一理由拦住，看起来像卡死。所以未跟踪的另给 -u 或忽略两种出路。
+        # 只要有未跟踪文件（`??`），光 `git stash` 就清不干净——它默认不收
+        # 未跟踪的，用户照做后会带着同一个 `??` 再被拦一次。所以判据是
+        # 「**有没有** `??`」而不是「是不是只有 `??`」：混着改动的场景下
+        # `stash -u` 同样管用（已跟踪的也一并收），没有才给普通 stash。
+        if git -C "$BUDDY_HOME" status --porcelain | grep -q '^??'; then
+            log "改动里含未跟踪文件，git stash 默认收不走它们，改用："
+            log "  git -C \"$BUDDY_HOME\" stash -u      # 连未跟踪一起收"
+            log "  或者删掉 / 加进 .gitignore 后重跑 buddy update"
+        else
+            log "处理完再试：git -C \"$BUDDY_HOME\" stash  或提交后重跑 buddy update"
+        fi
         exit 1
     fi
 
@@ -237,7 +251,15 @@ cmd_update() {
     log "当前分支 ${branch} @ ${before}，拉取中…"
     # --ff-only：本地若已有分叉提交就直接报错，不做任何隐式合并/rebase
     if ! git -C "$BUDDY_HOME" pull --ff-only; then
-        log "git pull 失败（见上）。本地可能有分叉提交，请手动处理后再跑 buddy update"
+        # 别把失败一口咬定成分叉：远端不可达（断网 / 代理挂了）也走这里，
+        # 那种情况提示「本地有分叉」会把人支到错的方向去翻本地历史。
+        # 所以先让用户看 git 自己的报错，分叉只作为其中一种可能提一句。
+        # 两种情况照 git 的**原话**给（实测原文，别改写，否则对不上屏幕上的报错）：
+        #   分叉     -> fatal: Not possible to fast-forward, aborting.
+        #   连不上   -> fatal: Could not read from remote repository.
+        log "git pull 失败（原因见上面的 git 报错），已中止更新"
+        log "  出现 Not possible to fast-forward：本地有分叉提交，需手动处理"
+        log "  出现 Could not read from remote ：网络/代理/远端地址问题"
         exit 1
     fi
     after="$(git -C "$BUDDY_HOME" rev-parse --short HEAD)"

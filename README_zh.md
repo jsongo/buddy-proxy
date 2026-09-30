@@ -67,7 +67,7 @@ uv run python -m buddy_proxy --login --desensitize
 
 - 有系统服务时 `buddy start/stop/restart` 自动转 `launchctl`，否则走 `proxy.sh` 的 pid 管理
 - 环境变量 `PROXY_HOST`（默认 0.0.0.0）、`PROXY_PORT`（默认 8787）、`PROXY_EXTRA_ARGS` 对 `start` 与 `service install` 生效
-- `buddy update` 在安装来源那个仓库里跑 `git pull --ff-only` → `uv sync` → 重启服务。**工作树有未提交改动时它会直接拒绝执行**——不 stash、不 merge、不碰任何在制品，所以写了一半的改动不可能被悄悄覆盖（先 commit 或 `git stash` 再更新）。`--ff-only` 保证本地分叉时明确报错、而不是替你造一个意外的 merge commit；`uv sync` 失败则保留服务继续运行，不会用坏掉的依赖去重启。已经是最新版本时跑它也无害：只是重新同步依赖并重启一遍。
+- `buddy update` 在安装来源那个仓库里跑 `git pull --ff-only` → `uv sync` → 重启服务。**工作树有未提交改动时它会直接拒绝执行**——不 stash、不 merge、不碰任何在制品，所以写了一半的改动不可能被悄悄覆盖。拒绝时会把「脏在哪」列出来，并按实际情况给对应的处理办法：只要含未跟踪文件就提示 `git stash -u`（普通 `git stash` 收不走未跟踪文件，照做会带着同一个 `??` 再被拦一次），纯已跟踪改动才提示普通 `git stash`。`--ff-only` 保证本地分叉时明确报错、而不是替你造一个意外的 merge commit——报错信息里会引 git 自己的原话（`Not possible to fast-forward` 对应本地分叉，`Could not read from remote` 对应连不上远端），好让你一眼分清是哪种。`uv sync` 失败则保留服务继续运行，不会用坏掉的依赖去重启。已经是最新版本时跑它也无害：只是重新同步依赖并重启一遍。
 
 ### 豆包 Provider（可选）
 

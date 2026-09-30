@@ -35,7 +35,8 @@ def _git(*args: str, cwd: pathlib.Path) -> None:
                    capture_output=True, text=True)
 
 
-def _make_repo(root: pathlib.Path) -> pathlib.Path:
+def _make_repo(root: pathlib.Path, restart_marker: pathlib.Path | None = None
+               ) -> pathlib.Path:
     """建一个「上游裸仓库 + 工作克隆」，克隆里放好 buddy 脚本。
 
     ``init.defaultBranch`` 必须**显式钉成 main**，不能靠环境默认值：CI 上
@@ -61,6 +62,12 @@ def _make_repo(root: pathlib.Path) -> pathlib.Path:
     (work / ".gitignore").write_text("uv.lock\n.venv/\nlogs/\n")
     shutil.copy2(BUDDY, work / "buddy")
     (work / "buddy").chmod(0o755)
+    if restart_marker is not None:
+        # 假 proxy.sh：被调用就往 marker 里追加一行。用来断言「重启到底有没有
+        # 发生」——uv sync 失败时必须**没有**这行，否则服务就被带起来了。
+        proxy = work / "proxy.sh"
+        proxy.write_text(f'#!/bin/sh\necho restart >> "{restart_marker}"\n')
+        proxy.chmod(0o755)
     _git("add", "-A", cwd=work)
     _git("commit", "-qm", "init", cwd=work)
     _git("push", "-q", "origin", "HEAD:main", cwd=work)
@@ -68,12 +75,35 @@ def _make_repo(root: pathlib.Path) -> pathlib.Path:
     return work
 
 
-def _run_update(work: pathlib.Path) -> subprocess.CompletedProcess[str]:
+def _run_update(work: pathlib.Path, extra_path: pathlib.Path | None = None
+                ) -> subprocess.CompletedProcess[str]:
+    """跑一次 ``buddy update``。
+
+    ``PATH`` 默认**不含 uv**，于是走「跳过依赖同步」那条分支。要覆盖
+    ``uv sync`` 本身，用 ``extra_path`` 挂一个假 uv 目录进来——本机 uv 装在
+    ``~/.local/bin``，不在下面这个 PATH 里，所以不显式挂就永远测不到它。
+    """
+    path = "/usr/bin:/bin:/usr/local/bin"
+    if extra_path is not None:
+        path = f"{extra_path}:{path}"
     return subprocess.run(
         ["./buddy", "update"], cwd=work, capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(work),
-             "BUDDY_HOME": str(work)},
+        env={"PATH": path, "HOME": str(work), "BUDDY_HOME": str(work)},
     )
+
+
+def _fake_uv(dir_: pathlib.Path, *, exit_code: int = 0) -> pathlib.Path:
+    """造一个假 uv 放进 PATH，用来触到 ``uv sync`` 分支。
+
+    真跑 uv 没必要（这里测的是 buddy 怎么对待 uv 的成败，不是 uv 本身），
+    但它得**像 uv 一样是 PATH 上的可执行文件**，否则 ``command -v uv`` 那关
+    就过不去——而这正是原测试漏掉这个分支的原因。
+    """
+    dir_.mkdir(parents=True, exist_ok=True)
+    uv = dir_ / "uv"
+    uv.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+    uv.chmod(0o755)
+    return dir_
 
 
 def _head(work: pathlib.Path) -> str:
@@ -134,6 +164,128 @@ def test_fast_forwards_when_clean(tmp_path: pathlib.Path) -> None:
 
     assert _head(work) == upstream_head, f"没快进到上游:\n{proc.stdout}\n{proc.stderr}"
     assert (work / "marker.txt").read_text() == "new upstream commit"
+
+
+def _is_dirty(work: pathlib.Path) -> bool:
+    out = subprocess.run(["git", "status", "--porcelain"], cwd=work,
+                         capture_output=True, text=True).stdout
+    return bool(out.strip())
+
+
+@pytest.mark.parametrize("also_tracked", [False, True])
+def test_dirty_hint_actually_unblocks_the_user(tmp_path: pathlib.Path,
+                                               also_tracked: bool) -> None:
+    """拦下之后给的提示，照着做必须**真的能解封**。
+
+    这里不满足于断言提示文案里有没有 ``-u``——而是**把建议的命令真跑一遍**，
+    再确认工作树干净了、``buddy update`` 放行了。因为原提示（``git stash``）
+    的问题恰恰是「文案看着合理、照做却没用」：
+
+    脏判定用 ``status --porcelain``，会把未跟踪文件（``??``）算进去；而
+    ``git stash`` 默认不收未跟踪的，对纯 ``??`` 的树直接说
+    "No local changes to save"，用户再跑一次又被同一理由拦住。
+
+    ``also_tracked`` 覆盖「未跟踪 + 已跟踪混合」：这种树下旧的普通 stash 会
+    把已跟踪的收走、``??`` 仍留着，**同样解不开**——所以提示要按「有没有
+    ``??``」判，而不是按「是不是只有 ``??``」判。两种都参数化跑一遍。
+    """
+    work = _make_repo(tmp_path)
+    (work / "scratch.txt").write_text("untracked wip")
+    if also_tracked:
+        # 必须改**已在 HEAD 里**的文件（pyproject.toml 由 _make_repo 提交过）。
+        # 别现造一个新文件再 add+commit 再去改：那样测得的是「未跟踪」，
+        # 混合场景根本没造出来（第一版就这么写错了）。
+        tracked = work / "pyproject.toml"
+        tracked.write_text(tracked.read_text() + "\n# dirty\n")
+
+    blocked = _run_update(work)
+    assert blocked.returncode != 0, blocked.stdout
+    assert "stash -u" in blocked.stdout, (
+        f"含未跟踪文件时应建议 stash -u，实际:\n{blocked.stdout}"
+    )
+
+    # 照提示做，然后确认真的解封了
+    _git("stash", "-u", cwd=work)
+    assert not _is_dirty(work), "照提示做完工作树还是脏的，提示等于没用"
+    again = _run_update(work)
+    assert "未提交改动" not in again.stdout, (
+        f"照提示做完仍被同一理由拦住（用户会以为卡死）:\n{again.stdout}"
+    )
+
+
+def test_tracked_only_dirty_tree_gets_plain_stash_hint(tmp_path: pathlib.Path) -> None:
+    """只有已跟踪改动时，不该劝人用 ``-u``（会顺带收走本来不在讨论范围的未跟踪文件）。"""
+    work = _make_repo(tmp_path)
+    tracked = work / "pyproject.toml"          # 由 _make_repo 提交过，改它才是「已跟踪」
+    tracked.write_text(tracked.read_text() + "\n# dirty\n")
+    proc = _run_update(work)
+    assert proc.returncode != 0, proc.stdout
+    assert "stash -u" not in proc.stdout, (
+        f"没有未跟踪文件却建议 -u:\n{proc.stdout}"
+    )
+
+
+def test_pull_failure_hint_quotes_git_verbatim(tmp_path: pathlib.Path) -> None:
+    """pull 失败的两条提示要能被用户**对上号**，所以得引 git 的原话。
+
+    原先一律说「本地可能有分叉提交」，但远端不可达（断网/代理挂）也走这条
+    分支，人被支去翻本地历史就白费劲。两条 git 原文实测为：
+    ``fatal: Not possible to fast-forward, aborting.`` 与
+    ``fatal: Could not read from remote repository.``
+    """
+    work = _make_repo(tmp_path)
+    _advance_upstream(work, "upstream side")
+    (work / "local.txt").write_text("local side")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-qm", "local side", cwd=work)   # 造分叉
+
+    proc = _run_update(work)
+
+    assert proc.returncode != 0, proc.stdout
+    assert "Not possible to fast-forward" in proc.stdout, (
+        f"没引用 git 的分叉原文，用户对不上屏幕上的报错:\n{proc.stdout}"
+    )
+    assert "Could not read from remote" in proc.stdout, (
+        f"没提「连不上远端」这种可能:\n{proc.stdout}"
+    )
+
+
+def test_syncs_dependencies_when_uv_is_available(tmp_path: pathlib.Path) -> None:
+    """PATH 上有 uv 时必须真的调它，然后再重启。
+
+    这条分支原先**一次都没被执行过**：``_run_update`` 的 PATH 里没有 uv，
+    全走「未找到 uv，跳过依赖同步」。变异测试（把 ``uv sync`` 改成必然失败）
+    重跑仍 7 passed 才发现的——也就是说「有 uv 时会怎样」完全没人验。
+    """
+    marker = tmp_path / "restart.log"
+    work = _make_repo(tmp_path, restart_marker=marker)
+    _advance_upstream(work, "new upstream commit")
+    uvdir = _fake_uv(tmp_path / "fakebin", exit_code=0)
+
+    proc = _run_update(work, extra_path=uvdir)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "同步依赖" in proc.stdout, proc.stdout
+    assert marker.read_text().count("restart") == 1, "成功路径应该重启且只重启一次"
+
+
+def test_aborts_before_restart_when_uv_sync_fails(tmp_path: pathlib.Path) -> None:
+    """``uv sync`` 失败 → 中止，**不能**把服务重启起来。
+
+    这是整条命令里最容易伤到用户的一处：代码已经拉到新版、依赖却没装上，
+    这时若照常重启，服务会带着旧依赖跑新代码（缺包就直接起不来），
+    用户看到的是「更新完服务挂了」。所以必须断在重启之前。
+    """
+    marker = tmp_path / "restart.log"
+    work = _make_repo(tmp_path, restart_marker=marker)
+    _advance_upstream(work, "new upstream commit")
+    uvdir = _fake_uv(tmp_path / "fakebin", exit_code=1)
+
+    proc = _run_update(work, extra_path=uvdir)
+
+    assert proc.returncode != 0, f"uv sync 失败竟然返回 0:\n{proc.stdout}"
+    assert "uv sync 失败" in proc.stdout, proc.stdout
+    assert not marker.exists(), "uv sync 失败后不该重启服务"
 
 
 def test_diverged_branch_fails_loudly(tmp_path: pathlib.Path) -> None:
