@@ -422,6 +422,22 @@ async def forward_chat(
             if not targets:
                 targets = order.get(settings_mod.model_key(
                     owner_id, str(requested_model)))
+            # **裸名键也认**：用户配的是「这个模型名走什么顺序」，不该被强制写成
+            # `<归属通道>/<模型名>`。归属通道是运行时才知道的实现细节（同一个名字
+            # 哪个通道先认领它就归谁），让用户预先写死既反直觉、又会在解析结果变化
+            # 时静默失效。按 `requested_model` 与解析后的裸名各试一次裸键。
+            if not targets:
+                bare_keys = []
+                for cand in (str(requested_model), owner_model):
+                    cand = (cand or "").strip()
+                    if cand and "/" not in cand and cand not in bare_keys:
+                        bare_keys.append(cand)
+                for bk in bare_keys:
+                    hit = order.get(bk)
+                    if hit:
+                        targets = hit
+                        key = bk
+                        break
             if targets:
                 diagnostic("model_order_try", model=key, targets=len(targets))
                 return await _forward_with_order(

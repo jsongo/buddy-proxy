@@ -284,7 +284,12 @@ async def ui_models(request: Request):
             m["is_default"] = default_model in (key, m["id"])
             m["disabled"] = key in disabled
             # 候选上游顺序：有配置则附目标列表 + 各目标当前冷却标记，供前端渲染徽标/编辑器
-            order_targets = order.get(key) if isinstance(order, dict) else None
+            # **裸名键优先**（UI 保存的位置，也是用户手写配置的常见形态），再退回
+            # `<通道>/<裸名>`——历史上 UI 写的是那个形态，老配置得继续认得。forward
+            # 侧两种键都查，这里必须同口径，否则配了却在页面上看不见。
+            order_targets = order.get(bare) if isinstance(order, dict) else None
+            if not order_targets and isinstance(order, dict):
+                order_targets = order.get(key)
             if order_targets:
                 marks = []
                 for target in order_targets:
@@ -690,7 +695,11 @@ async def ui_model_schedule(request: Request):
 
 
 def _canonical_order_target(provider: str, model: str, state: Any) -> str:
-    """把一个候选目标校验并归一成 ``provider/裸模型名``（model_order 存储口径）。
+    """把一个候选目标校验并归一成 ``provider/裸模型名``（model_order 目标口径）。
+
+    ``provider`` 留空时用 :func:`_owner_provider` 找归属通道，**但那只用来校验**：
+    调用方若用它拼 ``model_order`` 的键，务必自己剥掉前缀存裸名（键的口径见
+    :func:`ui_model_order`）。
 
     **必须按「对外发布的 id」校验，而不是 ``_normalize_model_ref`` 的结果**：后者会把
     名字再过一遍通道的 ``resolve_model``，那是**转发期**的映射（qoder 把对外名
@@ -700,24 +709,49 @@ def _canonical_order_target(provider: str, model: str, state: Any) -> str:
 
     转发侧会自己对裸名做同样的归一，所以这里存对外名是安全的、也是可读的。
     """
-    pid = (provider or "").strip() or "codebuddy"
-    bare = _bare_model_id((model or "").strip(), pid) if provider else (model or "").strip()
+    if not (provider or "").strip():
+        provider = _owner_provider((model or "").strip(), state)
+    pid = provider.strip()
+    bare = _bare_model_id((model or "").strip(), pid)
     _validate_model(pid, bare, state)
     return settings_mod.model_key(pid, bare)
+
+
+def _owner_provider(model: str, state: Any) -> str:
+    """模型名没带通道时，找出**哪个通道认识它**（用于校验/拼 ``target``）。
+
+    只用于「校验这个模型名是真实存在的」，**不参与 ``model_order`` 的落键**——
+    键一律是裸名（`fake-model`），运行时对所有发布它的通道生效。挑第一个认识的
+    通道即可：与转发侧 ``_resolve_auto`` 的「精确匹配轮」顺序一致，于是
+    「能保存的」正好是「能路由到的」。
+    """
+    for group in _model_groups(state):
+        gid = group.get("id") or ""
+        if not gid:
+            continue
+        for item in group.get("models") or []:
+            if not isinstance(item, dict):
+                continue
+            if _bare_model_id(item.get("id") or "", gid) == model:
+                return gid
+    raise HTTPException(
+        status_code=400,
+        detail={"error": {"message": f"没有通道发布名为 {model} 的模型"}})
 
 
 @app.post("/ui/api/model-order")
 async def ui_model_order(request: Request):
     """设置/清除模型的候选上游顺序（按序尝试、未提交即失败就换下一档）。
 
-    请求体：``{"provider": "zcode", "model": "glm-5.3",
-              "targets": [{"provider": "zcode", "model": "glm-5.3"},
-                          {"provider": "traepat", "model": "glm-5.3"}]}``
+    请求体：``{"model": "deepseek-v4.1-flash",
+              "targets": [{"provider": "qoder", "model": "deepseek-v4.1-flash"},
+                          {"provider": "codebuddy", "model": "deepseek-v4.1-flash"}]}``
 
-    键与每个目标都经 :func:`_canonical_order_target` 校验并归一成
-    ``provider/对外发布名``（**不是** ``_normalize_model_ref``：那会套用通道转发期的
+    键是**裸模型名**（不带 ``provider/``）：用户表达的是「指定这个模型名时按这个
+    顺序选通道」。每个目标经 :func:`_canonical_order_target` 校验并归一成
+    ``provider/对外发布名``——**不是** ``_normalize_model_ref``：那会套用通道转发期的
     ``resolve_model`` 映射，qoder 上会把 ``glm-5.3`` 变成上游内部 key ``gmodel``，
-    再拿去比对通道目录必然 400——见 helper 的注释）。非法目标 400。``targets`` 为空
+    再拿去比对通道目录必然 400（见 helper 的注释）。非法目标 400。``targets`` 为空
     列表或缺省 → 删除该键（恢复历史路由）并顺带清掉该模型的冷却标记——用户显式改顺序
     = 重置健康判断。持久化到 settings.json 的 ``model_order`` 并热更新运行态。
     """
@@ -729,10 +763,17 @@ async def ui_model_order(request: Request):
     if not model:
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
 
-    # 键与目标同一口径：都按对外发布名校验后再拼 model_key。
-    # 只剥通道前缀（`_canonical_order_target` 内部做），不套 resolve_model——
-    # 否则 qoder 的键会变成 qoder/gmodel，而转发侧用裸名 glm-5.3 去查，条目成死键。
-    key = _canonical_order_target(provider, model, state)
+    # 键与目标不同口径：**键是裸模型名，目标是 provider/模型名**。
+    #
+    # 键就是用户嘴里的「这个模型」：配一条 `deepseek-v4.1-flash`，请求该名字时
+    # 一律按后面的顺序选实际发请求的通道。一个名字一条配置（写两遍没有意义，
+    # 反而会按请求解析到哪个通道而行为不一）。所以这里接受（并忽略）前端可能
+    # 传来的归属通道，只存裸名。
+    #
+    # 目标仍按对外发布名校验后拼 `provider/模型名`（**不是** `_normalize_model_ref`：
+    # 那会套用通道转发期的 `resolve_model` 映射，qoder 上把 `glm-5.3` 变成上游内部
+    # key `gmodel`，转发侧按 `qoder/glm-5.3` 查不到，条目成死键）。
+    key = _canonical_order_target("", model, state).split("/", 1)[-1]
     raw_targets = body.get("targets")
     targets: list[str] = []
     if isinstance(raw_targets, list):
@@ -811,6 +852,38 @@ async def ui_model_order_options(request: Request):
     return {"groups": groups}
 
 
+@app.get("/ui/api/model-order")
+async def ui_model_order_get(request: Request):
+    """**顺序页唯一的数据源**：原样返回 ``model_order`` 字段。
+
+    刻意不做任何「按通道展开」「按目录标注」——那些会让同一个模型名在多个通道
+    各冒一份，页面上看起来就是一堆重复（用户原话：「配置什么就展示什么，别搞
+    这么复杂」）。这里给什么，页面就画几张卡：键 → 卡片，逐字对应。
+
+    每个键附上各目标的冷却剩余秒数（``marks``），供卡片显示 ⏸，不改变键的集合。
+    """
+    _ensure_local(request)
+    state = get_state()
+    order = getattr(state, "model_order", None)
+    if not isinstance(order, dict):
+        order = {}
+    items: list[dict[str, Any]] = []
+    for key in order:
+        targets = order.get(key) or []
+        if not isinstance(targets, list):
+            targets = []
+        marks = []
+        for target in targets:
+            if not isinstance(target, str) or "/" not in target:
+                continue
+            t_provider, t_model = target.split("/", 1)
+            left = cooldown_mod.remaining(t_provider, t_model)
+            if left:
+                marks.append({"target": target, "cooldown_s": left})
+        items.append({"model": key, "targets": targets, "marks": marks})
+    return {"items": items}
+
+
 @app.post("/ui/api/model-order/mark-clear")
 async def ui_model_order_mark_clear(request: Request):
     """清除冷却标记（不动顺序），给「上游已恢复、现在就重试」用。
@@ -844,7 +917,9 @@ async def ui_model_order_mark_clear(request: Request):
         key = _canonical_order_target(provider, model, state)
     except HTTPException:
         key = settings_mod.model_key(provider or "codebuddy", model)
-    order_targets = (getattr(state, "model_order", None) or {}).get(key) or []
+    order = getattr(state, "model_order", None) or {}
+    # 裸名键优先（UI 现在的落键位置），再退回 `<通道>/<名>`（老配置）。
+    order_targets = order.get(model) or order.get(key) or []
     cleared = 0
     for item in order_targets:
         if "/" in item:

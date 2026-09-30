@@ -566,6 +566,8 @@ async function api(path, opts) {
 }
 
 let OVERVIEW = null, MODELS = null, STATS = null, BENEFITS = null;
+// 顺序页的唯一数据源：`/ui/api/model-order` 原样返回的 model_order（键 = 卡片）。
+let ORDER = null;
 
 // ---- 日期范围选择器 ----
 // RANGE.q 记录当前快捷键（如 'd14'）；手改起止日期后 q 置空、退化为自定义区间。
@@ -693,11 +695,11 @@ function modelsInRange() {
 //   models             模型页，首次进入时拉
 //   logs               请求日志页，仅在日志页可见时拉
 // 每个 loader 并发去重（同键进行中的 Promise 复用），避免重复请求。
-const LOADED = { overview: false, benefits: false, stats: false, models: false };
+const LOADED = { overview: false, benefits: false, stats: false, models: false, order: false };
 const INFLIGHT = {};
 // 每次 force 递增：标记出「force 之前发起」的请求。它们的响应可能早于本地写操作，
 // 一律丢弃（见 markStale / ensureData），否则写操作后会把写前快照当最新数据渲染。
-const GEN = { overview: 0, benefits: 0, stats: 0, models: 0 };
+const GEN = { overview: 0, benefits: 0, stats: 0, models: 0, order: 0 };
 // loadData 序号：并发/重叠的 loadData 只有最后发起的那次负责 render()，
 // 避免「早发起、晚返回」的旧数据覆盖新统计。
 let LOAD_SEQ = 0;
@@ -710,6 +712,7 @@ const LOADERS = {
   benefits: () => api('/ui/api/benefits').then(v => { BENEFITS = v; LOADED.benefits = true; }),
   stats:    () => api('/ui/api/stats').then(v => { STATS = v; LOADED.stats = true; }),
   models:   () => api('/ui/api/models').then(v => { MODELS = v; LOADED.models = true; }),
+  order:    () => api('/ui/api/model-order').then(v => { ORDER = v; LOADED.order = true; }),
 };
 
 function ensureData(key, force) {
@@ -726,6 +729,7 @@ function ensureData(key, force) {
   if (key === 'benefits') p.then(v => { if (gen !== GEN[key]) BENEFITS = null; });
   if (key === 'stats') p.then(v => { if (gen !== GEN[key]) STATS = null; });
   if (key === 'models') p.then(v => { if (gen !== GEN[key]) MODELS = null; });
+  if (key === 'order') p.then(v => { if (gen !== GEN[key]) ORDER = null; });
   p.then(() => { if (gen !== GEN[key]) delete LOADED[key]; });
   INFLIGHT[key] = p;
   return p;
@@ -745,7 +749,9 @@ function invalidateRecent() {
 // 概览卡片与 renderRecent() 读的都是 STATS，缺了它 render() 会直接抛错。
 function dataForTab(name) {
   if (name === 'models') return ['stats', 'models'];
-  if (name === 'order') return ['stats', 'models'];   // 顺序页复用 /ui/api/models 的 order 字段
+  // 顺序页只吃 /ui/api/model-order（配置的键就是卡片）；models 只用来填「+ 新增模型」
+  // 的下拉候选，二者互不干扰。
+  if (name === 'order') return ['stats', 'order', 'models'];
   if (name === 'log') return ['stats'];
   if (name === 'benefits') return ['stats', 'benefits'];
   return ['stats'];  // overview：概览卡片与图表都来自 stats
@@ -872,8 +878,9 @@ function render() {
   if (MODELS)
     document.getElementById('cnt-models').textContent =
       (MODELS.groups || []).reduce((n, g) => n + g.models.length, 0) || '';
-  if (MODELS)
-    document.getElementById('cnt-order').textContent = orderedModels().length || '';
+  // 角标 = 配置里有几条 model_order（与页面卡片数一致，一个键一张卡）
+  if (ORDER)
+    document.getElementById('cnt-order').textContent = orderRows().length || '';
   if (BENEFITS) {
     const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
     const cb = document.getElementById('cnt-benefits');
@@ -1919,37 +1926,35 @@ function bareModelId(id, provider) {
   return p && s.startsWith(p + '/') ? s.slice(p.length + 1) : s;
 }
 
-function orderedModels() {
+// 顺序页的卡片**就是 model_order 里的键**，一个键一张卡，多的一张都不画。
+//
+// 曾经的写法是「遍历通道目录，每个 通道+模型 组合画一张卡」——同一个模型名在
+// 四个通道各画一份，页面上就成了四张一模一样的（用户原话：「配置什么就展示什么，
+// 别搞这么复杂」）。现在渲染源只有一个：`/ui/api/model-order` 返回的键。
+function orderRows() {
+  const items = (ORDER && ORDER.items) || [];
+  return items.filter(it => it && it.model);
+}
+
+// 顺序页要渲染的卡片 = 配置里的键 + **还没保存、正在编辑中的**草稿键。
+// 后者只有「+ 新增模型」选完到点保存之间才会出现（那时配置里还没有这个键）。
+function pageRows() {
   const out = [];
-  ((MODELS && MODELS.groups) || []).forEach(g => {
-    (g.models || []).forEach(m => {
-      if (m.order) out.push({ p: g.id, m: bareModelId(m.id, g.id), order: m.order });
-    });
+  const known = new Set();
+  orderRows().forEach(it => {
+    known.add(it.model);
+    out.push({ m: it.model, order: it });
+  });
+  Object.keys(ORDER_DRAFT).forEach(name => {
+    if (known.has(name)) return;
+    out.push({ m: name, order: { targets: [], marks: [] } });
   });
   return out;
 }
 
-// 顺序页要渲染的卡片 = 已配置的（服务端下发）+ **还没保存过、但正在编辑中的**
-// （ORDER_DRAFT 里有草稿）。少了后半截，「+ 新增模型」选一个尚未配置的模型
-// 会完全没反应：orderAddModelPick 明明写好了 ORDER_OPEN / ORDER_DRAFT，可
-// 渲染源只认 m["order"]，卡片永远建不出来。草稿在保存成功时会被删掉，届时
-// 该模型自然转入「已配置」那一类，不会重复。
-function pageRows() {
-  const out = orderedModels();
-  // 已配置的那些键，上面这行已经收全了，这里只需补草稿里多出来的。
-  const seen = new Set(out.map(r => orderPageKey(r.p, r.m)));
-  const catalog = new Set(allModelOptions().map(o => orderPageKey(o.p, o.m)));
-  Object.keys(ORDER_DRAFT).forEach(key => {
-    if (seen.has(key)) return;
-    const i = key.indexOf('/');
-    if (i <= 0) return;
-    // 目标是自由文本（上游可能接受目录里没广告的 id），但**模型本身**必须来自
-    // 目录：它得先能被路由解析到，顺序才有意义。目录里查不到就不建卡。
-    if (!catalog.has(key)) return;
-    out.push({ p: key.slice(0, i), m: key.slice(i + 1),
-               order: { targets: [], marks: [] } });
-  });
-  return out;
+// 某个模型名的配置（来自上面的接口；草稿另有 ORDER_DRAFT）
+function orderRowOf(name) {
+  return orderRows().find(it => it.model === name) || null;
 }
 
 // 可选模型全集（用于「+ 新增模型」的下拉），按通道分组
@@ -1961,13 +1966,12 @@ function allModelOptions() {
   return out;
 }
 
-// 页面状态：展开的模型键集合是纯 UI 状态，不随数据刷新重置。
-// 注意 "p/m" 里的 model 是**裸名**（见 bareModelId）——与 model_order 的键同口径。
-let ORDER_OPEN = new Set();     // 已展开的 "p/m"
-let ORDER_DRAFT = {};           // "p/m" → [{provider, model}] 编辑中的草稿（未保存）
-let ORDER_PAGE_MARKS = {};      // "p/m" → {targetKey: 剩余秒数}
-
-function orderPageKey(p, m) { return `${p}/${m}`; }
+// 页面状态：卡片键 = **裸模型名**（`glm-5.3`），与 model_order 的键同口径——
+// 用户配的就是这个名字，运行时裸键对所有通道生效，所以卡片也只按名字分。
+// 展开集合是纯 UI 状态，不随数据刷新重置。
+let ORDER_OPEN = new Set();     // 已展开的模型名
+let ORDER_DRAFT = {};           // 模型名 → [{provider, model}] 编辑中的草稿（未保存）
+let ORDER_PAGE_MARKS = {};      // 模型名 → {targetKey: 剩余秒数}
 
 // 服务端下发的 targets（"p/m" 字符串数组）→ 行对象数组
 function orderTargetsToItems(targets) {
@@ -1987,8 +1991,8 @@ function orderCount(items) { return (items || []).filter(i => i.model).length; }
 function orderIsDirty(key) {
   const draft = ORDER_DRAFT[key];
   if (!draft) return false;
-  const row = orderedModels().find(r => orderPageKey(r.p, r.m) === key);
-  const server = row ? row.order.targets : [];
+  const row = orderRowOf(key);
+  const server = row ? row.targets : [];
   const cur = draft.filter(i => i.model).map(i => `${i.provider}/${i.model}`);
   return cur.length !== server.length || cur.some((v, i) => v !== server[i]);
 }
@@ -2031,27 +2035,25 @@ function renderOrderPage() {
 }
 
 function orderPageCard(r) {
-  const key = orderPageKey(r.p, r.m);
+  const key = r.m;   // 卡片键 = model_order 的键本身
   const open = ORDER_OPEN.has(key);
   // 草稿优先：用户正在编辑时不要被新拉到的数据覆盖
   const items = ORDER_DRAFT[key] || orderTargetsToItems(r.order.targets);
   const marks = ORDER_PAGE_MARKS[key] || {};
   const markCount = Object.keys(marks).length;
-  const chain = r.order.targets.join(' → ');
+  // 标题里展示**通道的顺序**（`qoder → codebuddy`），这是这张卡片真正要回答的
+  // 问题：请求这个模型时，依次找哪些上游。用草稿优先的 items 而不是服务端
+  // targets，编辑中就能立刻看到改动后的样子。
+  const chain = items.filter(i => i.model).map(i => i.provider).join(' → ');
 
-  // 折叠时才显示链路摘要：展开后每行都写着 provider/模型，再挂一条重复的
-  // 「a → b → c」只是噪声，还把卡片头挤得满满当当。
   return `<div class="card order-card" data-key="${esc(key)}">
     <div class="order-head" onclick="orderToggle('${esc(key)}')">
       <span class="chev" style="transform:rotate(${open ? 0 : -90}deg)">▾</span>
       <span class="mono order-title">${esc(r.m)}</span>
-      <span class="order-owner mono" title="归属通道：请求里的裸模型名解析到哪个通道，顺序就配在它名下。
-它不随候选顺序变化——把别的通道排到第一位不会改变归属，要改归属得另建一张卡。
-显示它是为了区分同名模型：glm-5.3 被 zcode 和 codebuddy 都发布时是两张各自独立的卡片。">· ${esc(r.p)}</span>
       <span class="tag order-count">${orderCount(items)} 档</span>
       ${markCount ? `<span class="tag bad" title="有目标处于冷却中，请求会跳过它">⏸ ${markCount}</span>` : ''}
       <span class="tag bad order-dirty" title="有未保存的修改" style="${orderIsDirty(key) ? '' : 'display:none'}">未保存</span>
-      <span class="order-chain muted mono">${open ? '' : esc(chain)}</span>
+      <span class="order-chain mono">${esc(chain)}</span>
     </div>
     ${open ? `<div class="order-body">
       <div class="order-rows" data-key="${esc(key)}"></div>
@@ -2096,11 +2098,11 @@ function renderOrderRows(key) {
   let items = ORDER_DRAFT[key];
   if (!items) {
     // 首次：从服务端拉到的 targets 建草稿
-    const row = orderedModels().find(r => orderPageKey(r.p, r.m) === key);
+    const row = orderRowOf(key);
     if (!row) { el.innerHTML = ''; return; }
-    items = ORDER_DRAFT[key] = orderTargetsToItems(row.order.targets);
+    items = ORDER_DRAFT[key] = orderTargetsToItems(row.targets);
     const marks = {};
-    (row.order.marks || []).forEach(k => {
+    (row.marks || []).forEach(k => {
       const i = String(k.target).indexOf('/');
       if (i > 0) marks[orderKey(k.target.slice(0, i), k.target.slice(i + 1))] = k.cooldown_s;
     });
@@ -2204,16 +2206,10 @@ function renderOrderPageHead(key) {
   if (cnt) cnt.textContent = `${orderCount(items)} 档`;
   const dirty = head.querySelector('.order-dirty');
   if (dirty) dirty.style.display = orderIsDirty(key) ? '' : 'none';
-  // 归属通道标签**不随拖拽变**：键恒等于「请求解析到的归属通道 + 模型名」，
-  // 拖到第一位的是候选顺序，不是归属（forward.py 用 _resolve_auto 的解析结果
-  // 取键，跟 targets 的顺序无关）。这里重写一遍只是保证重绘后不残留旧文案；
-  // 真要换归属通道得另建一张卡。
-  const chain = items.filter(i => i.model).map(i => `${i.provider}/${i.model}`).join(' → ');
+  // 标题里的通道顺序随编辑实时更新（拖拽/换 provider 后立刻反映）。
+  const chain = items.filter(i => i.model).map(i => i.provider).join(' → ');
   const tail = head.querySelector('.order-chain');
-  if (tail) {
-    // 展开时不显示链路（行里已经写明了），只在折叠态有意义
-    tail.textContent = card.querySelector('.order-body') ? '' : chain;
-  }
+  if (tail) tail.textContent = chain;
 }
 
 // 保存时读的「真源」。卡片**展开**时 DOM 是编辑真源（输入框里的字可能还没回写草稿）；
@@ -2251,12 +2247,13 @@ async function orderPageSave(key) {
     return;
   }
   const asked = items.map(t => `${t.provider}/${t.model}`);
-  const [provider, ...rest] = key.split('/');
-  const model = rest.join('/');
+  // 按键就是裸模型名，provider 留空 —— 后端会用「裸名」形态落键，运行时对
+  // 所有发布该模型名的通道都生效（这正是用户要的「写一遍就够」）。
+  const model = key;
   try {
     const r = await api('/ui/api/model-order', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ provider, model, targets: items })});
+      body: JSON.stringify({ provider: '', model, targets: items })});
     const saved = r.targets || [];
     // 按下标一对一比是够的：服务端回的是**已经归一化过**的列表（去重/别名/截断都在
     // 写盘时做完），所以 `saved` 与 `asked` 逐项不同就代表真的被规范化过。实测别名
@@ -2282,47 +2279,45 @@ async function orderPageClear(key) {
   await orderPageSave(key);
 }
 
-// 「+ 新增模型」：选**模型**（不是选 provider），选中即以空顺序展开（保存后生效）。
-// 列表按「请求解析到的归属通道」分组，组内只显示模型名——同一个 glm-5.3 在
-// codebuddy 和 zcode 下是两个各自独立的键，分组既去掉了重复的通道前缀，
-// 又保住了这个区别。组头写上归属通道号，是因为键必须落对通道顺序才生效。
+// 「+ 新增模型」：选**模型名**，选中即以空顺序展开（保存后生效）。
+// 列表只显示裸模型名、不显示通道：用户配的是「这个模型名走什么顺序」，通道是
+// 运行时解析归属用的实现细节。同名模型被多通道发布时也只列一条（一个名字一张卡、
+// 一份配置）。
 function orderAddModel() {
-  const opts = allModelOptions();
-  const existing = new Set(orderedModels().map(r => orderPageKey(r.p, r.m)));
-  const byProvider = new Map();
-  opts.forEach(o => {
-    if (!byProvider.has(o.p)) byProvider.set(o.p, []);
-    byProvider.get(o.p).push(o);
+  const existing = new Set(orderRows().map(it => it.model.toLowerCase()));
+  const names = [];
+  const seenName = new Set();
+  allModelOptions().forEach(o => {
+    // 大小写不敏感去重：同一条目在目录里常同时有 `DeepSeek-V4-Flash` 和
+    // `deepseek-v4-flash` 两个写法，全列出来只是噪声（6 组这样的重复）。
+    const k = o.m.toLowerCase();
+    if (seenName.has(k)) return;
+    seenName.add(k);
+    names.push(o.m);
   });
+  names.sort((a, b) => a.localeCompare(b));
   document.getElementById('modal-title').textContent = '新增模型顺序';
   document.getElementById('modal-body').innerHTML = `
     <div class="muted" style="font-size:13px;margin-bottom:10px">
-      选择要配置候选顺序的模型，每个模型是一张独立的卡片。同一模型被多个通道发布时，
-      这里列出的是<b>请求解析到的归属通道</b>（如 <span class="mono">glm-5.3</span> 归 zcode），
-      组选错了顺序不会生效。
+      选一个模型名即可 —— 之后就按这张卡片里的顺序依次尝试，默认用第一个。
     </div>
     <input id="order-new-search" placeholder="搜索模型名…" style="width:100%;margin-bottom:8px">
     <div id="order-new-list" class="order-new-list"></div>`;
   setModalFoot('<button onclick="closeModal()">取消</button>');
   const draw = (q) => {
     const kw = (q || '').trim().toLowerCase();
-    let total = 0;
-    const html = [...byProvider].map(([p, list]) => {
-      const hit = list.filter(o => !kw || o.m.toLowerCase().includes(kw) || p.toLowerCase().includes(kw));
-      if (!hit.length) return '';
-      total += hit.length;
-      return `<div class="order-new-group">${esc(p)}</div>` + hit.map(o => {
-        const has = existing.has(orderPageKey(o.p, o.m));
-        return `<div class="order-new-item">
-          <span class="mono on-m">${esc(o.m)}</span>
-          ${has ? '<span class="tag">已配置</span>' : ''}
-          <span class="spacer"></span>
-          <button class="ghost" onclick="orderAddModelPick('${esc(o.p)}','${esc(o.m)}')">${has ? '编辑' : '添加'}</button>
-        </div>`;
-      }).join('');
-    }).join('');
-    document.getElementById('order-new-list').innerHTML = total
-      ? html : '<div class="muted">没有匹配的模型</div>';
+    const hit = names.filter(n => !kw || n.toLowerCase().includes(kw));
+    document.getElementById('order-new-list').innerHTML = hit.length
+      ? hit.map(n => {
+          const has = existing.has(n.toLowerCase());
+          return `<div class="order-new-item">
+            <span class="mono on-m">${esc(n)}</span>
+            ${has ? '<span class="tag">已配置</span>' : ''}
+            <span class="spacer"></span>
+            <button class="ghost" onclick="orderAddModelPick('','${esc(n)}')">${has ? '编辑' : '添加'}</button>
+          </div>`;
+        }).join('')
+      : '<div class="muted">没有匹配的模型</div>';
   };
   draw('');
   const s = document.getElementById('order-new-search');
@@ -2331,18 +2326,16 @@ function orderAddModel() {
   document.getElementById('overlay').classList.add('show');
 }
 
+// 选一个模型名 → 直接以该名字建/展开卡片。**不再解析「归属通道」**：键就是裸名，
+// 运行时对每个发布它的通道都生效，所以没有「这份顺序归哪个通道」这个问题。
+// provider 参数仅为兼容调用方保留（一律为空）。
 function orderAddModelPick(provider, model) {
-  const key = orderPageKey(provider, model);
+  const key = model;
   ORDER_OPEN.add(key);
   if (!ORDER_DRAFT[key]) {
-    const row = orderedModels().find(r => orderPageKey(r.p, r.m) === key);
+    const row = orderRowOf(key);
     // 已配置的沿用其 targets；未配置的从空开始
-    const list = row ? row.order.targets.map(t => {
-      const i = t.indexOf('/');
-      return i > 0 ? { provider: t.slice(0, i), model: t.slice(i + 1) }
-                   : { provider: 'codebuddy', model: t };
-    }) : [];
-    ORDER_DRAFT[key] = list;
+    ORDER_DRAFT[key] = row ? orderTargetsToItems(row.targets) : [];
   }
   closeModal();
   switchTab('order');

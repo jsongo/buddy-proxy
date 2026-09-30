@@ -425,6 +425,44 @@ def test_explicit_prefix_bypasses_order(tmp_path, monkeypatch):
     assert cooldown_mod.is_marked("pa", "m1") is False, "前缀直连不走换档，也就不该打冷却"
 
 
+def test_bare_key_drives_routing(tmp_path, monkeypatch):
+    """**裸名键**要真的生效 —— 用户配的是「这个模型名走什么顺序」。
+
+    真机现象：用户在 settings.json 写 ``"kimi-k3": [...]``，加载时被归一成
+    ``codebuddy/kimi-k3``，而请求解析到别的通道时键对不上、顺序**静默不触发**。
+    用户的原话是「配置一个裸名的模型名，当我指定这个模型时，它其实是按后面的
+    顺序调用」——裸键必须能直接驱动换档。
+
+    这里让 pa 排在注册序首位（裸名 m1 会先被它认领），却给**裸键**配了
+    pb → pa 的顺序：第一档就该是 pb，而不是被解析结果 pa 抢先。
+    """
+    a = _Provider("pa", ["m1"], "ok")
+    b = _Provider("pb", ["m1"], "ok")
+    state = _make_state({"pa": a, "pb": b}, tmp_path,
+                        model_order={"m1": ["pb/m1", "pa/m1"]})
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="m1")
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] == "from-pb", (
+        "裸键配的第一档是 pb，就该先用 pb——不该被自动匹配的 pa 抢先")
+    assert len(b.calls) == 1 and len(a.calls) == 0
+
+
+def test_bare_key_still_fails_over(tmp_path, monkeypatch):
+    """裸键命中的第一档失败时，照常换到下一档（不是只认第一档就完事）。"""
+    a = _Provider("pa", ["m1"], "ok")
+    b = _Provider("pb", ["m1"], "raise502")
+    state = _make_state({"pa": a, "pb": b}, tmp_path,
+                        model_order={"m1": ["pb/m1", "pa/m1"]})
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="m1")
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] == "from-pa"
+    assert len(b.calls) == 1 and len(a.calls) == 1
+
+
 def test_order_does_not_apply_to_other_models(tmp_path, monkeypatch):
     """顺序只对它自己那把键生效，不影响别的模型。
 
@@ -465,10 +503,18 @@ def test_normalize_order_truncates():
     assert len(settings_mod.normalize_order(raw)) == settings_mod._MAX_ORDER_TARGETS
 
 
-def test_normalize_order_key_bare_defaults_to_codebuddy():
-    assert settings_mod.normalize_order_key("glm-5.3") == "codebuddy/glm-5.3"
+def test_normalize_order_key_keeps_bare_name():
+    """裸模型名**原样保留**，不再按 codebuddy 兜底。
+
+    早先归一到 ``codebuddy/<模型名>`` 是错的：用户配的是「这个模型名走什么顺序」，
+    归属通道由运行时解析决定（同一个名字哪个通道先认领就归谁）。归死到 codebuddy
+    会让请求解析到别的通道时**静默不触发**——用户手写 ``"kimi-k3"`` 却只对
+    codebuddy 那一条路径生效，正是这个坑。
+    """
+    assert settings_mod.normalize_order_key("glm-5.3") == "glm-5.3"
     assert settings_mod.normalize_order_key("zcode/glm-5.3") == "zcode/glm-5.3"
     assert settings_mod.normalize_order_key("workbuddy/glm-5.3") == "codebuddy/glm-5.3"
+    assert settings_mod.normalize_order_key("  glm-5.3  ") == "glm-5.3"
     assert settings_mod.normalize_order_key("") == ""
 
 
