@@ -1066,6 +1066,10 @@ def test_quota_includes_dedicated_resource_packages():
     assert by_label["订阅额度"]["reset_ts"] == 1793289600, "订阅额度用账号级 expiresAt"
     # 三个节点都在，合计才对得上真实总额
     assert sum(i["total"] for i in out["items"]) == 4300.0
+    # 并且要**声明**它们可合计：管理页标题行只认这个标记，不认列表顺序。
+    # 只把三行列出来而不置位的话，界面依旧只显示第一行（剩 1931/2000），
+    # 用户看到的数还是比实际少一截——等于这个修复只做了一半。
+    assert out["sum_items"] is True, "三份额度并存，必须声明可合计"
 
 
 def test_quota_skips_unavailable_packages():

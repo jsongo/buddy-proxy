@@ -104,11 +104,51 @@ MODEL_NAME_CANONICAL: dict[str, str] = {
 _TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=15.0)
 
 
-def _window_label(reset_ts: float | None, ltype: str | None) -> str:
-    """按重置时间推断限额窗口的展示名（5 小时 / 每周 / 更长周期）。"""
+#: ``unit`` 字段的取值 -> 时间单位（秒），以及该单位在展示名里怎么说。
+#:
+#: 上游的 ``limits`` 是**同一个 ``type`` 可按不同时长切多档**，靠 ``unit`` +
+#: ``number`` 表达窗口宽度（实测 unit=3/number=5 是 5 小时档、
+#: unit=6/number=1 是月档）。``unit`` 的取值是上游自定枚举，这里只落地
+#: 在真实返回值里见过的两个；其余一律走兜底，**不要**凭「单位像分钟/小时」
+#: 的直觉猜——猜错了会把 5 小时说成 5 秒。
+_UNIT_SECONDS: dict[int, int] = {
+    3: 3600,        # 小时
+    4: 86400,       # 天
+    6: 86400 * 30,  # 月（按 30 天算，够用来标注「月窗口」）
+}
+
+
+def _window_label(
+    reset_ts: float | None,
+    ltype: str | None,
+    unit: int | None = None,
+    number: float | None = None,
+) -> str:
+    """限额窗口的展示名。
+
+    **优先按上游给的 ``unit``/``number`` 算窗口宽度**，算不出来再退回按
+    「距下次重置还有多久」推断。
+
+    原先只用后者，会错得离谱：它把「离重置时间的远近」当成窗口大小，于是
+    一个 *月* 档（重置还在 4 天后，但窗口本身是 30 天）被写成「每周窗口」；
+    而 5 小时档因为上游压根不给 ``nextResetTime``，label 直接退化成裸的
+    ``CREDIT_LIMIT`` —— 两档的展示名就这么一错一空。更糟的是
+    ``_quota_items`` 又按 ``nextResetTime`` 排序，没有重置时间的那档被排到
+    末位，于是标题行（取 ``items[0]``）显示的恰好是它：一个既叫不出名字、
+    又只是 5 小时档的 2000，压过了月档的 10000。
+    """
     if ltype == "TIME_LIMIT":
         return "MCP 调用（月）"
+    if unit in _UNIT_SECONDS and number:
+        span = _UNIT_SECONDS[unit] * number
+        if span <= 86400:
+            return f"{_fmt_hours(span)} 小时窗口"
+        if span <= 86400 * 10:
+            return f"{span // 86400} 天窗口"
+        return "月窗口"
     if reset_ts:
+        # 兜底：上游没给 unit 时，只能拿「距重置还有多久」凑一个大致档位。
+        # 注意它量的是**剩余**不是窗口宽度，所以只能给很粗的三档。
         delta = reset_ts - time.time()
         if delta < 86400 * 2:
             return "5 小时窗口"
@@ -118,20 +158,37 @@ def _window_label(reset_ts: float | None, ltype: str | None) -> str:
     return ltype or "用量窗口"
 
 
+def _fmt_hours(seconds: float) -> str:
+    hours = seconds / 3600
+    return str(int(hours)) if hours == int(hours) else f"{hours:g}"
+
+
 def _quota_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     """把 /api/monitor/usage/quota/limit 的 limits 归一化为管理页额度条目。
 
-    按 nextResetTime 升序：最近的窗口排前面（实测 5 小时窗口在前、每周在后）。
+    按窗口**由小到大**排：小的（5 小时）在前、大的（月）在后，这样用户先
+    看到最容易撞到的那一档。**不能**按 ``nextResetTime`` 排——5 小时档上游
+    不给这个字段（值恒为 0），按时间排会把它甩到末位，正好和「先看小窗口」
+    的意图相反，还会让标题行去显示月档而不是更紧迫的 5 小时档。
+
     CREDIT_LIMIT：usage=窗口总额度，currentValue=已用；TIME_LIMIT 单位为次数。
     """
     limits = [l for l in (data.get("limits") or []) if isinstance(l, dict)]
-    limits.sort(key=lambda l: l.get("nextResetTime") or 0)
+
+    def _span(l: dict[str, Any]) -> float:
+        unit, number = l.get("unit"), l.get("number")
+        if unit in _UNIT_SECONDS and number:
+            return _UNIT_SECONDS[unit] * number
+        # 没给 unit 的条目排最后（排不出宽窄，就当它是最大的一档）
+        return float("inf")
+
+    limits.sort(key=_span)
     items: list[dict[str, Any]] = []
     for l in limits:
         reset_ms = l.get("nextResetTime")
         reset_ts = reset_ms / 1000 if reset_ms else None
         items.append({
-            "label": _window_label(reset_ts, l.get("type")),
+            "label": _window_label(reset_ts, l.get("type"), l.get("unit"), l.get("number")),
             "used": l.get("currentValue"),
             "total": l.get("usage"),
             "remaining": l.get("remaining"),
