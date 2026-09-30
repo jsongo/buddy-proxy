@@ -9,6 +9,8 @@
 #   buddy logs               跟踪日志
 #   buddy login [provider]   登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder）
 #   buddy ui                 仅打开管理页（必要时先启动）
+#   buddy update             更新到最新代码（git pull -> uv sync -> 重启）
+#                            工作树有未提交改动会中止，不会覆盖你的改动
 #
 # 服务化（macOS launchd，登录自启 + 崩溃自动拉起）：
 #   buddy service install    注册系统服务
@@ -203,6 +205,61 @@ wait_healthy() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# 更新（拉代码 -> 装依赖 -> 重启）
+# ---------------------------------------------------------------------------
+
+# 工作树里是否有未提交改动（含未跟踪文件，但不含被忽略的 logs/ .venv/ 等）
+tree_dirty() {
+    [[ -n "$(git -C "$BUDDY_HOME" status --porcelain 2>/dev/null)" ]]
+}
+
+cmd_update() {
+    command -v git >/dev/null 2>&1 || { log "没装 git，无法更新"; exit 1; }
+    git -C "$BUDDY_HOME" rev-parse --git-dir >/dev/null 2>&1 \
+        || { log "$BUDDY_HOME 不是 git 仓库，无法更新（手动下载新版本后重跑 buddy restart）"; exit 1; }
+
+    # 有未提交改动就停下：下面要 pull，脏工作树轻则 pull 失败、重则把别人的
+    # 在制品搅在一起。宁可不动，也不要「更新」成一半的状态。
+    if tree_dirty; then
+        log "工作树有未提交改动，已中止更新（避免覆盖它们）："
+        git -C "$BUDDY_HOME" status --short | sed 's/^/  /'
+        log "处理完再试：git -C \"$BUDDY_HOME\" stash  或提交后重跑 buddy update"
+        exit 1
+    fi
+
+    local branch before after
+    branch="$(git -C "$BUDDY_HOME" rev-parse --abbrev-ref HEAD)"
+    before="$(git -C "$BUDDY_HOME" rev-parse --short HEAD)"
+
+    # ${var} 必须带花括号：变量名后面紧跟中文时，bash 会把多字节字符的首字节
+    # 当成变量名的一部分（实测 `"$before，拉取中"` 报 `before\xef: unbound variable`）
+    log "当前分支 ${branch} @ ${before}，拉取中…"
+    # --ff-only：本地若已有分叉提交就直接报错，不做任何隐式合并/rebase
+    if ! git -C "$BUDDY_HOME" pull --ff-only; then
+        log "git pull 失败（见上）。本地可能有分叉提交，请手动处理后再跑 buddy update"
+        exit 1
+    fi
+    after="$(git -C "$BUDDY_HOME" rev-parse --short HEAD)"
+
+    if [[ "$before" == "$after" ]]; then
+        log "代码已是最新（${after}），仍继续同步依赖并重启"
+    else
+        log "已更新 $before -> $after"
+    fi
+
+    if command -v uv >/dev/null 2>&1; then
+        log "同步依赖（uv sync）…"
+        # 在仓库目录里跑：uv 靠 pyproject.toml/uv.lock 定位项目
+        ( cd "$BUDDY_HOME" && uv sync ) || { log "uv sync 失败，已中止（服务未重启）"; exit 1; }
+    else
+        log "未找到 uv，跳过依赖同步（若报缺包请手动 uv sync）"
+    fi
+
+    log "重启服务…"
+    cmd_restart
+}
+
 open_ui() {
     if command -v open >/dev/null 2>&1; then
         open "$UI_URL"
@@ -259,6 +316,7 @@ case "${1:-}" in
         wait_healthy || true
         open_ui ;;
     service)      shift; cmd_service "$@" ;;
+    update)       cmd_update ;;
     install)      cmd_install ;;
     -h|--help|help|"")
         sed -n '/^# buddy - /,/^#   PROXY_HOST/p' "$0" | sed 's/^# \{0,1\}//'
