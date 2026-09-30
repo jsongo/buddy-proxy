@@ -1,0 +1,107 @@
+"""trae 通道 deepseek-v4.1-flash 接入回归测试（离线，不访问上游）。
+
+背景（2026-09-30 实测）：``deepseek-v4.1-flash`` 在 trae 通道可用（native
+chat_v3 直通：聊天 / 读图 / 原生工具调用全通），但 ``MODEL_TIERS`` 原先只收了
+上一代 ``DeepSeek-V4-Flash`` / ``DeepSeek-V4-Pro``——与 glm-5.3-flashx 同一批
+「上游已放行、目录漏收」的隐状态。
+
+**本文件存在的核心价值是把「凭什么说它是 V4.1 而不是 V4-Flash」的判定方法
+留下来。**名字被上游接受 ≠ 服务的真是这个模型（上游完全可能把名字别名到
+别的权重），而 self-report 不可靠——实测对照组 deepseek-v4-flash 自称
+"deepseek-chat"，V4.1-Flash 反而诚实说 "unknown"。所以只能靠**能力指纹**：
+
+V4-Flash 无视觉（config.py 早有记载，本次对照实验复核），V4.1-Flash 有。
+各打 5 张纯色 1x1 PNG 问颜色：
+
+- ``deepseek-v4.1-flash``：**5/5 全对**（红/绿/蓝/黄/青），并能读图答题；
+- ``deepseek-v4-flash``（对照）：**1/5**，唯一"对"的一次是把固定幻觉
+  "蓝色"撞上了蓝图；无图时也答"蓝色"，直接问则承认「无图」。
+
+若这个名字背后真是 V4-Flash 权重，视觉表现应与对照组一样烂——它没有。
+这比 self-report 强得多，但仍属推断而非上游自证（没有任何端点回传真实
+后端模型名）；上游哪天换权重，这里的断言不会报警，知悉此局限。
+
+名字层面是**精确匹配**：``deepseek-v4.1`` / ``deepseek-v41-flash`` / 大写
+``DeepSeek-V4.1-Flash`` / ``deepseek-v4.1-flashx`` / ``deepseek-v4.1-pro``
+全部 4001——独立路由，非别名模糊匹配。故 MODEL_MAP 不得加映射（会把请求
+静默换成别的模型）。
+"""
+from __future__ import annotations
+
+from buddy_proxy.core.credit_estimate import estimate_credit
+from buddy_proxy.trae.config import (
+    MODEL_CREDITS,
+    MODEL_MAP,
+    MODEL_SUPPORTS_IMAGES,
+    MODEL_TIERS,
+    _map_model,
+    _WORK_FUNCTION_OVERRIDE,
+)
+from buddy_proxy.trae.provider import TraeProvider
+
+
+def test_v41_flash_listed_by_trae_catalog():
+    """目录里要有 v4.1-flash（/v1/models 与前端模型选择器都读它）。"""
+    ids = [m["id"] for m in TraeProvider().models()]
+    assert "deepseek-v4.1-flash" in ids
+    # 上一代两兄弟不受影响
+    assert {"deepseek-v4-flash", "DeepSeek-V4-Pro"} <= set(ids)
+
+
+def test_v41_flash_is_t1():
+    """归 T1：新一代旗舰系（读图 + 1M ctx），上一代 V4-Pro 是 T2。"""
+    assert "deepseek-v4.1-flash" in MODEL_TIERS["T1"]
+    tier = next(m["tier"] for m in TraeProvider().models()
+                if m["id"] == "deepseek-v4.1-flash")
+    assert tier == "T1"
+
+
+def test_v41_flash_is_passed_through_verbatim():
+    """模型名原样透传，不做映射——上游精确匹配的是小写字面量。
+
+    若加了 MODEL_MAP（哪怕映射到 DeepSeek-V4-Pro 这种「看似等价」的名字），
+    请求会被静默换模型；且大写 ``DeepSeek-V4.1-Flash`` 实测 4001，映射过去
+    反而把能用的名字改死。宁可红。
+    """
+    assert "deepseek-v4.1-flash" not in MODEL_MAP
+    assert _map_model("deepseek-v4.1-flash") == "deepseek-v4.1-flash"
+
+
+def test_v41_flash_declares_image_support():
+    """必须声明读图能力（实测 5/5），且**只**给这一个 deepseek。
+
+    双向都害人：漏报 → /v1/models 报纯文本，客户端（按名字猜能力的典型
+    做法）误剥图片，「明明支持却表现为不支持」；多报 → 客户端盲发图片，
+    上游 4001。上一代 V4-Flash / V4-Pro 确认读不了图，不得进表。
+    """
+    assert "deepseek-v4.1-flash" in MODEL_SUPPORTS_IMAGES
+    assert not {"deepseek-v4-flash", "DeepSeek-V4-Pro"} & MODEL_SUPPORTS_IMAGES
+    entry = next(m for m in TraeProvider().models()
+                 if m["id"] == "deepseek-v4.1-flash")
+    assert entry["images"] is True
+    # 对照组必须仍报纯文本（本文件的判定试验就是拿它当锚的）
+    ctrl = next(m for m in TraeProvider().models() if m["id"] == "deepseek-v4-flash")
+    assert ctrl["images"] is False
+
+
+def test_v41_flash_has_no_credit_multiplier_yet():
+    """倍率**故意缺席**：WorkBuddy 价目截图没有它，不编数（同 flashx 政策）。"""
+    assert "deepseek-v4.1-flash" not in MODEL_CREDITS
+    entry = next(m for m in TraeProvider().models()
+                 if m["id"] == "deepseek-v4.1-flash")
+    assert entry["credits"] is None
+    assert estimate_credit("trae", "deepseek-v4.1-flash", 30000, 100) is None
+
+
+def test_v41_flash_needs_no_function_override():
+    """不要凭猜测给 v4.1-flash 加 ``_WORK_FUNCTION_OVERRIDE``。
+
+    实测全部走默认主路径 native chat_v3（聊天/读图/工具全通），Work 通道
+    （solo_work_lite）从未触发、未实测。真在那里失败时应该让 4001 冒出来。
+    """
+    assert "deepseek-v4.1-flash" not in _WORK_FUNCTION_OVERRIDE
+
+
+def test_v41_flash_auto_matches_trae_channel():
+    """裸名要能被 trae 通道认领（forward_chat 自动路由；路由侧已剥前缀）。"""
+    assert TraeProvider().accepts_model("deepseek-v4.1-flash")

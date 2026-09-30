@@ -82,8 +82,35 @@ MODEL_MAP: dict[str, str] = {
 # qwen 两种写法并存（qwen3.8-max 用点号、qwen-3.7-plus 用连字符）。
 # kimi-k3 需会员 Pro+/Ultra/Express（免费账号 1005）；付费账号实测可用
 # （2026-09-06 chat_v3 出流正常），故收录。
+#
+# glm-5.3-flashx（2026-09-30 补录）：上游已放行但本表原先漏收——它不在
+# MODEL_MAP 里、模型名原样透传，所以「能通却不出现在 /v1/models」。
+# 实测判定依据（三条一起看才排除了「别名模糊匹配」的解释）：
+#   1. 源码中无任何 flashx 映射（原样透传，上游自己认这个名字）；
+#   2. 上游精确匹配：glm-5.3-flashxx / glm-5.3-flashX 均被 4001
+#      "param is invalid" 拒绝——若按前缀或大小写不敏感解析，这两个不会死；
+#   3. 连续多次 200 且回真实 usage，自述为 Z.ai GLM 系。
+# 注意 zcode 通道对同一模型返回 1311「套餐暂未开放」，别被名字相近误导：
+# 两个通道是各自独立的授权，这里能通不代表 zcode 也能通。
+#
+# deepseek-v4.1-flash（2026-09-30 补录）：与 flashx 同一批漏收——源码无映射、
+# 原样透传、上游已放行。归 T1 的理由：新一代旗舰系（原生读图 + 1M ctx，
+# 与 glm-5.3-flash 在 T1 的定位一致；上一代 DeepSeek-V4-Pro 是 T2）。
+# **它确实是 V4.1 权重而不是 V4-Flash**（名字被上游接受 ≠ 服务的真是这个
+# 模型，还得靠能力指纹区分——self-report 不可靠，V4-Flash 会自称
+# "deepseek-chat"）。判定试验（各 5 张纯色 1x1 PNG 问颜色）：
+#   deepseek-v4.1-flash  5/5 全对（红/绿/蓝/黄/青），且能读图答题；
+#   deepseek-v4-flash    1/5，唯一"对"的那次是把固定幻觉"蓝色"撞上了蓝图；
+#                        去掉图片它也答"蓝色"，直接问则承认「无图」。
+# 若这个名字背后真是 V4-Flash 权重，视觉表现应与对照组一样烂——它没有。
+# 另：上游对该名**精确匹配**（deepseek-v4.1 / v41 / 大写变体 / -flashx
+# 全部 4001），说明走的是独立路由而非别名模糊匹配。
+# Work 通道（solo_work_lite，即文本协议回落时经 ~/.ethan/trae_work.json
+# 转投的那条）未实测——native chat_v3 已通，用不上；**不要**凭猜测往
+# _WORK_FUNCTION_OVERRIDE 加条目，真失败时让它诚实地 4001 冒出来。
 MODEL_TIERS: dict[str, list[str]] = {
-    "T1": ["glm-5.3", "glm-5.3-flash", "Doubao-Seed-Evolving", "kimi-k3"],
+    "T1": ["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx",
+           "deepseek-v4.1-flash", "Doubao-Seed-Evolving", "kimi-k3"],
     "T2": ["glm-5.2", "Doubao-Seed-2.1-Pro", "DeepSeek-V4-Pro",
            "kimi-k2.7-code", "qwen3.8-max"],
     "T3": ["Doubao-Seed-2.1-Turbo", "DeepSeek-V4-Flash", "minimax-m3",
@@ -95,6 +122,11 @@ MODEL_TIERS: dict[str, list[str]] = {
 # （2026-09-05 版，WorkBuddy 定价截图）。别名（如 deepseek-v4-flash）由
 # models() 按 MODEL_MAP 解析到内部名后取同一倍率。
 # glm-5 / glm-5-turbo / glm-5.1 / kimi-k2.6 官方最新价目已下架，未收录。
+# glm-5.3-flashx / deepseek-v4.1-flash 同理**故意不给**：两者已在 T1（可用），
+# 但官方价目页与 WorkBuddy 定价截图都没有它们的倍率，凭「比谁强一点」猜一个
+# 数会让 /ui 的积分估算看起来精确、实际是编的。缺键时 models() 报
+# credits=None、estimate_credit() 返回 None，界面不显示估算——比显示假值诚实。
+# 拿到真实倍率后补一行即可，无需改动别处。
 MODEL_CREDITS: dict[str, str] = {
     "Doubao-Seed-Evolving": "x0.77",
     "Doubao-Seed-2.1-Pro": "x0.77",
@@ -116,8 +148,10 @@ MODEL_CREDITS: dict[str, str] = {
 # 这些模型上游 llm_utils_chat 接受 OpenAI 风格 image_url（data URL）block。
 #
 # 注意：Trae 目录里的 DeepSeek-V4-Flash / V4-Pro **不支持**图片输入；
-# 该目录中带图片能力的是新一代的 DeepSeek-V4.1-Flash / DeepSeek-Flash
-# （与 CodeBuddy 通道的 deepseek-v4.1-flash 同源），接入后把内部名加进来。
+# 带图片能力的是新一代 deepseek-v4.1-flash（2026-09-30 实测收录：5 张纯色
+# 1x1 PNG 问颜色 5/5 全对，且对照组 deepseek-v4-flash 确认读不了图——
+# 判定过程见 MODEL_TIERS 处注释）。注意内部名是**全小写**
+# ``deepseek-v4.1-flash``，大写 DeepSeek-V4.1-Flash 会被上游 4001。
 # 若声明与实际不符，会导致 /v1/models 把纯文本模型报成可读图，客户端盲发
 # 图片 → 上游 4001。
 #
@@ -126,7 +160,7 @@ MODEL_CREDITS: dict[str, str] = {
 # 误剥图片，表现为「不支持读图」——即使模型本身支持。
 #
 # 未在此列表中的模型一律按不支持处理（保守）。
-MODEL_SUPPORTS_IMAGES: set[str] = set()
+MODEL_SUPPORTS_IMAGES: set[str] = {"deepseek-v4.1-flash"}
 
 # 部分模型在 solo_work_lite function 下不可用（服务端 4001），需改用 chat_v3。
 # 实测（2026-09-03）：glm-5.1 / Doubao-Seed-Code 仅在 chat_v3 下可路由；
