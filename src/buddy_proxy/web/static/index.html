@@ -59,9 +59,12 @@
   .alertbar .ab-close { flex: none; background: transparent; border: 1px solid rgba(255,107,107,.45);
                         color: #ffd0d0; border-radius: 6px; padding: 1px 8px; font-size: 12px; }
   .alertbar .ab-close:hover { background: rgba(255,107,107,.2); border-color: #ff6b6b; color: #fff; }
-  /* 请求日志快速筛选（通道/模型/客户端，复用 .rb-btn 按钮态） */
-  .log-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 2px 0 10px; }
-  .log-filters .lf-label { font-size: 12px; color: var(--muted); }
+  /* 请求日志快速筛选（通道/模型/客户端，复用 .rb-btn 按钮态）。
+     三组各占一行：组间靠纵向间距分行，组名做成小徽章与按钮区分 */
+  .log-filters { display: flex; flex-direction: column; gap: 7px; margin: 2px 0 10px; }
+  .lf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .log-filters .lf-label { font-size: 11.5px; color: var(--muted); background: var(--card2);
+    border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; flex: none; }
   .log-filters .rb-btn { display: inline-flex; align-items: center; }
   .log-filters .lf-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 6px; }
   .rb-sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
@@ -646,14 +649,14 @@ function renderLogFilters() {
   const clients = RANGE_CLIENTS;
   const btn = (kind, val, inner) =>
     `<button class="rb-btn${LOG_FILTERS[kind].has(val) ? ' active' : ''}" data-kind="${kind}" data-val="${esc(val)}">${inner}</button>`;
+  // 三组各占一行（.lf-row）：组名徽章 + 该组按钮；空组整行不渲染
+  const row = (label, buttons) =>
+    buttons.length ? `<div class="lf-row"><span class="lf-label">${label}</span>${buttons.join('')}</div>` : '';
   el.innerHTML =
-    (provs.length ? `<span class="lf-label">通道</span>` +
-      provs.map(p => btn('provider', p,
-        `<i class="lf-dot" style="background:${pcolor(p)}"></i>${esc(p)}`)).join('') : '') +
-    (models.length ? `<span class="rb-sep"></span><span class="lf-label">模型</span>` +
-      models.map(m => btn('model', m, esc(m))).join('') : '') +
-    (clients.length ? `<span class="rb-sep"></span><span class="lf-label">客户端</span>` +
-      clients.map(c => btn('client', c, esc(c))).join('') : '');
+    row('通道', provs.map(p => btn('provider', p,
+      `<i class="lf-dot" style="background:${pcolor(p)}"></i>${esc(p)}`))) +
+    row('模型', models.map(m => btn('model', m, esc(m)))) +
+    row('客户端', clients.map(c => btn('client', c, esc(c))));
 }
 document.getElementById('log-filters').addEventListener('click', ev => {
   const b = ev.target.closest('.rb-btn'); if (!b) return;
