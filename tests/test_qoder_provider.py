@@ -1032,6 +1032,9 @@ def test_quota_includes_dedicated_resource_packages():
         "userType": "personal_professional",
         "usageType": "credits",
         "isQuotaExceeded": False,
+        # 上游自己的聚合字段：0~1 的小数比例（**不是**百分数），
+        # 取「三份相加的已用比例」；下面有断言盯着它跟 items 对得上。
+        "totalUsagePercentage": 0.13,
         "expiresAt": 1793289600000,
         "userQuota": {"total": 2000.0, "used": 69.0, "remaining": 1931.0, "percentage": 0.04},
         "addOnQuota": {"total": 300.0, "used": 300.0, "remaining": 0.0, "percentage": 1.0},
@@ -1070,6 +1073,19 @@ def test_quota_includes_dedicated_resource_packages():
     # 只把三行列出来而不置位的话，界面依旧只显示第一行（剩 1931/2000），
     # 用户看到的数还是比实际少一截——等于这个修复只做了一半。
     assert out["sum_items"] is True, "三份额度并存，必须声明可合计"
+    # 而且「相加」不是我们拍的：上游自己就有个聚合字段 ``totalUsagePercentage``
+    # （→ ``total_percent``），它应当约等于三份合计的已用比例。这条把「可合计」
+    # 这个判断**钉在上游数据上**——哪天上游改成「订阅额度已含加油包」，这个
+    # 等式就会破，届时求和反而会把额度算多，测试会先于用户发现。
+    summed_used = sum(i["used"] for i in out["items"])
+    summed_total = sum(i["total"] for i in out["items"])
+    ours = summed_used / summed_total
+    upstream = out["total_percent"]
+    assert upstream is not None, "上游聚合字段缺失，无法校验可加性"
+    assert abs(ours - upstream) < 0.01, (
+        f"三份相加的已用比例 {ours:.4f} 与上游 total_percent {upstream} 对不上，"
+        f"说明这几份可能不是并存关系，不能再相加"
+    )
 
 
 def test_quota_skips_unavailable_packages():
