@@ -1273,6 +1273,29 @@ def test_zcode_quota_window_name_beats_distance_to_reset():
     assert "CREDIT_LIMIT" not in labels
 
 
+def test_zcode_quota_window_label_has_no_ugly_floats():
+    """展示名不该出现「10.0 天窗口」「0.0166667 小时窗口」这种。
+
+    ``span / 86400`` 在恰好 10 天时是 ``10.0``，``span / 3600`` 遇到分钟级
+    窗口会铺出一长串小数。都是能算出来的边界，顺手格式化掉。
+    """
+    def label(unit, number):
+        (item,) = _quota_items({"limits": [
+            {"type": "CREDIT_LIMIT", "unit": unit, "number": number, "usage": 100,
+             "currentValue": 0, "remaining": 100, "percentage": 0}]})
+        return item["label"]
+
+    assert label(4, 10) == "10 天窗口"          # 不是「10.0 天窗口」
+    assert label(3, 24) == "24 小时窗口"         # 恰好一天走小时档，整数
+    assert label(3, 5) == "5 小时窗口"
+    assert "." not in label(4, 10)
+    # 分钟级窗口能显示，且不糊一长串
+    minute = label(3, 1 / 60)
+    assert minute.endswith("小时窗口")
+    assert len(minute) <= len("0.01667 小时窗口"), minute
+    assert minute.count("6") <= 3, minute       # 不是 0.016666666666666666
+
+
 def test_zcode_quota_tolerates_junk_unit_and_number():
     """``unit``/``number`` 当不可信输入：给成字符串也不能把面板搞崩。
 

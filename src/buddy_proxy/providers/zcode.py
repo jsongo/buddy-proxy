@@ -166,9 +166,9 @@ def _window_label(
         return "MCP 调用（月）"
     if span:
         if span <= 86400:
-            return f"{_fmt_hours(span)} 小时窗口"
+            return f"{_fmt_num(span / 3600)} 小时窗口"
         if span <= 86400 * 10:
-            return f"{span // 86400} 天窗口"
+            return f"{_fmt_num(span / 86400)} 天窗口"
         return "月窗口"
     if reset_ts:
         # 兜底：上游没给 unit 时，只能拿「距重置还有多久」凑一个大致档位。
@@ -182,9 +182,16 @@ def _window_label(
     return ltype or "用量窗口"
 
 
-def _fmt_hours(seconds: float) -> str:
-    hours = seconds / 3600
-    return str(int(hours)) if hours == int(hours) else f"{hours:g}"
+def _fmt_num(value: float) -> str:
+    """整数就不带小数点（``5`` 而不是 ``5.0``），非整数最多给 4 位有效小数。
+
+    ``span / 86400`` 在恰好 10 天时是 ``10.0``，直接插进 f-string 会渲染成
+    「10.0 天窗口」；而 ``span / 3600`` 遇到不足 1 小时的窗口（上游给分钟级）
+    会铺出 ``0.0166667`` 这种一长串。展示名是给人看的，两种都修掉。
+    """
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.4g}"
 
 
 def _quota_items(data: dict[str, Any]) -> list[dict[str, Any]]:
