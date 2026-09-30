@@ -59,7 +59,7 @@
   .alertbar .ab-close { flex: none; background: transparent; border: 1px solid rgba(255,107,107,.45);
                         color: #ffd0d0; border-radius: 6px; padding: 1px 8px; font-size: 12px; }
   .alertbar .ab-close:hover { background: rgba(255,107,107,.2); border-color: #ff6b6b; color: #fff; }
-  /* 请求日志快速筛选（通道/模型，复用 .rb-btn 按钮态） */
+  /* 请求日志快速筛选（通道/模型/客户端，复用 .rb-btn 按钮态） */
   .log-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 2px 0 10px; }
   .log-filters .lf-label { font-size: 12px; color: var(--muted); }
   .log-filters .rb-btn { display: inline-flex; align-items: center; }
@@ -632,7 +632,7 @@ function onDateInput() {
 document.getElementById('rb-start').addEventListener('change', onDateInput);
 document.getElementById('rb-end').addEventListener('change', onDateInput);
 
-// ---- 请求日志快速筛选（通道 / 模型）----
+// ---- 请求日志快速筛选（通道 / 模型 / 客户端）----
 // 点一次选中、再点取消；组内多选 = OR，组与组之间 = AND；全不选 = 不筛。
 // 通道/模型候选从当前日期范围有流量的数据动态生成（RANGE_MODELS）；
 // 客户端候选来自日志接口返回的 RANGE_CLIENTS（该维度统计里没有，只能从日志行收集）。
