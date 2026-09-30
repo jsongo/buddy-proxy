@@ -84,13 +84,20 @@ def test_v41_flash_declares_image_support():
     assert ctrl["images"] is False
 
 
-def test_v41_flash_has_no_credit_multiplier_yet():
-    """倍率**故意缺席**：WorkBuddy 价目截图没有它，不编数（同 flashx 政策）。"""
-    assert "deepseek-v4.1-flash" not in MODEL_CREDITS
+def test_v41_flash_credit_multiplier():
+    """目录展示倍率 x0.08，积分估算走实测计价（口径不同，同 flashx）。
+
+    x0.08 来自 2026-09-30 官方倍率面板，带「会员5折」徽章（未折价 0.16——
+    对账数据更接近按 0.16 计费，5 折疑似账单外补偿，未证实）。注意与本表
+    ``DeepSeek-V4-Flash`` 的 x0.08 数值撞车但来源不同（旧值出自 2026-09-05
+    知识库）。估算走 ``MEASURED_CREDIT_RATES``：(30000,100) ≈
+    30000×3.41e-5 + 100×1.39e-4 ≈ 1.04。
+    """
+    assert MODEL_CREDITS["deepseek-v4.1-flash"] == "x0.08"
     entry = next(m for m in TraeProvider().models()
                  if m["id"] == "deepseek-v4.1-flash")
-    assert entry["credits"] is None
-    assert estimate_credit("trae", "deepseek-v4.1-flash", 30000, 100) is None
+    assert entry["credits"] == "x0.08"
+    assert estimate_credit("trae", "deepseek-v4.1-flash", 30000, 100) == 1.04
 
 
 def test_v41_flash_needs_no_function_override():

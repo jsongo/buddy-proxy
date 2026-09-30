@@ -93,6 +93,15 @@ def _multiplier(provider: str, model: str) -> float | None:
         return None
 
 
+def _load_trae_measured_rates() -> dict[str, tuple[float, float]]:
+    """惰性加载 trae 实测计价表（避免模块级循环导入）。"""
+    try:
+        from ..trae.config import MEASURED_CREDIT_RATES
+        return MEASURED_CREDIT_RATES
+    except Exception:
+        return {}
+
+
 def estimate_credit(
     provider: str,
     model: str,
@@ -102,11 +111,21 @@ def estimate_credit(
 ) -> float | None:
     """按 token 估算单次积分消耗；无系数/倍率表或无 token 数据时返回 None。
 
-    zcode 走官方抵扣公式（见 :func:`_estimate_zcode`），trae 走倍率粗估。
-    返回值统一 round 到 2 位（与 Trae 网页使用记录的展示粒度一致）。
+    zcode 走官方抵扣公式（见 :func:`_estimate_zcode`）；trae 优先用实测计价表
+    （``MEASURED_CREDIT_RATES``，输入/输出分开计价、与官方账单对账校准——
+    「100×倍率/1M 总 tokens」公式对已实测模型偏差约 9 倍），未实测的退回倍率
+    粗估。返回值统一 round 到 2 位（与 Trae 网页使用记录的展示粒度一致）。
     """
     if provider == "zcode":
         return _estimate_zcode(model, prompt_tokens, completion_tokens, cached_tokens)
+    rates = _load_trae_measured_rates().get(model) if provider == "trae" else None
+    if rates is not None:
+        in_rate, out_rate = rates
+        total = in_rate * max(0, int(prompt_tokens or 0)) + \
+            out_rate * max(0, int(completion_tokens or 0))
+        if total <= 0:
+            return None
+        return round(total, 2)
     mult = _multiplier(provider, model)
     if mult is None:
         return None

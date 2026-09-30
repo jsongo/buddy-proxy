@@ -122,19 +122,25 @@ MODEL_TIERS: dict[str, list[str]] = {
 # （2026-09-05 版，WorkBuddy 定价截图）。别名（如 deepseek-v4-flash）由
 # models() 按 MODEL_MAP 解析到内部名后取同一倍率。
 # glm-5 / glm-5-turbo / glm-5.1 / kimi-k2.6 官方最新价目已下架，未收录。
-# glm-5.3-flashx / deepseek-v4.1-flash 同理**故意不给**：两者已在 T1（可用），
-# 但官方价目页与 WorkBuddy 定价截图都没有它们的倍率，凭「比谁强一点」猜一个
-# 数会让 /ui 的积分估算看起来精确、实际是编的。缺键时 models() 报
-# credits=None、estimate_credit() 返回 None，界面不显示估算——比显示假值诚实。
-# 拿到真实倍率后补一行即可，无需改动别处。
+# glm-5.3-flashx / deepseek-v4.1-flash：2026-09-30 由用户从 WorkBuddy 客户端
+# 「模型倍率」面板截图取得（x0.31 / x0.08）。同图里 glm-5.3-flash x0.06 /
+# kimi-k3 x1.83 / minimax-m3 x0.26 / qwen3.8-max x1.50 与本表完全吻合，口径一致。
+# 注意同图部分旧模型与本表有小差（glm-5.3 / glm-5.2 显示 0.39、DeepSeek-V4-Flash
+# 显示 0.10，均带「会员5折」徽章；V4-Pro 带「闲时折扣」徽章）——疑似促销期浮动，
+# 本表维持知识库原值未动；若要跟价需定期截图更新，静态表追不动动态折扣。
+# 图中另有 Step-5-Preview(0.48) / Kimi-K2.8-Preview(0.98) / Qwen3.8-Flash(0.08)
+# 未接入 trae 目录——可用性未实测，**勿只凭价目表收录**（deepseek-v4.1-pro 就
+# 是反例：价目之外的「名字被上游接受」才是收录依据）。
 MODEL_CREDITS: dict[str, str] = {
     "Doubao-Seed-Evolving": "x0.77",
     "Doubao-Seed-2.1-Pro": "x0.77",
     "Doubao-Seed-2.1-Turbo": "x0.10",
     "Doubao-Seed-Code": "x0.03",
     "glm-5.3-flash": "x0.06",
+    "glm-5.3-flashx": "x0.31",
     "glm-5.3": "x0.40",
     "glm-5.2": "x0.40",
+    "deepseek-v4.1-flash": "x0.08",
     "kimi-k3": "x1.83",
     "DeepSeek-V4-Flash": "x0.08",
     "DeepSeek-V4-Pro": "x0.72",
@@ -161,6 +167,33 @@ MODEL_CREDITS: dict[str, str] = {
 #
 # 未在此列表中的模型一律按不支持处理（保守）。
 MODEL_SUPPORTS_IMAGES: set[str] = {"deepseek-v4.1-flash"}
+
+# 实测计价（2026-09-30，官方「使用记录」对账法）：模型 -> (输入单价, 输出单价)，
+# 单位：积分/token。credits ≈ in_rate×prompt_tokens + out_rate×completion_tokens。
+#
+# 背景：MODEL_CREDITS 的「100×倍率/1M 总 tokens」公式对这两个模型**不成立**——
+# 官方真实计费对输入/输出分开计价（out ≈ 4×in），按面板倍率线性折算会差约 9 倍
+# （flashx 247 tokens 官方收 0.07，公式只算出 0.008）。上表 x0.31/x0.08 保留作
+# 目录展示（官方面板相对倍率），**积分估算一律走本表**。
+#
+# 测法：构造「大输入小输出」+「小输入大输出」各一条，与官方账单积分构成二元
+# 方程组解出单价；再用其余官方记录回代验证——9 条命中 8 条（唯一偏差 0.0753
+# vs 0.07，骑在舍入边界上，上游疑似 floor 而非 round）。
+# 附带发现：
+# - deepseek-v4.1-flash 在官方账单挂在「DeepSeek-V4-Flash 正式版」名下（计费
+#   产品族归属，不代表权重是 V4——能力指纹已证是 V4.1）；
+# - 面板 x0.08 带「会员5折」徽章；若按未折价 0.16 归一，两模型隐含基价接近
+#   （in ≈2.1~2.6e-4、out ≈8.7~9.1e-4 /token/倍率）——猜测 5 折在账单外补偿，
+#   未证实，勿当结论引用；
+# - 断连的请求上游照常计费（实测一次 RemoteDisconnected 仍出账 2.16），对账时
+#   注意本侧 metrics 没有它的 token 记录。
+# 局限：in 价未细分缓存命中折扣（Claude Code 类大缓存流量会被高估），待有缓存
+# 账单样本再拆。其余 trae 模型仍走倍率公式（其校准为 2026-09-05，若有偏差可用
+# 同法复测）。单价随官方调价会漂移，偏差变大时重跑对账即可。
+MEASURED_CREDIT_RATES: dict[str, tuple[float, float]] = {
+    "glm-5.3-flashx": (7.98e-5, 2.81e-4),
+    "deepseek-v4.1-flash": (3.41e-5, 1.39e-4),
+}
 
 # 部分模型在 solo_work_lite function 下不可用（服务端 4001），需改用 chat_v3。
 # 实测（2026-09-03）：glm-5.1 / Doubao-Seed-Code 仅在 chat_v3 下可路由；

@@ -79,17 +79,19 @@ def test_flashx_needs_no_function_override():
     assert "glm-5.3-flashx" not in _WORK_FUNCTION_OVERRIDE
 
 
-def test_flashx_has_no_credit_multiplier_yet():
-    """倍率**故意缺席**：没拿到真实倍率就不编。
+def test_flashx_credit_multiplier():
+    """目录展示倍率 x0.31，积分估算走实测计价（两者口径不同，见下）。
 
-    官方价目页与 WorkBuddy 定价截图都没有它的倍率。缺键时目录报
-    ``credits=None``、估算返回 ``None``（界面不显示），比显示一个猜出来的
-    假值诚实。这条同时也盯住「别为了凑整齐随手填一个数」。
+    x0.31 来自 2026-09-30 WorkBuddy 客户端倍率面板截图（口径已经过 4 个旧
+    模型交叉验证）。但**积分估算不能用它线性折算**：官方真实计费对输入/输出
+    分开计价（out≈4×in），「100×倍率/1M 总 tokens」会差约 9 倍——估算走
+    ``MEASURED_CREDIT_RATES`` 实测单价（官方账单对账解出，9 条记录回代 8 中）。
+    (30000,100) 实测口径：30000×7.98e-5 + 100×2.81e-4 ≈ 2.42。
     """
-    assert "glm-5.3-flashx" not in MODEL_CREDITS
+    assert MODEL_CREDITS["glm-5.3-flashx"] == "x0.31"
     entry = next(m for m in TraeProvider().models() if m["id"] == "glm-5.3-flashx")
-    assert entry["credits"] is None, "缺倍率时应为 None 而非编造的值"
-    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) is None
+    assert entry["credits"] == "x0.31"
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 2.42
 
 
 def test_flashx_auto_matches_trae_channel():
