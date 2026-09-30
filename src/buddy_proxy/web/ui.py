@@ -817,21 +817,23 @@ async def ui_model_order(request: Request):
     current = getattr(state, "model_order", None) or {}
     if not isinstance(current, dict):
         current = dict(current)
+    # 清顺序时顺带清标记：用户显式改 = 重置健康判断，避免刚配完还是被冷却挡着。
+    # 必须在 pop 之前取旧目标列表，否则读到的是已被删空的值。
+    cleared = 0
     # **收敛同名的遗留键**：老配置里同一个模型可能既有 `<通道>/<名>` 又有裸名
     # （用户手改过、或从旧版本升上来）。保存裸名那一份时必须把带前缀的旧键一起
     # 删掉，否则一个模型在页面上就是两张卡、配置里两条规则，而哪条生效取决于
     # 转发侧的查找顺序——用户会看到「改了一条，行为没变」。
     # 只删**同名**且前缀是**已知通道**的（`x/glm-5.3` 对 `glm-5.3`）；不同模型
     # 互不影响，`openrouter/...` 这种普通模型 id 也不会被误伤。
+    # 放在「写新值」之前：下面 `targets` 为空时就是「删掉这个模型」，遗留旧键
+    # 也该一起走。
     for k in [k for k in current if k != key and _split_known_prefix(k)[1] == key]:
         for target in current.get(k) or []:
             if isinstance(target, str) and "/" in target:
                 # 旧键上的冷却标记一并清掉：那条规则本身要没了，标记只会误导
-                cooldown_mod.clear(*target.split("/", 1))
+                cleared += cooldown_mod.clear(*target.split("/", 1))
         current.pop(k, None)
-    # 清顺序时顺带清标记：用户显式改 = 重置健康判断，避免刚配完还是被冷却挡着。
-    # 必须在 pop 之前取旧目标列表，否则读到的是已被删空的值。
-    cleared = 0
     if targets:
         current[key] = targets
     else:
@@ -947,7 +949,7 @@ async def ui_model_order_mark_clear(request: Request):
         cleared = cooldown_mod.clear()
         return {"ok": True, "marks_cleared": cleared}
 
-    # 键与保存端点同一口径（对外发布名，不套 resolve_model），否则查不到刚存的键。
+    # 用规范化后的名字（对外发布名，不套 resolve_model）去查刚存的键，否则查不到。
     # 但**校验失败不报错**：清冷却是个纯缓存操作，跟「模型是否还在目录里」无关——
     # 报「模型不在通道的模型列表中」会让人以为保存失败了跑去翻配置，而实际什么都没坏
     # （模型下架后想清掉残留标记是完全合理的）。所以校验不过就退回原始名字清一次。
