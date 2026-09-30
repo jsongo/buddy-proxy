@@ -47,6 +47,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ./buddy stop / restart / status / logs
 ./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder)
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
+./buddy update             # update to the latest code (git pull -> uv sync -> restart)
 
 # one-time install: put buddy on your PATH so it works from anywhere
 ./buddy install            # -> /usr/local/bin (falls back to ~/.local/bin)
@@ -59,6 +60,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 
 - When the service is installed, `buddy start/stop/restart` automatically use `launchctl`; otherwise they fall back to `proxy.sh`'s pid management.
 - Env vars `PROXY_HOST` (default `0.0.0.0`), `PROXY_PORT` (default `8787`) and `PROXY_EXTRA_ARGS` apply to both `start` and `service install`.
+- `buddy update` runs `git pull --ff-only` in the repo it was installed from, then `uv sync`, then restarts the service. It **refuses to run when the working tree has uncommitted changes** — it will not stash, merge or otherwise touch work in progress, so a half-finished edit can never be silently overwritten. The refusal prints the offending files and a hint tailored to what is actually dirty: if any untracked file is present it suggests `git stash -u` (plain `git stash` leaves untracked files behind, so following that advice would land you right back on the same refusal), otherwise plain `git stash`. `--ff-only` means a diverged branch fails loudly instead of creating a surprise merge commit — the failure message quotes git's own wording (`Not possible to fast-forward` vs `Could not read from remote`) so you can tell a diverged branch from an unreachable remote. If `uv sync` fails the service is left running rather than restarted onto broken dependencies. Running it on an already-current checkout is harmless: it just re-syncs dependencies and restarts.
 
 ### The `proxy.sh` management script
 

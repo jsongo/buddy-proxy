@@ -9,6 +9,8 @@
 #   buddy logs               跟踪日志
 #   buddy login [provider]   登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder）
 #   buddy ui                 仅打开管理页（必要时先启动）
+#   buddy update             更新到最新代码（git pull -> uv sync -> 重启）
+#                            工作树有未提交改动会中止，不会覆盖你的改动
 #
 # 服务化（macOS launchd，登录自启 + 崩溃自动拉起）：
 #   buddy service install    注册系统服务
@@ -203,9 +205,92 @@ wait_healthy() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# 更新（拉代码 -> 装依赖 -> 重启）
+# ---------------------------------------------------------------------------
+
+# 工作树里是否有未提交改动（含未跟踪文件，但不含被忽略的 logs/ .venv/ 等）
+tree_dirty() {
+    [[ -n "$(git -C "$BUDDY_HOME" status --porcelain 2>/dev/null)" ]]
+}
+
+cmd_update() {
+    command -v git >/dev/null 2>&1 || { log "没装 git，无法更新"; exit 1; }
+    git -C "$BUDDY_HOME" rev-parse --git-dir >/dev/null 2>&1 \
+        || { log "$BUDDY_HOME 不是 git 仓库，无法更新（手动下载新版本后重跑 buddy restart）"; exit 1; }
+
+    # 有未提交改动就停下：下面要 pull，脏工作树轻则 pull 失败、重则把别人的
+    # 在制品搅在一起。宁可不动，也不要「更新」成一半的状态。
+    if tree_dirty; then
+        log "工作树有未提交改动，已中止更新（避免覆盖它们）："
+        git -C "$BUDDY_HOME" status --short | sed 's/^/  /'
+        # 按类型给对应的处理办法。只写 `git stash` 是不够的：脏判定用的是
+        # `status --porcelain`（含未跟踪文件），而 `git stash` 默认不收未跟踪
+        # 文件——用户照着做完会得到 "No local changes to save"，再跑 update
+        # 被同一理由拦住，看起来像卡死。所以未跟踪的另给 -u 或忽略两种出路。
+        # 只要有未跟踪文件（`??`），光 `git stash` 就清不干净——它默认不收
+        # 未跟踪的，用户照做后会带着同一个 `??` 再被拦一次。所以判据是
+        # 「**有没有** `??`」而不是「是不是只有 `??`」：混着改动的场景下
+        # `stash -u` 同样管用（已跟踪的也一并收），没有才给普通 stash。
+        if git -C "$BUDDY_HOME" status --porcelain | grep -q '^??'; then
+            log "改动里含未跟踪文件，git stash 默认收不走它们，改用："
+            log "  git -C \"$BUDDY_HOME\" stash -u      # 连未跟踪一起收"
+            log "  或者删掉 / 加进 .gitignore 后重跑 buddy update"
+        else
+            log "处理完再试：git -C \"$BUDDY_HOME\" stash  或提交后重跑 buddy update"
+        fi
+        exit 1
+    fi
+
+    local branch before after
+    branch="$(git -C "$BUDDY_HOME" rev-parse --abbrev-ref HEAD)"
+    before="$(git -C "$BUDDY_HOME" rev-parse --short HEAD)"
+
+    # ${var} 必须带花括号：变量名后面紧跟中文时，bash 会把多字节字符的首字节
+    # 当成变量名的一部分（实测 `"$before，拉取中"` 报 `before\xef: unbound variable`）
+    log "当前分支 ${branch} @ ${before}，拉取中…"
+    # --ff-only：本地若已有分叉提交就直接报错，不做任何隐式合并/rebase
+    if ! git -C "$BUDDY_HOME" pull --ff-only; then
+        # 别把失败一口咬定成分叉：远端不可达（断网 / 代理挂了）也走这里，
+        # 那种情况提示「本地有分叉」会把人支到错的方向去翻本地历史。
+        # 所以先让用户看 git 自己的报错，分叉只作为其中一种可能提一句。
+        # 两种情况照 git 的**原话**给（实测原文，别改写，否则对不上屏幕上的报错）：
+        #   分叉     -> fatal: Not possible to fast-forward, aborting.
+        #   连不上   -> fatal: Could not read from remote repository.
+        log "git pull 失败（原因见上面的 git 报错），已中止更新"
+        log "  出现 Not possible to fast-forward：本地有分叉提交，需手动处理"
+        log "  出现 Could not read from remote ：网络/代理/远端地址问题"
+        exit 1
+    fi
+    after="$(git -C "$BUDDY_HOME" rev-parse --short HEAD)"
+
+    if [[ "$before" == "$after" ]]; then
+        log "代码已是最新（${after}），仍继续同步依赖并重启"
+    else
+        log "已更新 $before -> $after"
+    fi
+
+    if command -v uv >/dev/null 2>&1; then
+        log "同步依赖（uv sync）…"
+        # 在仓库目录里跑：uv 靠 pyproject.toml/uv.lock 定位项目
+        ( cd "$BUDDY_HOME" && uv sync ) || { log "uv sync 失败，已中止（服务未重启）"; exit 1; }
+    else
+        log "未找到 uv，跳过依赖同步（若报缺包请手动 uv sync）"
+    fi
+
+    log "重启服务…"
+    cmd_restart
+}
+
 open_ui() {
+    # 「顺手打开管理页」是**尽力而为**，打不开不该让整条命令失败。缺了
+    # `|| true` 时 `set -e` 会把失败往外传：无头机器 / 没装浏览器 / `open`
+    # 自己报错时，`buddy update` 会在**已经更新成功并重启完**之后以非零退出
+    # （CI 上实测 exit 3，日志里 "已更新 -> " "重启服务" 全打完了），
+    # 用户看到失败会以为没更成，实际早更完了。xdg-open 那支本来就带了
+    # `|| true`，open 这支漏了。
     if command -v open >/dev/null 2>&1; then
-        open "$UI_URL"
+        open "$UI_URL" 2>/dev/null || true
     elif command -v xdg-open >/dev/null 2>&1; then
         xdg-open "$UI_URL" 2>/dev/null || true
     else
@@ -259,6 +344,7 @@ case "${1:-}" in
         wait_healthy || true
         open_ui ;;
     service)      shift; cmd_service "$@" ;;
+    update)       cmd_update ;;
     install)      cmd_install ;;
     -h|--help|help|"")
         sed -n '/^# buddy - /,/^#   PROXY_HOST/p' "$0" | sed 's/^# \{0,1\}//'
