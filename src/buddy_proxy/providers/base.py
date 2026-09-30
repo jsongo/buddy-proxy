@@ -128,5 +128,15 @@ class BaseProvider(abc.ABC):
     def quota(self) -> dict[str, Any] | None:
         """查询套餐额度。返回 ``{"items": [{label, used, total, remaining,
         percent, reset_ts}], "level": str|None}``（remaining/percent 无法
-        计算时为 None）；不支持时返回 None。"""
+        计算时为 None）；不支持时返回 None。
+
+        ``sum_items``（可选，默认 ``False``）：置 ``True`` 表示 ``items``
+        各项是**并存的份额**，管理页标题行应把它们相加作为账号总量。
+        只在确实可加时置位——Trae 的权益包是总额度的明细（加了就重复计算），
+        ZCode / MiMo 的各项量纲不同（5 小时窗口 vs 月窗口、百分比 vs 天数），
+        相加无意义。默认为假，免得新通道被默默算错。
+
+        它同时是**顺序契约**：未置位时管理页取 ``items[0]`` 当标题行，所以
+        各通道要自己把最该先看到的那档放前面——ZCode 是窗口由小到大（5 小时
+        在前），Trae 是总额度在前，CodeBuddy 是它自己算好的合计在前。"""
         return None

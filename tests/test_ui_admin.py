@@ -1196,25 +1196,146 @@ def test_checkin_disabled_provider_not_touched(tmp_path):
     assert CheckinHistory(tmp_path / "checkin.jsonl").entries() == []
 
 
-def test_zcode_quota_items_normalization():
-    # 窗口标签按「距重置还有多久」分类（<2 天=5 小时窗口，2~10 天=每周窗口），
-    # 相对 time.time() 判定。用固定时间戳会随真实日期漂移，故按 now 构造：
+def test_zcode_quota_items_are_ordered_smallest_window_first():
+    """排序必须按**窗口宽度**，不是按「距重置多久」。
+
+    真实的偶然性：实测那份数据里 5 小时档**没有** ``nextResetTime``
+    （取 0），按重置时间升序排它反而落到最前——两条策略在真实数据上
+    **恰好同解**，所以只断言「5 小时档在最前」是测不出排序差别的
+    （变异测试里把 sort 换回按时间排，测试照样全绿）。
+
+    要真分家，得让**大**窗口没有重置时间、**小**窗口有：这样按时间排会
+    把大窗口顶到最前，按宽度排才把小窗口放前面。这个 fixture 就是按
+    「两种排法必须给出相反顺序」挑的。
+    """
     now_ms = int(time.time() * 1000)
-    week_reset = now_ms + 5 * 86400 * 1000   # 5 天后重置 → 每周窗口
-    hourly_reset = now_ms + 3600 * 1000       # 1 小时后重置 → 5 小时窗口
     data = {"limits": [
-        {"type": "CREDIT_LIMIT", "usage": 10000, "currentValue": 4242,
-         "remaining": 5757, "percentage": 42, "nextResetTime": week_reset},
-        {"type": "CREDIT_LIMIT", "usage": 2000, "currentValue": 1249,
-         "remaining": 750, "percentage": 62, "nextResetTime": hourly_reset},
+        # 月档：**没有** nextResetTime，按时间排（当 0）会跑到最前
+        {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000,
+         "currentValue": 1, "remaining": 9999, "percentage": 1},
+        # 5 小时档：有几个月后的重置时间，按时间排会排到后面
+        {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 2000,
+         "currentValue": 0, "remaining": 2000, "percentage": 0,
+         "nextResetTime": now_ms + 120 * 86400 * 1000},
+    ]}
+    labels = [i["label"] for i in _quota_items(data)]
+    assert labels == ["5 小时窗口", "月窗口"], (
+        f"小窗口必须在前（按窗口宽度排）；按 nextResetTime 排会得到 "
+        f"['月窗口', '5 小时窗口']，正是老的 bug: {labels}"
+    )
+
+
+def test_zcode_quota_items_normalization():
+    """窗口名按上游的 unit/number 算，排序按窗口由小到大。
+
+    用**真实返回值的形状**（2026-09-30 抓取）：两条 ``CREDIT_LIMIT``，
+    unit=3/number=5 是 5 小时档且**不给 nextResetTime**；unit=6/number=1
+    是月档，nextResetTime 在几天之后。
+    """
+    month_reset = int(time.time() * 1000) + 4 * 86400 * 1000   # 4 天后重置（月档）
+    data = {"limits": [
+        # 故意把月档写在前面：排序不能靠上游给的顺序
+        {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000,
+         "currentValue": 4242, "remaining": 5757, "percentage": 42,
+         "nextResetTime": month_reset},
+        {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 2000,
+         "currentValue": 1249, "remaining": 750, "percentage": 62},
     ], "level": "lite"}
     items = _quota_items(data)
-    # 按 nextResetTime 升序：5 小时窗口在前
-    assert items[0]["label"] == "5 小时窗口"
+    # 小窗口在前：5 小时档必须排第一，标题行才会显示更紧迫的那档
+    assert items[0]["label"] == "5 小时窗口", items
     assert items[0]["percent"] == 62 and items[0]["used"] == 1249
     assert items[0]["remaining"] == 750
-    assert items[1]["label"] == "每周窗口"
+    # 月档不能因为「重置还有 4 天」就被叫成每周窗口
+    assert items[1]["label"] == "月窗口", items
     assert items[1]["percent"] == 42 and items[1]["remaining"] == 5757
+
+
+def test_zcode_quota_window_name_beats_distance_to_reset():
+    """回归：窗口名以 unit/number 为准，不许再按「距重置多久」猜。
+
+    老实现把「离重置还有 4 天」当成「每周」，而这条其实是一个 30 天的月档；
+    同时 5 小时档因为上游不给 nextResetTime、又排在末位，标签退化成裸的
+    ``CREDIT_LIMIT``。于是标题行（取 items[0]）显示出一个既无名、又只是
+    5 小时档的 2000，压过月档的 10000。
+    """
+    reset_ts = int(time.time() * 1000) + 4 * 86400 * 1000
+    data = {"limits": [
+        {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000,
+         "currentValue": 1, "remaining": 9999, "percentage": 1,
+         "nextResetTime": reset_ts},
+        {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 2000,
+         "currentValue": 0, "remaining": 2000, "percentage": 0},
+    ]}
+    labels = [i["label"] for i in _quota_items(data)]
+    assert labels == ["5 小时窗口", "月窗口"], labels
+    # 一个都不能再是裸的 type 名
+    assert "CREDIT_LIMIT" not in labels
+
+
+def test_zcode_quota_window_label_has_no_ugly_floats():
+    """展示名不该出现「10.0 天窗口」「0.0166667 小时窗口」这种。
+
+    ``span / 86400`` 在恰好 10 天时是 ``10.0``，``span / 3600`` 遇到分钟级
+    窗口会铺出一长串小数。都是能算出来的边界，顺手格式化掉。
+    """
+    def label(unit, number):
+        (item,) = _quota_items({"limits": [
+            {"type": "CREDIT_LIMIT", "unit": unit, "number": number, "usage": 100,
+             "currentValue": 0, "remaining": 100, "percentage": 0}]})
+        return item["label"]
+
+    assert label(4, 10) == "10 天窗口"          # 不是「10.0 天窗口」
+    assert label(3, 24) == "24 小时窗口"         # 恰好一天走小时档，整数
+    assert label(3, 5) == "5 小时窗口"
+    assert "." not in label(4, 10)
+    # 分钟级窗口能显示，且不糊一长串
+    minute = label(3, 1 / 60)
+    assert minute.endswith("小时窗口")
+    assert len(minute) <= len("0.01667 小时窗口"), minute
+    assert minute.count("6") <= 3, minute       # 不是 0.016666666666666666
+
+
+def test_zcode_quota_tolerates_junk_unit_and_number():
+    """``unit``/``number`` 当不可信输入：给成字符串也不能把面板搞崩。
+
+    上游真发 ``"5"``（字符串）的话，``3600 * "5"`` 在 Python 里是字符串
+    重复、**不报错**，然后拿它去比较就抛 ``TypeError`` —— 额度面板整块
+    挂掉。收类型时必须按「不行就当没给」处理，退回旧的三档推断。
+    """
+    def _lim(**kw):
+        return {"type": "CREDIT_LIMIT", "usage": 2000, "currentValue": 0,
+                "remaining": 2000, "percentage": 0, **kw}
+
+    # 数字用字符串送来：能干净地收成数，那就照常算出 5 小时档
+    for unit, number in ((3, "5"), ("3", 5), (3, 5.0)):
+        (item,) = _quota_items({"limits": [_lim(unit=unit, number=number)]})
+        assert item["label"] == "5 小时窗口", (unit, number, item)
+
+    # 收不干净（缺 / 零 / 负 / 类型不对）：退回推断，**不能**猜成小时档
+    for kw in ({"unit": 3, "number": None}, {"unit": 3}, {"unit": 3, "number": 0},
+               {"unit": 3, "number": -5}, {"unit": [3], "number": 5},
+               {"unit": 3, "number": {"v": 5}}, {"unit": None, "number": 5}):
+        (item,) = _quota_items({"limits": [_lim(**kw)]})   # 不抛异常是底线
+        assert item["label"] == "CREDIT_LIMIT", (kw, item)
+        assert item["remaining"] == 2000, kw
+
+
+def test_zcode_quota_unknown_unit_falls_back_without_lying():
+    """unit 没见过时退回按剩余时间推断，且**不能**瞎猜成小时。
+
+    上游的 unit 是自定枚举。真遇到没见过的取值，宁可走旧的三档兜底，
+    也不能按「3 像分钟所以是 3 分钟、6 像小时所以是 6 小时」猜——猜错会把
+    月档写成「6 小时窗口」。
+    """
+    far_reset = int(time.time() * 1000) + 4 * 86400 * 1000
+    items = _quota_items({"limits": [
+        {"type": "CREDIT_LIMIT", "unit": 99, "number": 7, "usage": 500,
+         "currentValue": 5, "remaining": 495, "percentage": 1,
+         "nextResetTime": far_reset},
+    ]})
+    assert items[0]["label"] == "每周窗口", items
+    assert "99" not in items[0]["label"] and "7" not in items[0]["label"]
 
 
 def test_ui_checkin_endpoint(env, tmp_path):

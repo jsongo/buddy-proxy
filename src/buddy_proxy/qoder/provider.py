@@ -445,6 +445,12 @@ class QoderProvider(BaseProvider):
             "upgrade_url": data.get("upgradeUrl"),
             "region": self._region.key,
             "items": items,
+            # 上面三项（订阅额度 / 加油包 / 专属积分，各自又是列表里的一条）是
+            # **并存的份额**，加起来才是账号剩余总量——管理页标题行据此求和，
+            # 而不是只显示第一条（否则「剩 1621/2000」会漏掉加油包与专属积分，
+            # 用户看到的就是比实际少的数）。上游自己也这么算：实测三项合计
+            # 已用 37.5%，上游 totalUsagePercentage 正好是 0.38。
+            "sum_items": True,
             "account": self._account_info(),
         }
 

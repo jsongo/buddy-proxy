@@ -199,15 +199,19 @@ class CodeBuddyProvider(BaseProvider):
                 used = 0.0
             if remain is None:
                 remain = round(total - used, 2)
+            # 合计**必须遍历全部包**：这个 break 早先写在累加同一个循环里，
+            # 于是包多于 4 个时，标题行的「积分余额合计」只加了前 4 个——
+            # 显示的剩余比账号实际少一截，而且列的明细也刚好在断点处结束，
+            # 用户从界面上看不出还有包没算进来。上限只管**明细列几条**，
+            # 不能管合计。
             used_sum += used; total_sum += total; remain_sum += remain
-            packs.append({
-                "label": "订阅套餐" if p.get("PackageCode") == sub_code else "资源包",
-                "used": used, "total": total, "remaining": remain,
-                "percent": round(used / total * 100) if total else 0,
-                "reset_ts": None,
-            })
-            if len(packs) >= 4:
-                break
+            if len(packs) < 4:
+                packs.append({
+                    "label": "订阅套餐" if p.get("PackageCode") == sub_code else "资源包",
+                    "used": used, "total": total, "remaining": remain,
+                    "percent": round(used / total * 100) if total else 0,
+                    "reset_ts": None,
+                })
         items = [{
             "label": "积分余额合计",
             "used": round(used_sum, 2), "total": round(total_sum, 2),

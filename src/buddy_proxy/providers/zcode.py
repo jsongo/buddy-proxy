@@ -104,11 +104,75 @@ MODEL_NAME_CANONICAL: dict[str, str] = {
 _TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=15.0)
 
 
-def _window_label(reset_ts: float | None, ltype: str | None) -> str:
-    """按重置时间推断限额窗口的展示名（5 小时 / 每周 / 更长周期）。"""
+#: ``unit`` 字段的取值 -> 时间单位（秒），以及该单位在展示名里怎么说。
+#:
+#: 上游的 ``limits`` 是**同一个 ``type`` 可按不同时长切多档**，靠 ``unit`` +
+#: ``number`` 表达窗口宽度（实测 unit=3/number=5 是 5 小时档、
+#: unit=6/number=1 是月档）。``unit`` 的取值是上游自定枚举，这里只落地
+#: 在真实返回值里见过的两个；其余一律走兜底，**不要**凭「单位像分钟/小时」
+#: 的直觉猜——猜错了会把 5 小时说成 5 秒。
+_UNIT_SECONDS: dict[int, int] = {
+    3: 3600,        # 小时
+    4: 86400,       # 天
+    6: 86400 * 30,  # 月（按 30 天算，够用来标注「月窗口」）
+}
+
+
+def _window_span(unit: Any, number: Any) -> float | None:
+    """把 ``unit``/``number`` 换算成窗口宽度（秒）；算不出来返回 ``None``。
+
+    两个字段都当**不可信输入**处理：上游若是给成字符串（``"5"``），
+    ``3600 * "5"`` 在 Python 里是字符串重复、不会报错，接着拿它去比较就
+    抛 ``TypeError``——额度面板整块崩掉。所以先把类型收干净，不行就当
+    「没给」，退回按剩余时间推断。
+
+    ``unit`` 的取值是上游自定枚举，只认真实返回值里见过的；不认识的
+    **不猜**——凭「3 像小时、6 像天」的直觉猜，猜错会把月档写成「6 天窗口」。
+    """
+    try:
+        mult = _UNIT_SECONDS.get(int(unit))
+    except (TypeError, ValueError):
+        return None
+    if mult is None:
+        return None
+    try:
+        n = float(number)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return mult * n
+
+
+def _window_label(
+    reset_ts: float | None,
+    ltype: str | None,
+    span: float | None = None,
+) -> str:
+    """限额窗口的展示名。
+
+    ``span``（窗口宽度，秒）由 :func:`_window_span` 从 ``unit``/``number``
+    算出；给了就**以它为准**，为 ``None`` 才退回按「距下次重置还有多久」推断。
+
+    原先只用后者，会错得离谱：它把「离重置时间的远近」当成窗口大小，于是
+    一个 *月* 档（重置还在 4 天后，但窗口本身是 30 天）被写成「每周窗口」；
+    而 5 小时档因为上游压根不给 ``nextResetTime``，label 直接退化成裸的
+    ``CREDIT_LIMIT`` —— 两档的展示名就这么一错一空。更糟的是
+    ``_quota_items`` 又按 ``nextResetTime`` 排序，没有重置时间的那档被排到
+    末位，于是标题行（取 ``items[0]``）显示的恰好是它：一个既叫不出名字、
+    又只是 5 小时档的 2000，压过了月档的 10000。
+    """
     if ltype == "TIME_LIMIT":
         return "MCP 调用（月）"
+    if span:
+        if span <= 86400:
+            return f"{_fmt_num(span / 3600)} 小时窗口"
+        if span <= 86400 * 10:
+            return f"{_fmt_num(span / 86400)} 天窗口"
+        return "月窗口"
     if reset_ts:
+        # 兜底：上游没给 unit 时，只能拿「距重置还有多久」凑一个大致档位。
+        # 注意它量的是**剩余**不是窗口宽度，所以只能给很粗的三档。
         delta = reset_ts - time.time()
         if delta < 86400 * 2:
             return "5 小时窗口"
@@ -118,20 +182,45 @@ def _window_label(reset_ts: float | None, ltype: str | None) -> str:
     return ltype or "用量窗口"
 
 
+def _fmt_num(value: float) -> str:
+    """整数就不带小数点（``5`` 而不是 ``5.0``），非整数最多给 4 位有效小数。
+
+    ``span / 86400`` 在恰好 10 天时是 ``10.0``，直接插进 f-string 会渲染成
+    「10.0 天窗口」；而 ``span / 3600`` 遇到不足 1 小时的窗口（上游给分钟级）
+    会铺出 ``0.0166667`` 这种一长串。展示名是给人看的，两种都修掉。
+    """
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.4g}"
+
+
 def _quota_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     """把 /api/monitor/usage/quota/limit 的 limits 归一化为管理页额度条目。
 
-    按 nextResetTime 升序：最近的窗口排前面（实测 5 小时窗口在前、每周在后）。
+    **顺序即语义**：ZCode 没有 ``sum_items``（两档是各自独立的额度，不能相加），
+    所以管理页标题行取 ``items[0]``。这里按窗口**由小到大**排——小的（5 小时）
+    在前、大的（月）在后，用户与标题行先看到最容易撞到的那一档。
+
+    **不要**改回按 ``nextResetTime`` 排：5 小时档上游不给这个字段（值恒为 0），
+    按时间排会把它甩到末位，标题行转而去显示月档——一个不常撞到的数。
+
     CREDIT_LIMIT：usage=窗口总额度，currentValue=已用；TIME_LIMIT 单位为次数。
     """
     limits = [l for l in (data.get("limits") or []) if isinstance(l, dict)]
-    limits.sort(key=lambda l: l.get("nextResetTime") or 0)
+
+    def _span(l: dict[str, Any]) -> float:
+        """排序键：窗口宽度。算不出宽度的排最后（当它最大，不抢标题行）。"""
+        span = _window_span(l.get("unit"), l.get("number"))
+        return span if span is not None else float("inf")
+
+    limits.sort(key=_span)
     items: list[dict[str, Any]] = []
     for l in limits:
         reset_ms = l.get("nextResetTime")
         reset_ts = reset_ms / 1000 if reset_ms else None
+        span = _window_span(l.get("unit"), l.get("number"))
         items.append({
-            "label": _window_label(reset_ts, l.get("type")),
+            "label": _window_label(reset_ts, l.get("type"), span),
             "used": l.get("currentValue"),
             "total": l.get("usage"),
             "remaining": l.get("remaining"),
