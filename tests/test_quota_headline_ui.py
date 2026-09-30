@@ -116,6 +116,41 @@ def test_items_without_numbers_are_skipped_and_empty_renders_nothing():
     assert data["noitems"] == "", "没有 items 字段也不该炸"
 
 
+def test_failure_notices_never_get_summed_into_the_headline():
+    """「查询失败 / 网关不可达」说明条不能被当数字求和。
+
+    ``trae.pat.quota._failure_notice`` 把说明条插在 items 首位，``remaining``
+    是**文案**（「2/9 个账号本轮未取到新数据」）而不是数。只要过滤条件写成
+    ``remaining != null``，文案就会过筛，``Number(...)`` 得 NaN，标题行渲染成
+    「剩 NaN / NaN」——比不显示还糟。
+
+    同时要**保住数字字符串**（``"2000"``）：上游发 zcode 的 unit/number 就
+    用过字符串，额度字段也可能这么来；用 ``Number.isFinite`` 直接筛会把这种
+    能算的值误杀。
+    """
+    out = _run_js("""console.log(JSON.stringify({
+      notice: quotaHeadSum({sum_items: true, items: [
+        {label: 'PAT 额度网关不可达', remaining: '2/9 个账号本轮未取到新数据（网络不可达）',
+         total: null, unreachable: true, query_failed: true},
+        {label: '账号 A', remaining: 100, total: 200}]}),
+      allnotice: quotaHeadSum({sum_items: true, items: [
+        {label: '查询失败', remaining: '9/9 个账号查询失败', total: null}]}),
+      numeric_string: quotaHeadSum({sum_items: true, items: [
+        {label: 'A', remaining: '2000', total: '4000'}]}),
+      bools: quotaHeadSum({sum_items: true, items: [
+        {label: 'A', remaining: true, total: true}]}),
+    }));""")
+    data = json.loads(out.strip().splitlines()[-1])
+
+    assert "NaN" not in data["notice"], f"说明条被算进去了: {data['notice']}"
+    assert "100" in data["notice"] and "200" in data["notice"], data["notice"]
+    assert "个账号" not in data["notice"], "文案不该出现在标题行"
+    assert data["allnotice"] == "", f"全是说明条就该不显示: {data['allnotice']}"
+    assert "2,000" in data["numeric_string"] and "4,000" in data["numeric_string"], \
+        f"数字字符串是可算的，不该被滤掉: {data['numeric_string']}"
+    assert data["bools"] == "", f"true/false 不是额度: {data['bools']}"
+
+
 def test_the_render_path_uses_the_helper_not_a_bare_find():
     """渲染处必须调 ``quotaHeadSum``，不能再自己 ``find`` 第一条。
 

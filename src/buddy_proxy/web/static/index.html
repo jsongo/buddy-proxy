@@ -1109,7 +1109,19 @@ function renderBenefits() {
 // 这个标记，不靠猜——靠猜的话，下一个新通道就会被默默算错。
 function quotaHeadSum(q) {
   const items = q.items || [];
-  const usable = items.filter(it => it.remaining != null && it.total != null);
+  // 只认「能当数字用」的值。两道剔除各有来由：
+  // - null / '' / 布尔：``Number(null)`` 和 ``Number('')`` 都是 0，不收的话
+  //   会把「没有数据」当 0 求进合计；``Number(true)`` 是 1，更不能要。
+  // - 收不进数字的字符串：那是**说明条**不是额度——``trae.pat.quota.
+  //   _failure_notice`` 的 remaining 发的是「2/9 个账号本轮未取到新数据」
+  //   这类文案，``quotaItemHtml`` 也正是按 ``typeof === 'string'`` 认它的。
+  //   不加这道判断，说明条会被当数字求和，标题行渲染成「剩 NaN / NaN」，
+  //   比不显示还糟。
+  // 注意**数字字符串（"2000"）要照收**：上游给 zcode 的 unit/number 就发过
+  // 字符串，额度字段同样可能这么来，直接拿 Number.isFinite 会把它误杀。
+  const num = v => v !== null && v !== '' && typeof v !== 'boolean'
+                && Number.isFinite(Number(v));
+  const usable = items.filter(it => num(it.remaining) && num(it.total));
   if (q.sum_items) {
     // 一条都没有就别显示（否则会渲染成「剩 0 / 0」）
     if (!usable.length) return '';
