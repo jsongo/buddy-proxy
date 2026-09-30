@@ -93,8 +93,11 @@ def _multiplier(provider: str, model: str) -> float | None:
         return None
 
 
-def _load_trae_measured_rates() -> dict[str, tuple[float, float]]:
-    """惰性加载 trae 实测计价表（避免模块级循环导入）。"""
+def _load_trae_measured_rates() -> dict[str, tuple[float, float, float]]:
+    """惰性加载 trae 实测计价表（避免模块级循环导入）。
+
+    元组为 (输入单价, 输出单价, 校准倍率)，单价是校准时刻的绝对值。
+    """
     try:
         from ..trae.config import MEASURED_CREDIT_RATES
         return MEASURED_CREDIT_RATES
@@ -114,15 +117,21 @@ def estimate_credit(
     zcode 走官方抵扣公式（见 :func:`_estimate_zcode`）；trae 优先用实测计价表
     （``MEASURED_CREDIT_RATES``，输入/输出分开计价、与官方账单对账校准——
     「100×倍率/1M 总 tokens」公式对已实测模型偏差约 9 倍），未实测的退回倍率
-    粗估。返回值统一 round 到 2 位（与 Trae 网页使用记录的展示粒度一致）。
+    粗估。实测单价按「当前倍率/校准倍率」等比缩放：官方调倍率时照常更新
+    ``MODEL_CREDITS`` 即可自动跟价，不必重跑对账。返回值统一 round 到 2 位
+    （与 Trae 网页使用记录的展示粒度一致）。
     """
     if provider == "zcode":
         return _estimate_zcode(model, prompt_tokens, completion_tokens, cached_tokens)
     rates = _load_trae_measured_rates().get(model) if provider == "trae" else None
     if rates is not None:
-        in_rate, out_rate = rates
-        total = in_rate * max(0, int(prompt_tokens or 0)) + \
-            out_rate * max(0, int(completion_tokens or 0))
+        in_rate, out_rate, calib_mult = rates
+        mult = _multiplier(provider, model)
+        # 拿不到当前倍率（面板表被删/改名）时不缩放：退回校准值本身，
+        # 至少不引入未知误差。校准倍率为 0 属配置错误，同样不缩放。
+        scale = mult / calib_mult if mult and calib_mult else 1.0
+        total = (in_rate * max(0, int(prompt_tokens or 0)) +
+                 out_rate * max(0, int(completion_tokens or 0))) * scale
         if total <= 0:
             return None
         return round(total, 2)

@@ -20,6 +20,7 @@ from buddy_proxy.core.credit_estimate import (  # noqa: E402
     estimate_credit,
 )
 from buddy_proxy.providers.zcode import credit_discount_now  # noqa: E402
+from buddy_proxy.trae import config as trae_config  # noqa: E402
 
 # (输入 token, 输出 token, 网页真实积分)；顺序即代理记录时间序
 CALIBRATION_SAMPLES = [
@@ -75,6 +76,26 @@ def test_non_trae_and_unknown_model_return_none():
     assert estimate_credit("codebuddy", "glm-5.3", 30000, 100) is None
     assert estimate_credit("trae", "no-such-model", 30000, 100) is None
     assert estimate_credit("trae", "glm-5.3-flash", 0, 0) is None
+
+
+# ---- trae 实测计价：倍率调整自动等比缩放 ----
+
+def test_measured_rates_scale_with_current_multiplier(monkeypatch):
+    """实测单价随 MODEL_CREDITS 倍率等比缩放（官方调价只改倍率表即可）。
+
+    校准倍率与当前倍率一致时，估算 == 原绝对值口径；把倍率翻倍后应线性
+    翻倍——不需要动 MEASURED_CREDIT_RATES。
+    """
+    base = estimate_credit("trae", "glm-5.3-flashx", 30000, 100)
+    assert base == 2.42  # 30000×7.98e-5 + 100×2.81e-4，校准倍率 x0.31 即现状
+    monkeypatch.setitem(trae_config.MODEL_CREDITS, "glm-5.3-flashx", "x0.62")
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 4.84
+
+
+def test_measured_rates_fall_back_when_multiplier_missing(monkeypatch):
+    """拿不到当前倍率时不缩放（用校准绝对值），而不是报错或归零。"""
+    monkeypatch.delitem(trae_config.MODEL_CREDITS, "glm-5.3-flashx", raising=False)
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 2.42
 
 
 # ---- zcode：GLM Coding Plan 官方抵扣公式 ----
