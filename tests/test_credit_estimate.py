@@ -15,7 +15,11 @@ import pathlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 
-from buddy_proxy.core.credit_estimate import estimate_credit  # noqa: E402
+from buddy_proxy.core.credit_estimate import (  # noqa: E402
+    _estimate_zcode,
+    estimate_credit,
+)
+from buddy_proxy.providers.zcode import credit_discount_now  # noqa: E402
 
 # (输入 token, 输出 token, 网页真实积分)；顺序即代理记录时间序
 CALIBRATION_SAMPLES = [
@@ -67,8 +71,75 @@ def test_alias_model_resolves_multiplier():
 
 
 def test_non_trae_and_unknown_model_return_none():
-    """只有 trae 有倍率表；其他 provider / 未知模型返回 None（不显示估算）。"""
-    assert estimate_credit("zcode", "glm-5.3", 30000, 100) is None
+    """无系数/倍率表的通道与模型返回 None（不显示估算）。"""
     assert estimate_credit("codebuddy", "glm-5.3", 30000, 100) is None
     assert estimate_credit("trae", "no-such-model", 30000, 100) is None
     assert estimate_credit("trae", "glm-5.3-flash", 0, 0) is None
+
+
+# ---- zcode：GLM Coding Plan 官方抵扣公式 ----
+# 公式：(未命中输入×Input + 缓存命中×Cached + 输出×Output) / 10000 × 时段折扣
+# glm-5.3 系数 (6.9, 1.7, 24)；flash/turbo (2.3, 0.56, 8)。
+def _bj_ts(y, m, d, hh, mm=0):
+    """构造 UTC+8 指定时刻的 epoch 秒（折扣函数按北京时间判断高峰）。"""
+    import datetime
+    return datetime.datetime(
+        y, m, d, hh, mm, tzinfo=datetime.timezone(datetime.timedelta(hours=8))
+    ).timestamp()
+
+
+PEAK_TS = _bj_ts(2026, 10, 14, 15, 0)     # 周三 15:00（活动期外）→ 1×
+OFFPEAK_TS = _bj_ts(2026, 10, 14, 12, 0)  # 周三 12:00 → 0.5×
+WEEKEND_TS = _bj_ts(2026, 10, 17, 15, 0)  # 周六 15:00 → 0.5×
+PROMO_TS = _bj_ts(2026, 10, 1, 15, 0)     # 活动期内的工作日高峰 → 仍 0.5×
+
+
+def test_zcode_discount_windows():
+    """高峰（工作日 14–18 UTC+8）1×，夜间/周末 0.5×，活动期全天 0.5×。"""
+    assert credit_discount_now(PEAK_TS) == 1.0
+    assert credit_discount_now(OFFPEAK_TS) == 0.5
+    assert credit_discount_now(WEEKEND_TS) == 0.5
+    assert credit_discount_now(PROMO_TS) == 0.5
+
+
+def test_zcode_official_formula():
+    """官方系数公式（glm-5.3）：(2000×6.9 + 8000×1.7 + 1000×24)/10000 = 5.14。"""
+    # prompt 为 OpenAI 口径（含缓存命中）：10000 = 未命中 2000 + 缓存 8000
+    assert _estimate_zcode("glm-5.3", 10000, 1000, 8000, ts=PEAK_TS) == 5.14
+    assert _estimate_zcode("glm-5.3", 10000, 1000, 8000, ts=OFFPEAK_TS) == 2.57
+
+
+def test_zcode_estimate_via_public_api():
+    """公开入口 dispatch：zcode + 已知模型必出值（折扣随时钟，但恒非 None）。"""
+    est = estimate_credit("zcode", "glm-5.3", 10000, 1000, cached_tokens=8000)
+    assert est is not None
+
+
+def test_zcode_flash_and_turbo_share_coeffs():
+    """GLM-5-Turbo 上游自动切 Flash：两者同 token 估算值相同。"""
+    flash = _estimate_zcode("glm-5.3-flash", 10000, 1000, 8000, ts=PEAK_TS)
+    turbo = _estimate_zcode("glm-5-turbo", 10000, 1000, 8000, ts=PEAK_TS)
+    # (2000×2.3 + 8000×0.56 + 1000×8)/10000 = 1.708
+    assert flash == turbo == 1.71
+
+
+def test_zcode_cache_hit_costs_less():
+    """缓存命中按 Cached 系数（约 0.24×Input）计：全命中比全未命中便宜得多。"""
+    all_uncached = _estimate_zcode("glm-5.3", 10000, 0, 0, ts=PEAK_TS)
+    all_cached = _estimate_zcode("glm-5.3", 10000, 0, 10000, ts=PEAK_TS)
+    assert all_uncached == round(10000 * 6.9 / 10000, 2)      # 6.9
+    assert all_cached == round(10000 * 1.7 / 10000, 2)        # 1.7
+
+
+def test_zcode_unknown_model_and_zero_tokens_return_none():
+    """flashx 套餐未开放（无系数）→ None；零 token → None。"""
+    assert _estimate_zcode("glm-5.3-flashx", 10000, 10, 0, ts=PEAK_TS) is None
+    assert _estimate_zcode("glm-5.3", 0, 0, 0, ts=PEAK_TS) is None
+    assert estimate_credit("zcode", "glm-5.3-flashx", 30000, 100) is None
+
+
+def test_zcode_cached_clamped_to_prompt():
+    """异常记录（cached > prompt）时 cached 收敛到 prompt，不出现负的未命中输入。"""
+    # prompt=100, cached=200 → clamp 100：(0×6.9 + 100×1.7 + 10×24)/10000×1 = 0.04
+    est = _estimate_zcode("glm-5.3", 100, 10, 200, ts=PEAK_TS)
+    assert est == round((0 * 6.9 + 100 * 1.7 + 10 * 24) / 10000, 2)

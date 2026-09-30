@@ -16,10 +16,14 @@ endpoint 全部 404，网页「使用记录」走另一套 web 会话体系）�
   缓存即便命中也按全价计（或根本未命中），故缓存 token 不做折扣加权。
 
 zcode（GLM Coding Plan）的 /api/monitor/usage/quota/limit 计数器批量聚合
-更新（0~90s 抖动）且无按请求流水，官方口径也没有单次积分概念，不做估算。
+更新（0~90s 抖动）且无按请求流水——单次积分官方虽无 API 回传，但订阅文档
+公布了完整抵扣公式与系数（见 providers/zcode.py CREDIT_COEFFS），按它算
+是官方口径而非粗估；系数变化（新模型/调价/活动）时改那张表即可。
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 # 积分 / 1M token / 倍率单位。校准：glm-5.3-flash（x0.06）实测 ≈6.0~6.2
 # 积分/M，即基准 100×倍率；别家倍率体系（MODEL_CREDITS）同源换算。
@@ -33,6 +37,45 @@ def _load_trae_tables() -> tuple[dict[str, str], dict[str, str]]:
         return MODEL_CREDITS, MODEL_MAP
     except Exception:
         return {}, {}
+
+
+def _load_zcode_tables() -> tuple[dict[str, tuple[float, float, float]], Any]:
+    """惰性加载 zcode 的抵扣系数表与时段折扣函数（避免模块级循环导入）。"""
+    try:
+        from ..providers.zcode import CREDIT_COEFFS, credit_discount_now
+        return CREDIT_COEFFS, credit_discount_now
+    except Exception:
+        return {}, None
+
+
+def _estimate_zcode(
+    model: str,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    cached_tokens: int | None = 0,
+    ts: float | None = None,
+) -> float | None:
+    """zcode（GLM Coding Plan）：按官方抵扣公式精确计算，非倍率粗估。
+
+    消耗积分数 = (未命中输入×Input + 缓存命中×Cached + 输出×Output) / 10000，
+    再乘以请求时刻的时段折扣（工作日 14–18 UTC+8 高峰 1×，其余 0.5×）。
+    ``prompt_tokens`` 是 metrics 归一后的 OpenAI 口径（含缓存命中），先减掉
+    cached 得未命中输入。缓存**写入** token 上游 anthropic 端点不单列
+    （无 cache_creation_input_tokens），已并入 prompt 按 Input 系数计——
+    与官方计费的差异未知，按保守（不加价）处理。
+    """
+    coeffs, discount_fn = _load_zcode_tables()
+    rate = coeffs.get((model or "").strip().lower())
+    if rate is None or discount_fn is None:
+        return None
+    ci, cc, co = rate
+    prompt = max(0, int(prompt_tokens or 0))
+    cached = min(prompt, max(0, int(cached_tokens or 0)))
+    out = max(0, int(completion_tokens or 0))
+    base = ((prompt - cached) * ci + cached * cc + out * co) / 10000.0
+    if base <= 0:
+        return None
+    return round(base * discount_fn(ts), 2)
 
 
 def _multiplier(provider: str, model: str) -> float | None:
@@ -57,10 +100,13 @@ def estimate_credit(
     completion_tokens: int | None,
     cached_tokens: int | None = 0,
 ) -> float | None:
-    """按 token 粗估单次积分消耗；无倍率表或无 token 数据时返回 None。
+    """按 token 估算单次积分消耗；无系数/倍率表或无 token 数据时返回 None。
 
+    zcode 走官方抵扣公式（见 :func:`_estimate_zcode`），trae 走倍率粗估。
     返回值统一 round 到 2 位（与 Trae 网页使用记录的展示粒度一致）。
     """
+    if provider == "zcode":
+        return _estimate_zcode(model, prompt_tokens, completion_tokens, cached_tokens)
     mult = _multiplier(provider, model)
     if mult is None:
         return None

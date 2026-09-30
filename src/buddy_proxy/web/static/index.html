@@ -1867,7 +1867,7 @@ async function renderRecent() {
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
       <td class="num mono">${r.credit != null ? (r.credit_estimated
-          ? `<b style="color:var(--ok)" title="按 token 粗估：(输入+输出)/1M × 100 × 模型倍率；与真实扣费可能有偏差（会话首请求实测偏高约 2~3 倍）">≈${creditTxt}</b>`
+          ? `<b style="color:var(--ok)" title="本地估算，非上游实扣：trae 按官方倍率×token（会话首请求实测偏高约 2~3 倍）；zcode 按 GLM Coding Plan 官方抵扣系数（含时段折扣）">≈${creditTxt}</b>`
           : `<b style="color:var(--ok)" title="上游实扣积分（原始值 ${esc(r.credit)}）">${creditTxt}</b>`)
         : (creditTxt ? `<span class="tag" title="仅倍率参考（×基准单价），非本次实际消耗；${esc(r.provider)} 不提供单次消耗">${esc(creditTxt)}</span>` : '<span class="muted" title="该上游未提供单次积分消耗">—</span>')}</td>
       <td>${bad ? `<span class="tag bad" title="${esc(r.error || '')}">${r.status || 'ERR'}</span>` : '<span class="tag ok">OK</span>'}</td>
