@@ -1929,6 +1929,29 @@ function orderedModels() {
   return out;
 }
 
+// 顺序页要渲染的卡片 = 已配置的（服务端下发）+ **还没保存过、但正在编辑中的**
+// （ORDER_DRAFT 里有草稿）。少了后半截，「+ 新增模型」选一个尚未配置的模型
+// 会完全没反应：orderAddModelPick 明明写好了 ORDER_OPEN / ORDER_DRAFT，可
+// 渲染源只认 m["order"]，卡片永远建不出来。草稿在保存成功时会被删掉，届时
+// 该模型自然转入「已配置」那一类，不会重复。
+function pageRows() {
+  const out = orderedModels();
+  // 已配置的那些键，上面这行已经收全了，这里只需补草稿里多出来的。
+  const seen = new Set(out.map(r => orderPageKey(r.p, r.m)));
+  const catalog = new Set(allModelOptions().map(o => orderPageKey(o.p, o.m)));
+  Object.keys(ORDER_DRAFT).forEach(key => {
+    if (seen.has(key)) return;
+    const i = key.indexOf('/');
+    if (i <= 0) return;
+    // 目标是自由文本（上游可能接受目录里没广告的 id），但**模型本身**必须来自
+    // 目录：它得先能被路由解析到，顺序才有意义。目录里查不到就不建卡。
+    if (!catalog.has(key)) return;
+    out.push({ p: key.slice(0, i), m: key.slice(i + 1),
+               order: { targets: [], marks: [] } });
+  });
+  return out;
+}
+
 // 可选模型全集（用于「+ 新增模型」的下拉），按通道分组
 function allModelOptions() {
   const out = [];
@@ -1992,7 +2015,7 @@ function renderOrderPage() {
     ensureOrderOptions().then(() => { if (currentTab() === 'order') renderOrderPage(); });
   }
 
-  const rows = orderedModels();
+  const rows = pageRows();
   const sum = document.getElementById('order-summary');
   if (sum) sum.textContent = rows.length ? `${rows.length} 个模型已配顺序` : '';
 
