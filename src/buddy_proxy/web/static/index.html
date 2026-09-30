@@ -420,7 +420,7 @@
     <div class="log-filters" id="log-filters"></div>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>
-        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>客户端</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 粗估（trae：(输入+输出)/1M × 100 × 模型倍率，非实扣）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
+        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>客户端</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 估算（trae 已实测模型：输入/输出单价×token，官方账单校准；其余模型：(输入+输出)/1M × 100 × 模型倍率）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
         <tbody id="recent"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
       </table>
       <div class="pager" id="recent-pager"></div>
@@ -1870,7 +1870,7 @@ async function renderRecent() {
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
       <td class="num mono">${r.credit != null ? (r.credit_estimated
-          ? `<b style="color:var(--ok)" title="本地估算，非上游实扣：trae 按官方倍率×token（会话首请求实测偏高约 2~3 倍）；zcode 按 GLM Coding Plan 官方抵扣系数（含时段折扣）">≈${creditTxt}</b>`
+          ? `<b style="color:var(--ok)" title="本地估算，非上游实扣：trae 已实测模型按官方账单校准的输入/输出单价×token（随倍率面板调价自动缩放；会话首请求实测偏高约 2~3 倍），未实测模型按倍率粗估；zcode 按 GLM Coding Plan 官方抵扣系数（含时段折扣）">≈${creditTxt}</b>`
           : `<b style="color:var(--ok)" title="上游实扣积分（原始值 ${esc(r.credit)}）">${creditTxt}</b>`)
         : (creditTxt ? `<span class="tag" title="仅倍率参考（×基准单价），非本次实际消耗；${esc(r.provider)} 不提供单次消耗">${esc(creditTxt)}</span>` : '<span class="muted" title="该上游未提供单次积分消耗">—</span>')}</td>
       <td>${bad ? `<span class="tag bad" title="${esc(r.error || '')}">${r.status || 'ERR'}</span>` : '<span class="tag ok">OK</span>'}</td>
@@ -2440,6 +2440,11 @@ function orderRow(item, idx, marks, scope) {
     `<option value="${esc(m.id)}"${m.label ? ` label="${esc(m.label)}"` : ''}></option>`).join('');
   const left = marksMap[orderKey(item.provider, item.model)];
   const known = !models.length || models.some(m => m.id === item.model);
+  // 该通道/模型的积分倍率（与请求日志页同源：/ui/api/stats 的 credits_map），
+  // 展开后逐项展示方便横向对比谁便宜谁贵；改通道/模型时随重绘即时刷新。
+  // 目录里的值带「 credits」后缀（如 "x1.62 credits"），徽章里剥掉、原文进悬浮提示
+  const mult = ((STATS || {}).credits_map || {})[orderKey(item.provider, item.model)];
+  const multTxt = mult ? String(mult).replace(/\s*credits\s*$/i, '') : '';
   return `<div class="order-row" draggable="true" data-idx="${idx}" data-scope="${esc(scope)}">
     <span class="order-grip" title="拖拽调整顺序">⠿</span>
     <span class="order-no muted mono">${idx + 1}</span>
@@ -2453,6 +2458,7 @@ function orderRow(item, idx, marks, scope) {
       oninput="orderSetModel(this)">
     <datalist id="${id}">${list}</datalist>
     <span class="order-flags">
+      ${multTxt ? `<span class="tag mult" title="积分倍率：${esc(mult)}（估算参考，非实际扣费）">${esc(multTxt)}</span>` : ''}
       ${left ? `<span class="tag bad" title="冷却中，剩余 ${left}s；期间请求会跳过它">⏸ ${left}s</span>` : ''}
       ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
     </span>

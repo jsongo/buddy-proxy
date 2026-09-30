@@ -330,7 +330,9 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
   该文件，只要「文件存在但解析不出来」就在顶部弹红色条幅，并附上原始 JSON 报错
 - **请求日志** — 从 `logs/metrics.jsonl` 与 30 天归档里读取的服务端分页请求日志，可按日期范围 /
   通道 / 模型 / 客户端筛选。**积分**列在上游给出单次消耗时显示实扣值（CodeBuddy、Qoder 及任何填了
-  `usage` 的通道），否则退回 `≈` 估算：trae 按官方倍率粗估、zcode 按 GLM Coding Plan
+  `usage` 的通道），否则退回 `≈` 估算：trae 对已实测模型按输入/输出分开的实测单价
+  （`MEASURED_CREDIT_RATES`，与官方使用记录对账校准）计价、并按「当前倍率/校准倍率」
+  等比缩放（面板调价只改 `MODEL_CREDITS` 即自动跟进），未实测模型仍按倍率粗估；zcode 按 GLM Coding Plan
   官方抵扣系数精算（含缓存命中与时段折扣），两者都没有则显示 `—`。展示保留 2 位小数
   （与 Qoder 官网一致），原始精度仍在 `logs/metrics.jsonl` 里。注意**缓存命中几乎不计费**：
   输入 164k、命中约 99% 缓存的请求只扣 0.12 积分，而输入 12k、零缓存的请求扣 0.31——

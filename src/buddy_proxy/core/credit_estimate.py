@@ -93,6 +93,18 @@ def _multiplier(provider: str, model: str) -> float | None:
         return None
 
 
+def _load_trae_measured_rates() -> dict[str, tuple[float, float, float]]:
+    """惰性加载 trae 实测计价表（避免模块级循环导入）。
+
+    元组为 (输入单价, 输出单价, 校准倍率)，单价是校准时刻的绝对值。
+    """
+    try:
+        from ..trae.config import MEASURED_CREDIT_RATES
+        return MEASURED_CREDIT_RATES
+    except Exception:
+        return {}
+
+
 def estimate_credit(
     provider: str,
     model: str,
@@ -102,11 +114,36 @@ def estimate_credit(
 ) -> float | None:
     """按 token 估算单次积分消耗；无系数/倍率表或无 token 数据时返回 None。
 
-    zcode 走官方抵扣公式（见 :func:`_estimate_zcode`），trae 走倍率粗估。
-    返回值统一 round 到 2 位（与 Trae 网页使用记录的展示粒度一致）。
+    zcode 走官方抵扣公式（见 :func:`_estimate_zcode`）；trae 优先用实测计价表
+    （``MEASURED_CREDIT_RATES``，输入/输出分开计价、与官方账单对账校准——
+    「100×倍率/1M 总 tokens」公式对已实测模型偏差约 9 倍），未实测的退回倍率
+    粗估。实测单价按「当前倍率/校准倍率」等比缩放：官方调倍率时照常更新
+    ``MODEL_CREDITS`` 即可自动跟价，不必重跑对账。返回值统一 round 到 2 位
+    （与 Trae 网页使用记录的展示粒度一致）。
     """
     if provider == "zcode":
         return _estimate_zcode(model, prompt_tokens, completion_tokens, cached_tokens)
+    rates = _load_trae_measured_rates().get(model) if provider == "trae" else None
+    if rates is not None:
+        # 元组形状容错：旧格式（仅两项）或手工补录漏写校准倍率时退化到不缩放，
+        # 不让 ValueError 冒到调用方——本函数跑在流式收尾的 finally 里，
+        # 抛出会把上游已成功的请求变成客户端 500。
+        in_rate, out_rate = rates[0], rates[1]
+        calib_mult = rates[2] if len(rates) > 2 else 0.0
+        mult = _multiplier(provider, model)
+        # 拿不到当前倍率（表里无此模型、被删/改名）时不缩放：退回校准绝对值。
+        # mult 为 0（x0.00 免费档，如促销期）是**有效倍率**，应正常清零估算。
+        # 校准倍率为 0 属配置错误，同样不缩放。
+        if mult is None or not calib_mult:
+            scale = 1.0
+        else:
+            scale = mult / calib_mult
+        prompt = max(0, int(prompt_tokens or 0))
+        completion = max(0, int(completion_tokens or 0))
+        if prompt == 0 and completion == 0:
+            return None  # 无 token 数据（错误响应/解析失败）不记估算
+        total = (in_rate * prompt + out_rate * completion) * scale
+        return round(max(0.0, total), 2)
     mult = _multiplier(provider, model)
     if mult is None:
         return None
