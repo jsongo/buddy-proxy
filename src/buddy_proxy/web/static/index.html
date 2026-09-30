@@ -633,15 +633,17 @@ document.getElementById('rb-start').addEventListener('change', onDateInput);
 document.getElementById('rb-end').addEventListener('change', onDateInput);
 
 // ---- 请求日志快速筛选（通道 / 模型）----
-// 点一次选中、再点取消；组内多选 = OR，通道与模型两组之间 = AND；全不选 = 不筛。
-// 候选按钮从当前日期范围有流量的数据动态生成（RANGE_MODELS）。
-const LOG_FILTERS = { provider: new Set(), model: new Set() };
+// 点一次选中、再点取消；组内多选 = OR，组与组之间 = AND；全不选 = 不筛。
+// 通道/模型候选从当前日期范围有流量的数据动态生成（RANGE_MODELS）；
+// 客户端候选来自日志接口返回的 RANGE_CLIENTS（该维度统计里没有，只能从日志行收集）。
+const LOG_FILTERS = { provider: new Set(), model: new Set(), client: new Set() };
 
 function renderLogFilters() {
   const el = document.getElementById('log-filters');
   if (!el) return;
   const provs = [...new Set(RANGE_MODELS.map(m => m.provider))];
   const models = [...new Set(RANGE_MODELS.map(m => m.model))];
+  const clients = RANGE_CLIENTS;
   const btn = (kind, val, inner) =>
     `<button class="rb-btn${LOG_FILTERS[kind].has(val) ? ' active' : ''}" data-kind="${kind}" data-val="${esc(val)}">${inner}</button>`;
   el.innerHTML =
@@ -649,7 +651,9 @@ function renderLogFilters() {
       provs.map(p => btn('provider', p,
         `<i class="lf-dot" style="background:${pcolor(p)}"></i>${esc(p)}`)).join('') : '') +
     (models.length ? `<span class="rb-sep"></span><span class="lf-label">模型</span>` +
-      models.map(m => btn('model', m, esc(m))).join('') : '');
+      models.map(m => btn('model', m, esc(m))).join('') : '') +
+    (clients.length ? `<span class="rb-sep"></span><span class="lf-label">客户端</span>` +
+      clients.map(c => btn('client', c, esc(c))).join('') : '');
 }
 document.getElementById('log-filters').addEventListener('click', ev => {
   const b = ev.target.closest('.rb-btn'); if (!b) return;
@@ -664,6 +668,8 @@ document.getElementById('log-filters').addEventListener('click', ev => {
 // 由 STATS.model_daily 按所选范围过滤 + 按（通道/模型）聚合，
 // 结构与后端 STATS.models 一致（供 Top10、平均耗时图、悬停共用）。
 let RANGE_MODELS = [];
+// 客户端筛选候选（按出现次数降序），由 /ui/api/logs 响应带回（见 renderRecent）。
+let RANGE_CLIENTS = [];
 function modelsInRange() {
   const md = (STATS && STATS.model_daily) || [];
   const per = new Map();
@@ -1799,6 +1805,8 @@ async function renderRecent() {
     qs += `&provider=${encodeURIComponent([...LOG_FILTERS.provider].join(','))}`;
   if (LOG_FILTERS.model.size)
     qs += `&model=${encodeURIComponent([...LOG_FILTERS.model].join(','))}`;
+  if (LOG_FILTERS.client.size)
+    qs += `&client=${encodeURIComponent([...LOG_FILTERS.client].join(','))}`;
 
   // 同一查询已渲染过 → 直接跳过。首屏/切页签/轮询会多次 render(),
   // 该接口要全量扫归档，重复请求代价最高。
@@ -1822,8 +1830,11 @@ async function renderRecent() {
   const total = resp.total || 0;
   const pages = resp.pages || 1;
   RECENT_PAGE = resp.page || 1;  // 后端已收敛到合法区间
+  // 客户端筛选候选随日志数据刷新（按出现次数降序，不随已选筛选收缩）
+  RANGE_CLIENTS = resp.clients || [];
+  renderLogFilters();
   if (!rows.length) {
-    const filtered = LOG_FILTERS.provider.size || LOG_FILTERS.model.size;
+    const filtered = LOG_FILTERS.provider.size || LOG_FILTERS.model.size || LOG_FILTERS.client.size;
     el.innerHTML = `<tr><td colspan="9" class="empty">${
       filtered ? '当前筛选条件下没有请求记录' : (total ? '所选范围内没有请求记录' : '还没有请求记录')}</td></tr>`;
     pager.innerHTML = '';

@@ -356,12 +356,15 @@ class MetricsCollector:
         page_size: int = 20,
         providers: Optional[list[str]] = None,
         models: Optional[list[str]] = None,
+        clients: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """按日期范围（YYYY-MM-DD，含端点）分页读日志文件，按 ts 倒序返回。
 
         数据源：当前 metrics.jsonl + 落在 [start, end] 的按天归档文件。未落盘
         （log_path=None）时退回内存 recent。范围缺省为最近 KEEP_DAYS 天。
-        providers/models：非空时按白名单过滤（组内 OR，供 UI 快速筛选）。
+        providers/models/clients：非空时按白名单过滤（组内 OR，供 UI 快速筛选）。
+        响应额外带 ``clients``：日期范围内出现过的非空客户端值（按出现次数
+        降序），供前端生成「客户端」筛选按钮——候选不随已选筛选收缩。
         """
         page_size = max(1, min(int(page_size or 20), 200))
         page = max(1, int(page or 1))
@@ -390,8 +393,23 @@ class MetricsCollector:
                 rows.extend(self._read_all(path))
             rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
 
-        # 逐条按日期范围 + 通道/模型白名单过滤（内存 recent 分支也走这里）
-        if start or end or providers or models:
+        # 「客户端」筛选候选：日期范围内出现过的非空 client 值，按出现次数
+        # 降序（与 UI 通道/模型候选「按流量排序」的口径一致）。必须在白名单
+        # 过滤**之前**收集，否则一选中某个筛选，其余候选按钮就消失了。
+        # 旧记录 client 为空串，跳过（它们无法也不必参与筛选）。
+        client_counts: dict[str, int] = {}
+        for r in rows:
+            d = _date_str(r.get("ts", 0))
+            if (start and d < start) or (end and d > end):
+                continue
+            c = (r.get("client") or "").strip()
+            if c:
+                client_counts[c] = client_counts.get(c, 0) + 1
+        client_list = [c for c, _ in
+                       sorted(client_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+        # 逐条按日期范围 + 通道/模型/客户端白名单过滤（内存 recent 分支也走这里）
+        if start or end or providers or models or clients:
             def _in(rec: dict[str, Any]) -> bool:
                 d = _date_str(rec.get("ts", 0))
                 if (start and d < start) or (end and d > end):
@@ -399,6 +417,8 @@ class MetricsCollector:
                 if providers and rec.get("provider", "") not in providers:
                     return False
                 if models and rec.get("model", "") not in models:
+                    return False
+                if clients and rec.get("client", "") not in clients:
                     return False
                 return True
             rows = [r for r in rows if _in(r)]
@@ -413,6 +433,7 @@ class MetricsCollector:
             "page": page,
             "page_size": page_size,
             "pages": pages,
+            "clients": client_list,
             "from_disk": self.log_path is not None,
         }
 
