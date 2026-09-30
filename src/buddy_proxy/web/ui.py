@@ -318,6 +318,14 @@ async def ui_stats(request: Request):
     if metrics is None:
         return {"models": [], "daily": [], "model_daily": [], "recent": [], "summary": {}, "credits_map": {}}
     snap = metrics.snapshot(days=30)
+
+    def _credits_tag(v: Any) -> Any:
+        """倍率统一成展示字符串：数字（如 qoder 的 price_factor 0.2）补「x」前缀，
+        目录里本就是 "x1.83 credits" 这类字符串的原样保留。"""
+        if isinstance(v, (int, float)):
+            return f"x{v:g}"
+        return v
+
     # 模型积分倍率，按「通道/模型」为键——同一模型跨通道倍率不同
     # （如 glm-5.3 在 codebuddy 是 x0.79、trae 是 x0.40）。CodeBuddy 走
     # models_config，其余通道取各自 models() 声明的 credits。
@@ -326,9 +334,17 @@ async def ui_stats(request: Request):
         if m.get("credits"):
             snap["credits_map"][f"codebuddy/{m['id']}"] = m.get("credits")
     for p in getattr(state, "providers", {}).values():
+        prefix = f"{p.id}/"
         for m in p.models():
             if m.get("credits"):
-                snap["credits_map"].setdefault(settings_mod.model_key(p.id, m["id"]), m.get("credits"))
+                mid = str(m.get("id") or "")
+                # models() 的 id 可能已带「provider/」前缀（如 qoder 的
+                # to_openai_model），剥掉再拼键——否则键变成 qoder/qoder/x，
+                # 前端按「provider/裸名」查永远落空，倍率从来不显示
+                if mid.startswith(prefix):
+                    mid = mid[len(prefix):]
+                snap["credits_map"].setdefault(
+                    settings_mod.model_key(p.id, mid), _credits_tag(m.get("credits")))
     return snap
 
 
