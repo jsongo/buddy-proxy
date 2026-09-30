@@ -101,6 +101,54 @@ MODEL_NAME_CANONICAL: dict[str, str] = {
     "glm-5-turbo": "glm-5-turbo",
 }
 
+# ---------------------------------------------------------------------------
+# 积分估算（GLM Coding Plan 官方抵扣系数）
+# ---------------------------------------------------------------------------
+
+#: 模型（小写 id）→ (Input, Cached Input, Output) 抵扣系数。官方公式
+#: （docs.bigmodel.cn/cn/coding-plan/overview「积分抵扣计算方式」，2026-09-30 版）：
+#:
+#:   模型消耗积分数 = (输入 Token×Input + 缓存命中 Token×Cached Input
+#:                    + 输出 Token×Output) / 10000
+#:
+#: 上游 API（anthropic / openai 兼容端点实测）不回单次积分，这是唯一的官方
+#: 口径。注意两个上游语义差异都已被 metrics.normalize_usage 归一：prompt 是
+#: OpenAI 口径（**含**缓存命中），估算前先减掉 cached 得到未命中输入。
+#: GLM-5-Turbo / GLM-4.7 上游自动切换为 GLM-5.3-Flash，按 Flash 系数抵扣；
+#: glm-5.3-flashx 套餐未开放（调用即被拒），不配系数 → 不出估算值。
+CREDIT_COEFFS: dict[str, tuple[float, float, float]] = {
+    "glm-5.3": (6.9, 1.7, 24.0),
+    "glm-5.3-flash": (2.3, 0.56, 8.0),
+    "glm-5-turbo": (2.3, 0.56, 8.0),
+}
+
+#: 全时段 5 折的活动区间（UTC+8 日期，含端点）。活动期连工作日高峰也按
+#: 非高峰计，故单独列表而非并进 credit_discount_now 的工作日规则；
+#: 到期后从表里删掉即可。
+PROMO_ALL_OFFPEAK: tuple[tuple[str, str], ...] = (
+    ("2026-09-25", "2026-10-07"),  # 庆双节活动
+)
+
+
+def credit_discount_now(ts: float | None = None) -> float:
+    """给定时刻的积分抵扣倍率：高峰 1×，非高峰 0.5×。
+
+    高峰时段 = 每周一至周五 14:00–18:00（UTC+8），其余（夜间/周末/节假日
+    活动期）一律 0.5×。官方口径按请求发生时刻计，与额度计数器的批量聚合
+    无关。
+    """
+    import datetime as _dt
+
+    t = time.time() if ts is None else ts
+    bj = _dt.datetime.fromtimestamp(t, _dt.timezone(_dt.timedelta(hours=8)))
+    for lo, hi in PROMO_ALL_OFFPEAK:
+        d = bj.strftime("%Y-%m-%d")
+        if lo <= d <= hi:
+            return 0.5
+    if bj.weekday() < 5 and 14 <= bj.hour < 18:
+        return 1.0
+    return 0.5
+
 _TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=15.0)
 
 

@@ -46,7 +46,8 @@ def _exc_text(detail: Any) -> str:
 
 
 def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any]) -> tuple[Optional[float], bool]:
-    """上游 usage 带实扣积分就用实扣；否则按 token 粗估（当前仅 trae 有倍率表）。
+    """上游 usage 带实扣积分就用实扣；否则按 token 估算
+    （trae 按倍率表粗估，zcode 按 GLM Coding Plan 官方抵扣系数精算）。
 
     返回 (credit, credit_estimated)；估算失败/无 token 数据时为 (None, False)。
     """
