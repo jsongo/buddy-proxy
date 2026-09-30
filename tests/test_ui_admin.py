@@ -1267,6 +1267,30 @@ def test_query_logs_provider_model_filter(tmp_path):
     assert all(r["provider"] == "traepat" and r["model"] == "glm-4.7" for r in rows)
 
 
+def test_query_logs_client_filter_and_candidates(tmp_path):
+    """客户端白名单过滤 + 候选列表：组内 OR、与其它组 AND；候选不随筛选收缩。"""
+    m = MetricsCollector(tmp_path / "metrics.jsonl")
+    m.record(provider="zcode", model="glm-5.3", status=200, client="claude-code")
+    m.record(provider="zcode", model="glm-5.3", status=200, client="claude-code")
+    m.record(provider="traepat", model="glm-4.7", status=200, client="curl")
+    m.record(provider="traepat", model="glm-4.7", status=200)  # 旧记录无 client
+
+    # 候选：只收非空值、按出现次数降序，无筛选时也返回
+    assert m.query_logs()["clients"] == ["claude-code", "curl"]
+    # 白名单过滤：组内 OR；client 为空的记录不命中任何候选
+    assert m.query_logs(clients=["curl"])["total"] == 1
+    assert m.query_logs(clients=["claude-code", "curl"])["total"] == 3
+    assert m.query_logs(clients=["不存在的客户端"])["total"] == 0
+    # 与通道组 AND
+    assert m.query_logs(providers=["traepat"], clients=["curl"])["total"] == 1
+    assert m.query_logs(providers=["zcode"], clients=["curl"])["total"] == 0
+    # 候选在白名单过滤**之前**收集：筛掉 claude-code 后它仍在候选里
+    assert m.query_logs(clients=["curl"])["clients"] == ["claude-code", "curl"]
+    # 过滤结果内容正确
+    rows = m.query_logs(clients=["claude-code"])["rows"]
+    assert all(r["client"] == "claude-code" for r in rows)
+
+
 # ---------------------------------------------------------------------------
 # settings 模块
 # ---------------------------------------------------------------------------
