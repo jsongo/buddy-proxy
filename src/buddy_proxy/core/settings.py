@@ -252,7 +252,8 @@ def normalize_order_key(raw: str) -> str:
     顺序」，归属通道是运行时才知道的实现细节——同一个名字哪个通道先认领它就归谁。
     早先把裸键改写成 ``codebuddy/<模型名>`` 是错的：它把这条件局限死在单个通道上，
     请求解析到别的通道时静默不触发（``forward`` 侧现在也认裸键，见那里的注释）。
-    UI 保存时仍写全 ``provider/model`` 键（那是精确位置），两种形态都支持。
+    带 ``/`` 的键仍按 :func:`model_key` 归一（别名 ``workbuddy`` → ``codebuddy``）：
+    历史配置里那些是「精确位置」，两种形态都支持。
     """
     value = (raw or "").strip()
     if not value:

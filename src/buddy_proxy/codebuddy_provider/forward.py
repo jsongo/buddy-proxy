@@ -416,28 +416,31 @@ async def forward_chat(
             owner_id = owner.id if owner is not None else "codebuddy"
             owner_model = (_resolved_model_id(owner, requested_model)
                            if owner is not None else requested_model)
-            key = settings_mod.model_key(owner_id, owner_model)
-            targets = order.get(key)
-            # 直接按 provider/model 形态命中的键也认（客户端已带前缀时 owner 已被剥）
-            if not targets:
-                targets = order.get(settings_mod.model_key(
-                    owner_id, str(requested_model)))
-            # **裸名键也认**：用户配的是「这个模型名走什么顺序」，不该被强制写成
-            # `<归属通道>/<模型名>`。归属通道是运行时才知道的实现细节（同一个名字
-            # 哪个通道先认领它就归谁），让用户预先写死既反直觉、又会在解析结果变化
-            # 时静默失效。按 `requested_model` 与解析后的裸名各试一次裸键。
-            if not targets:
-                bare_keys = []
-                for cand in (str(requested_model), owner_model):
-                    cand = (cand or "").strip()
-                    if cand and "/" not in cand and cand not in bare_keys:
-                        bare_keys.append(cand)
-                for bk in bare_keys:
-                    hit = order.get(bk)
-                    if hit:
-                        targets = hit
-                        key = bk
-                        break
+            # **裸名键优先**：UI 现在写的是裸名（一个模型名一条配置，对所有发布它的
+            # 通道都生效），用户手写配置也常用这个形态。归属通道是运行时才知道的实现
+            # 细节（同一个名字哪个通道先认领它就归谁），让用户预先写死既反直觉、又会在
+            # 解析结果变化时静默失效。
+            #
+            # 顺序不能反：老配置里可能同时留着 `<通道>/<名>` 的旧键和一版新写的裸键，
+            # 先查旧键会让它把新配置**整个遮住**（用户改了顺序却毫无效果）。
+            # 按 `requested_model` 与解析后的裸名各试一次。
+            bare_keys = []
+            for cand in (str(requested_model), owner_model):
+                cand = (cand or "").strip()
+                if cand and "/" not in cand and cand not in bare_keys:
+                    bare_keys.append(cand)
+            # 候选键（本函数唯一决定 model_order 用哪条记录的地方）：
+            # 先裸名，再退回 `<归属通道>/<名>`（客户端已带前缀时 owner 已被剥）
+            keys = [*bare_keys,
+                    settings_mod.model_key(owner_id, owner_model),
+                    settings_mod.model_key(owner_id, str(requested_model))]
+            targets: Any = None
+            key = keys[0]
+            for candidate in dict.fromkeys(k for k in keys if k):
+                hit = order.get(candidate)
+                if hit:
+                    targets, key = hit, candidate
+                    break
             if targets:
                 diagnostic("model_order_try", model=key, targets=len(targets))
                 return await _forward_with_order(

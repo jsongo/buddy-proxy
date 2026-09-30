@@ -2011,9 +2011,11 @@ async function ensureOrderOptions() {
 function renderOrderPage() {
   const box = document.getElementById('order-list');
   if (!box) return;
-  // 已配置的条目由服务端下发；MODELS 非空即当前世代的数据（ensureData 会在
-  // 代次失配时把它置回 null），所以这里不必再额外判「加载完没有」。
-  if (!MODELS) { box.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  // 本页的数据源是 ORDER（配置的键）。MODELS 只给「+ 新增模型」的下拉用，
+  // 不能拿它当加载门槛：那会让配置早就到了、却因为模型目录慢或拉失败而一直
+  // 停在「加载中…」。ORDER 非空即当前世代的数据（ensureData 会在代次失配时
+  // 把它置回 null），所以这里不必再额外判「加载完没有」。
+  if (!ORDER) { box.innerHTML = '<div class="empty">加载中…</div>'; return; }
   // 选项还没到位时先拉一次再重绘（只触发一轮：拉到后 ORDER_PROVIDER_LIST 非空）
   if (!ORDER_PROVIDER_LIST.length) {
     ensureOrderOptions().then(() => { if (currentTab() === 'order') renderOrderPage(); });

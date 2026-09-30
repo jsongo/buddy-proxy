@@ -710,11 +710,32 @@ def _canonical_order_target(provider: str, model: str, state: Any) -> str:
     转发侧会自己对裸名做同样的归一，所以这里存对外名是安全的、也是可读的。
     """
     if not (provider or "").strip():
-        provider = _owner_provider((model or "").strip(), state)
+        provider, model = _split_known_prefix(model)
+    if not provider:
+        provider = _owner_provider(model, state)
     pid = provider.strip()
-    bare = _bare_model_id((model or "").strip(), pid)
+    bare = _bare_model_id(model, pid)
     _validate_model(pid, bare, state)
     return settings_mod.model_key(pid, bare)
+
+
+def _split_known_prefix(model: str) -> tuple[str, str]:
+    """把 ``<已知通道>/<名>`` 拆成 ``(通道, 名)``；不是这个形态就返回 ``("", 原串)``。
+
+    为什么要拆：老配置里的键是 ``zcode/glm-5.3``，顺序页照着配置原样展示，用户
+    点点改改再保存时提交回来的就是那个带前缀的串。不拆的话 ``_owner_provider``
+    会去目录里找一个**名字真叫** ``zcode/glm-5.3`` 的模型，必然 400。
+
+    **只认 :data:`settings.KNOWN_PROVIDER_IDS` 里的通道名**：``provider/model``
+    本身也是合法的普通模型 id（``openrouter/gpt-5``），见不得斜杠就拆会把它们
+    拆坏。别名 ``workbuddy`` 借 :func:`settings.model_key` 一并归一。
+    """
+    head, sep, tail = (model or "").strip().partition("/")
+    if sep and tail.strip():
+        pid, _, bare = settings_mod.model_key(head, tail).partition("/")
+        if pid in settings_mod.KNOWN_PROVIDER_IDS:
+            return pid, bare
+    return "", (model or "").strip()
 
 
 def _owner_provider(model: str, state: Any) -> str:
@@ -770,9 +791,14 @@ async def ui_model_order(request: Request):
     # 反而会按请求解析到哪个通道而行为不一）。所以这里接受（并忽略）前端可能
     # 传来的归属通道，只存裸名。
     #
+    # **model 里自带的 `<通道>/` 也要剥掉**：老配置的键就是那个形态，页面照原样
+    # 展示、用户改完提交回来的就是 `zcode/glm-5.3`；带着它落键会写出一个转发侧
+    # 永远查不到的双前缀死键。
+    #
     # 目标仍按对外发布名校验后拼 `provider/模型名`（**不是** `_normalize_model_ref`：
     # 那会套用通道转发期的 `resolve_model` 映射，qoder 上把 `glm-5.3` 变成上游内部
     # key `gmodel`，转发侧按 `qoder/glm-5.3` 查不到，条目成死键）。
+    _, model = _split_known_prefix(model)
     key = _canonical_order_target("", model, state).split("/", 1)[-1]
     raw_targets = body.get("targets")
     targets: list[str] = []
@@ -791,6 +817,18 @@ async def ui_model_order(request: Request):
     current = getattr(state, "model_order", None) or {}
     if not isinstance(current, dict):
         current = dict(current)
+    # **收敛同名的遗留键**：老配置里同一个模型可能既有 `<通道>/<名>` 又有裸名
+    # （用户手改过、或从旧版本升上来）。保存裸名那一份时必须把带前缀的旧键一起
+    # 删掉，否则一个模型在页面上就是两张卡、配置里两条规则，而哪条生效取决于
+    # 转发侧的查找顺序——用户会看到「改了一条，行为没变」。
+    # 只删**同名**且前缀是**已知通道**的（`x/glm-5.3` 对 `glm-5.3`）；不同模型
+    # 互不影响，`openrouter/...` 这种普通模型 id 也不会被误伤。
+    for k in [k for k in current if k != key and _split_known_prefix(k)[1] == key]:
+        for target in current.get(k) or []:
+            if isinstance(target, str) and "/" in target:
+                # 旧键上的冷却标记一并清掉：那条规则本身要没了，标记只会误导
+                cooldown_mod.clear(*target.split("/", 1))
+        current.pop(k, None)
     # 清顺序时顺带清标记：用户显式改 = 重置健康判断，避免刚配完还是被冷却挡着。
     # 必须在 pop 之前取旧目标列表，否则读到的是已被删空的值。
     cleared = 0

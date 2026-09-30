@@ -451,6 +451,80 @@ def test_model_order_key_is_bare_and_shared_across_channels(twin_env):
     assert twin_env.state.model_order["fake-model"] == ["fakeprov/fake-model"]
 
 
+def test_model_order_accepts_prefixed_model_and_stores_bare(env):
+    """提交里带着 ``<通道>/<名>`` 也不落前缀：那是老配置的键形态，得能原地保存。
+
+    真机场景：老配置里键是 ``qoder/glm-5.3``，顺序页照着配置原样展示（标题就是
+    那个串），用户改完点保存，提交回来的是带前缀的名字。若照单全收，落下的键会
+    变成 ``qoder/qoder/glm-5.3``——转发侧永远查不到的死键；若拿它去目录里校验，
+    则直接 400「模型 qoder/glm-5.3 不在 … 的模型列表中」。
+    """
+    # fakeprov 不在 KNOWN_PROVIDER_IDS 里（那是**真实**通道名表），所以这里用
+    # 别名形态：workbuddy 是 codebuddy 的旧称，会被归一后走前缀拆分那条路。
+    r = env.client.post(
+        "/ui/api/model-order",
+        json={"model": "fakeprov/fake-model",
+              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    # fakeprov 不是已知通道名 → 不拆前缀 → 按「没有通道发布这个名字」拒绝。
+    # 这条同时说明了「见斜杠就拆」是错的：普通模型 id 里合法地带斜杠。
+    assert r.status_code == 400
+    assert "fakeprov/fake-model" in r.text
+
+    # 而真实通道名做前缀时正常剥掉并保存
+    r = env.client.post(
+        "/ui/api/model-order",
+        json={"model": "codebuddy/fake-model",
+              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "fake-model", "键必须只剩裸名"
+    assert list(env.state.model_order) == ["fake-model"]
+
+
+def test_model_order_save_collapses_stale_prefixed_sibling(env):
+    """保存一个模型时，把它的遗留 ``<通道>/<名>`` 旧键一起收掉。
+
+    老配置里同一个模型可能两条键都在（用户手改过、或从旧版本升上来）。留着的话
+    页面上就是两张卡、配置里两条规则，而哪条生效取决于转发侧的查找顺序——用户
+    改了一条却发现行为没变。保存即收敛成一条。
+    """
+    # 先造出两条：老式带前缀的（前缀是**真实通道名**，老 UI 落的就是这个形态），
+    # 和新的裸名
+    env.state.model_order = {
+        "codebuddy/fake-model": ["fakeprov/fake-model"],
+        "fake-model": ["fakestream/fake-stream-model"],
+        # 不同模型的带前缀键不该被误伤
+        "codebuddy/other-model": ["codebuddy/other-model"],
+    }
+    settings_mod.save_settings({"model_order": env.state.model_order})
+
+    r = env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert r.status_code == 200, r.text
+    assert "codebuddy/fake-model" not in env.state.model_order, "同名的遗留旧键应收掉"
+    assert env.state.model_order["fake-model"] == ["fakeprov/fake-model"]
+    assert "codebuddy/other-model" in env.state.model_order, "别的模型不受影响"
+    # 落盘的也要是收好的那一份
+    saved = settings_mod.load_settings()["model_order"]
+    assert "codebuddy/fake-model" not in saved
+
+
+def test_model_order_prefixed_only_for_known_channels(env):
+    """只有**认得的通道名**才当前缀剥；``openrouter/xxx`` 这类普通模型 id 原样保留。
+
+    见不得斜杠就拆会把合法模型名拆坏——``provider/model`` 本身就是一种合法的
+    plain model id（routing 那边有同样的规则）。
+    """
+    r = env.client.post(
+        "/ui/api/model-order",
+        json={"model": "openrouter/gpt-5",
+              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert r.status_code == 400
+    # 400 的理由是「没有通道发布这个名字」，而不是「fakeprov/gpt-5 不存在」——
+    # 说明它没被当成通道前缀拆开（拆了就会去找 gpt-5）
+    assert "没有通道发布名为 openrouter/gpt-5 的模型" in r.text
+
+
 def test_model_order_clear_works_without_provider(env):
     """省略 provider 也能清：路由/前端都不该被迫知道「归属通道」。"""
     env.client.post("/ui/api/model-order",

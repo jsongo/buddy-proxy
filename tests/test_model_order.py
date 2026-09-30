@@ -463,6 +463,29 @@ def test_bare_key_still_fails_over(tmp_path, monkeypatch):
     assert len(b.calls) == 1 and len(a.calls) == 1
 
 
+def test_bare_key_wins_over_stale_prefixed_key(tmp_path, monkeypatch):
+    """同一模型既有旧键 ``<通道>/<名>`` 又有新裸键时，**裸键必须优先**。
+
+    真机场景：老配置留下的 ``pa/m1`` 还在文件里，用户后来按新口径加了
+    ``"m1"`` 并改了顺序。若查找先命中旧键，用户改的那条就**完全没效果**——
+    他会看到配置明明改了、请求却还走老路子，而且毫无提示。
+
+    这里两个键指向不同顺序，断言生效的是裸键那份。
+    """
+    a = _Provider("pa", ["m1"], "ok")
+    b = _Provider("pb", ["m1"], "ok")
+    state = _make_state({"pa": a, "pb": b}, tmp_path,
+                        model_order={"pa/m1": ["pa/m1"],
+                                     "m1": ["pb/m1", "pa/m1"]})
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="m1")
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] == "from-pb", (
+        "裸键是用户当前维护的那份，必须盖过遗留的 <通道>/<名> 旧键")
+    assert len(b.calls) == 1 and a.calls == []
+
+
 def test_order_does_not_apply_to_other_models(tmp_path, monkeypatch):
     """顺序只对它自己那把键生效，不影响别的模型。
 
