@@ -34,6 +34,7 @@ bigmodel-coding-plan 通道同款）：
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -122,6 +123,9 @@ CREDIT_COEFFS: dict[str, tuple[float, float, float]] = {
     "glm-5-turbo": (2.3, 0.56, 8.0),
 }
 
+#: 时段折扣判断统一用北京时间（官方高峰口径按 UTC+8 定义，与机器时区无关）。
+BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
 #: 全时段 5 折的活动区间（UTC+8 日期，含端点）。活动期连工作日高峰也按
 #: 非高峰计，故单独列表而非并进 credit_discount_now 的工作日规则；
 #: 到期后从表里删掉即可。
@@ -137,10 +141,8 @@ def credit_discount_now(ts: float | None = None) -> float:
     活动期）一律 0.5×。官方口径按请求发生时刻计，与额度计数器的批量聚合
     无关。
     """
-    import datetime as _dt
-
     t = time.time() if ts is None else ts
-    bj = _dt.datetime.fromtimestamp(t, _dt.timezone(_dt.timedelta(hours=8)))
+    bj = datetime.datetime.fromtimestamp(t, BEIJING_TZ)
     for lo, hi in PROMO_ALL_OFFPEAK:
         d = bj.strftime("%Y-%m-%d")
         if lo <= d <= hi:
