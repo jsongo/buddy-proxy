@@ -125,16 +125,25 @@ def estimate_credit(
         return _estimate_zcode(model, prompt_tokens, completion_tokens, cached_tokens)
     rates = _load_trae_measured_rates().get(model) if provider == "trae" else None
     if rates is not None:
-        in_rate, out_rate, calib_mult = rates
+        # 元组形状容错：旧格式（仅两项）或手工补录漏写校准倍率时退化到不缩放，
+        # 不让 ValueError 冒到调用方——本函数跑在流式收尾的 finally 里，
+        # 抛出会把上游已成功的请求变成客户端 500。
+        in_rate, out_rate = rates[0], rates[1]
+        calib_mult = rates[2] if len(rates) > 2 else 0.0
         mult = _multiplier(provider, model)
-        # 拿不到当前倍率（面板表被删/改名）时不缩放：退回校准值本身，
-        # 至少不引入未知误差。校准倍率为 0 属配置错误，同样不缩放。
-        scale = mult / calib_mult if mult and calib_mult else 1.0
-        total = (in_rate * max(0, int(prompt_tokens or 0)) +
-                 out_rate * max(0, int(completion_tokens or 0))) * scale
-        if total <= 0:
-            return None
-        return round(total, 2)
+        # 拿不到当前倍率（表里无此模型、被删/改名）时不缩放：退回校准绝对值。
+        # mult 为 0（x0.00 免费档，如促销期）是**有效倍率**，应正常清零估算。
+        # 校准倍率为 0 属配置错误，同样不缩放。
+        if mult is None or not calib_mult:
+            scale = 1.0
+        else:
+            scale = mult / calib_mult
+        prompt = max(0, int(prompt_tokens or 0))
+        completion = max(0, int(completion_tokens or 0))
+        if prompt == 0 and completion == 0:
+            return None  # 无 token 数据（错误响应/解析失败）不记估算
+        total = (in_rate * prompt + out_rate * completion) * scale
+        return round(max(0.0, total), 2)
     mult = _multiplier(provider, model)
     if mult is None:
         return None

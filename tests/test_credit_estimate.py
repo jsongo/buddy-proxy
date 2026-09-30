@@ -98,6 +98,23 @@ def test_measured_rates_fall_back_when_multiplier_missing(monkeypatch):
     assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 2.42
 
 
+def test_measured_rates_zero_multiplier_means_free(monkeypatch):
+    """x0.00 是有效倍率（限时免费促销档），估算应归零而不是当成「查不到」。"""
+    monkeypatch.setitem(trae_config.MODEL_CREDITS, "glm-5.3-flashx", "x0.00")
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 0.0
+
+
+def test_measured_rates_tolerate_legacy_two_tuple(monkeypatch):
+    """遗留两项格式（无校准倍率）不抛异常，退化到不缩放。
+
+    该函数跑在流式收尾的 finally 里，抛 ValueError 会把上游已成功的请求
+    变成客户端 500——配置形状问题绝不能炸请求路径。
+    """
+    monkeypatch.setitem(trae_config.MEASURED_CREDIT_RATES, "glm-5.3-flashx",
+                        (7.98e-5, 2.81e-4))
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 2.42
+
+
 # ---- zcode：GLM Coding Plan 官方抵扣公式 ----
 # 公式：(未命中输入×Input + 缓存命中×Cached + 输出×Output) / 10000 × 时段折扣
 # glm-5.3 系数 (6.9, 1.7, 24)；flash/turbo (2.3, 0.56, 8)。
