@@ -86,8 +86,13 @@ workers, or explicit provider shutdown lifecycles.
   Every overwrite keeps the previous version as `settings.json.bak` first, so a
   UI write is always reversible. Backing up is best-effort and must never make
   a save fail.
-- `model_order` (settings key) maps a `model_key` to an ordered list of
+- `model_order` (settings key) maps a **bare model name** to an ordered list of
   `provider/model` candidates, tried top-down by `forward._forward_with_order`.
+  The key is the name the client asks for, not a channel-scoped pair: one entry
+  then covers every channel that publishes it (a `glm-5.3` on four channels is
+  one config, not four), and the runtime picks whichever channel claims the name
+  first. `forward` also accepts the historical `<provider>/<model>` key form so
+  configs written by older versions keep firing.
   **Failover is only legal when an attempt failed before any byte was committed
   to the client** — a retryable `HTTPException`, a transport-level exception
   (`_RETRYABLE_EXC`: `httpx.HTTPError` / `OSError`), or a non-2xx
@@ -120,17 +125,24 @@ workers, or explicit provider shutdown lifecycles.
   intent lives in `settings.json`.
 - The `model_order` editor lives in its own **Model order** tab of the bundled
   `/ui` page: one card per configured model, expanding to the reorderable target
-  list. Its channel list and model choices come from
-  `GET /ui/api/model-order/options` (the page's global `MODELS` is only populated
-  once the models tab has loaded, so the editor must not depend on it). Targets
-  are picked from that list but remain free-text, because an upstream may accept
-  an id its catalog does not advertise.
-- A model card's key is `<bare-model-name>` plus the **owning channel**, and the
-  page builds it as `provider + _bare_model_id(id)` — the catalog's `m["id"]`
-  carries a channel prefix (`qoder/deepseek-v4.1-flash`) while `model_order` keys
-  and metrics are recorded against the bare name. The same mismatch applies to
-  the per-model request counts on the models tab: looking them up with the
-  prefixed id made that column read ~0 for every channel that prefixes its ids.
+  list. **Its render source is `GET /ui/api/model-order`, which returns the
+  settings field verbatim** — one item per key, so the page shows exactly what
+  the config holds. It deliberately does *not* drive cards off the channel
+  catalog: `GET /ui/api/models` annotates each (channel, model) pair, so a name
+  published by four channels came back four times and the page drew four
+  identical cards. Its channel list and model choices (for the "add model"
+  picker) come from `GET /ui/api/model-order/options` (the page's global
+  `MODELS` is only populated once the models tab has loaded, so the editor must
+  not depend on it). Targets are picked from that list but remain free-text,
+  because an upstream may accept an id its catalog does not advertise.
+- A model card's key is the **bare model name** — no owning channel. The card is
+  the config key, and the runtime bare key fires on every channel that publishes
+  it, so a channel-scoped key would silently narrow the rule to one channel.
+  Related mismatch worth remembering: the catalog's `m["id"]` carries a channel
+  prefix (`qoder/deepseek-v4.1-flash`) while `model_order` targets and metrics
+  are recorded against the bare name. Looking up the per-model request counts on
+  the models tab with the prefixed id made that column read ~0 for every channel
+  that prefixes its ids.
 - Editing is **page-only**. There is deliberately no row-level order button on
   the models tab: that table's action column grew crowded and the entry point
   became unfindable. The row keeps a `⇄ n` badge (targets, plus `⏸ n` cooled) and

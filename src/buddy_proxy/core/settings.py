@@ -248,17 +248,19 @@ def normalize_order(raw: Any) -> list[str]:
 def normalize_order_key(raw: str) -> str:
     """把 ``model_order`` 的键归一成 :func:`model_key` 口径。
 
-    裸模型名（无 ``/``）按 codebuddy 兜底——与 ``__main__`` 加载
-    ``disabled_models`` 的处理一致（``settings.json`` 里写裸名是历史/手写配置的常见
-    形态）。注意：裸键归一到 codebuddy 意味着它**只**对该通道生效，若用户本意是别的
-    通道，顺序永远不会触发；UI 一律写全 ``provider/model`` 键以避免这种静默错配。
+    **裸模型名原样保留**（不再按 codebuddy 兜底）。用户配的是「这个模型名走什么
+    顺序」，归属通道是运行时才知道的实现细节——同一个名字哪个通道先认领它就归谁。
+    早先把裸键改写成 ``codebuddy/<模型名>`` 是错的：它把这条件局限死在单个通道上，
+    请求解析到别的通道时静默不触发（``forward`` 侧现在也认裸键，见那里的注释）。
+    带 ``/`` 的键仍按 :func:`model_key` 归一（别名 ``workbuddy`` → ``codebuddy``）：
+    历史配置里那些是「精确位置」，两种形态都支持。
     """
     value = (raw or "").strip()
     if not value:
         return ""
     if "/" in value:
         return model_key(*value.split("/", 1))
-    return model_key("codebuddy", value)
+    return value
 
 
 def _to_minutes(hhmm: str) -> int | None:

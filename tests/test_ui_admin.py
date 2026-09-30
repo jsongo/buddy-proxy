@@ -72,6 +72,16 @@ class FakeStreamProvider(FakeProvider):
         return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+class FakeTwinProvider(FakeProvider):
+    """与 FakeProvider **同名**发布 ``fake-model``——复刻真机里 glm-5.3 的处境。
+
+    真实例：``glm-5.3`` 在 zcode/codebuddy/qoder/trae 四个通道都发布。model_order
+    因此必须按**裸模型名**分卡/落键，否则同一个名字会被拆成四份互不相干的配置。
+    """
+
+    id = "faketwin"
+
+
 def _make_state(providers, tmp_path):
     client = mock.MagicMock()
     client.endpoint = "https://fake.endpoint.invalid"
@@ -114,6 +124,20 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(st, "proxy_state", state)
     client = TestClient(m.app)
     return SimpleNamespace(state=state, fake=fake, fake_stream=fake_stream, client=client)
+
+
+@pytest.fixture()
+def twin_env(tmp_path, monkeypatch):
+    """两个通道**同名**发布 ``fake-model``（复刻 glm-5.3 那种跨通道同名模型）。
+
+    单独一个 fixture 而不是塞进 :func:`env`：后者被大量测试断言了「目录里就是
+    codebuddy/fakeprov/fakestream 三个通道」，多加一个会把它们全部带偏。
+    """
+    fake, twin = FakeProvider(), FakeTwinProvider()
+    state = _make_state({"fakeprov": fake, "faketwin": twin}, tmp_path)
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    return SimpleNamespace(state=state, fake=fake, twin=twin, client=client)
 
 
 # ---------------------------------------------------------------------------
@@ -362,19 +386,22 @@ def test_model_schedule_rejects_unknown(env):
 # 候选上游顺序（model_order）
 # ---------------------------------------------------------------------------
 def test_model_order_set_persist_and_expose(env):
-    """设置顺序：落键、写盘（直接存字符串数组）、并在 /ui/api/models 透出。"""
+    """设置顺序：落**裸名键**、写盘（直接存字符串数组）、并在 /ui/api/models 透出。"""
     r = env.client.post("/ui/api/model-order",
                         json={"provider": "fakeprov", "model": "fake-model",
                               "targets": [{"provider": "fakeprov", "model": "fake-model"},
                                           {"provider": "fakestream",
                                            "model": "fake-stream-model"}]})
     assert r.status_code == 200, r.text
+    assert r.json()["model"] == "fake-model"
     assert r.json()["targets"] == ["fakeprov/fake-model", "fakestream/fake-stream-model"]
-    assert env.state.model_order["fakeprov/fake-model"] == [
+    # 键是**裸模型名**（提交里的 provider 只用于校验，不参与落键）：一个模型名一份
+    # 配置，运行时对所有发布它的通道都生效。
+    assert env.state.model_order["fake-model"] == [
         "fakeprov/fake-model", "fakestream/fake-stream-model"]
     # 存储形状与手写配置一致：直接是数组，不包一层
     saved = settings_mod.load_settings()["model_order"]
-    assert saved["fakeprov/fake-model"] == [
+    assert saved["fake-model"] == [
         "fakeprov/fake-model", "fakestream/fake-stream-model"]
 
     fp = next(g for g in env.client.get("/ui/api/models").json()["groups"]
@@ -382,6 +409,204 @@ def test_model_order_set_persist_and_expose(env):
     got = next(m for m in fp["models"] if m["id"] == "fake-model")["order"]
     assert got["targets"] == ["fakeprov/fake-model", "fakestream/fake-stream-model"]
     assert got["marks"] == []
+
+
+def test_model_order_key_is_bare_and_shared_across_channels(twin_env):
+    """一个模型名 = 一条配置 = 一张卡片，**不按通道拆键**。
+
+    真机现象：用户在同一模型名下能看到 4 张几乎一样的卡片（glm-5.3 在
+    zcode/codebuddy/qoder/trae 都发布），因为键里带了归属通道。而用户写配置时
+    表达的是「指定 ``deepseek-v4.1-flash`` 时按这个顺序选通道」，一条就够——
+    运行时裸键对所有发布它的通道都生效（转发侧 ``forward`` 也认裸键）。
+
+    所以：提交带哪个 provider 都不落进键里；同名模型在任意通道的目录里都应能
+    看到同一条 order；清空/改一次就是改全部。
+    """
+    # fake-model 同时被 fakeprov / faketwin 发布，提交里故意写「另一个」通道
+    r = twin_env.client.post(
+        "/ui/api/model-order",
+        json={"provider": "faketwin", "model": "fake-model",
+              "targets": [{"provider": "faketwin", "model": "fake-model"},
+                          {"provider": "fakeprov", "model": "fake-model"}]})
+    assert r.status_code == 200, r.text
+    # 键是裸名，与提交里写的通道无关
+    assert r.json()["model"] == "fake-model"
+    assert set(twin_env.state.model_order) == {"fake-model"}
+
+    # 两个通道的目录里看到的是**同一条**配置（前端据此只画一张卡）
+    groups = twin_env.client.get("/ui/api/models").json()["groups"]
+    seen = []
+    for g in groups:
+        for m in g["models"]:
+            if m["id"].split("/")[-1] == "fake-model" and m.get("order"):
+                seen.append((g["id"], m["order"]["targets"]))
+    assert {k for k, _ in seen} == {"fakeprov", "faketwin"}, f"两个通道都应看到这条顺序，实际 {seen}"
+    assert len({tuple(v) for _, v in seen}) == 1, "两个通道必须看到同一份 targets"
+
+    # 同一名字改一次（不带通道前缀）就是改这一条，不会分裂出第二个键
+    twin_env.client.post("/ui/api/model-order",
+                         json={"model": "fake-model",
+                               "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert set(twin_env.state.model_order) == {"fake-model"}
+    assert twin_env.state.model_order["fake-model"] == ["fakeprov/fake-model"]
+
+
+def test_model_order_accepts_prefixed_model_and_stores_bare(env):
+    """提交里带着 ``<通道>/<名>`` 也不落前缀：那是老配置的键形态，得能原地保存。
+
+    真机场景：老配置里键是 ``qoder/glm-5.3``，顺序页照着配置原样展示（标题就是
+    那个串），用户改完点保存，提交回来的是带前缀的名字。若照单全收，落下的键会
+    变成 ``qoder/qoder/glm-5.3``——转发侧永远查不到的死键；若拿它去目录里校验，
+    则直接 400「模型 qoder/glm-5.3 不在 … 的模型列表中」。
+    """
+    # fakeprov 不在 KNOWN_PROVIDER_IDS 里（那是**真实**通道名表），所以这里用
+    # 别名形态：workbuddy 是 codebuddy 的旧称，会被归一后走前缀拆分那条路。
+    r = env.client.post(
+        "/ui/api/model-order",
+        json={"model": "fakeprov/fake-model",
+              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    # fakeprov 不是已知通道名 → 不拆前缀 → 按「没有通道发布这个名字」拒绝。
+    # 这条同时说明了「见斜杠就拆」是错的：普通模型 id 里合法地带斜杠。
+    assert r.status_code == 400
+    assert "fakeprov/fake-model" in r.text
+
+    # 而真实通道名做前缀时正常剥掉并保存
+    r = env.client.post(
+        "/ui/api/model-order",
+        json={"model": "codebuddy/fake-model",
+              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "fake-model", "键必须只剩裸名"
+    assert list(env.state.model_order) == ["fake-model"]
+
+
+def test_model_order_save_collapses_stale_prefixed_sibling(env):
+    """保存一个模型时，把它的遗留 ``<通道>/<名>`` 旧键一起收掉。
+
+    老配置里同一个模型可能两条键都在（用户手改过、或从旧版本升上来）。留着的话
+    页面上就是两张卡、配置里两条规则，而哪条生效取决于转发侧的查找顺序——用户
+    改了一条却发现行为没变。保存即收敛成一条。
+    """
+    # 先造出两条：老式带前缀的（前缀是**真实通道名**，老 UI 落的就是这个形态），
+    # 和新的裸名
+    env.state.model_order = {
+        "codebuddy/fake-model": ["fakeprov/fake-model"],
+        "fake-model": ["fakestream/fake-stream-model"],
+        # 不同模型的带前缀键不该被误伤
+        "codebuddy/other-model": ["codebuddy/other-model"],
+    }
+    settings_mod.save_settings({"model_order": env.state.model_order})
+
+    r = env.client.post("/ui/api/model-order",
+                        json={"provider": "fakeprov", "model": "fake-model",
+                              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert r.status_code == 200, r.text
+    assert "codebuddy/fake-model" not in env.state.model_order, "同名的遗留旧键应收掉"
+    assert env.state.model_order["fake-model"] == ["fakeprov/fake-model"]
+    assert "codebuddy/other-model" in env.state.model_order, "别的模型不受影响"
+    # 落盘的也要是收好的那一份
+    saved = settings_mod.load_settings()["model_order"]
+    assert "codebuddy/fake-model" not in saved
+
+
+def test_model_order_prefixed_only_for_known_channels(env):
+    """只有**认得的通道名**才当前缀剥；``openrouter/xxx`` 这类普通模型 id 原样保留。
+
+    见不得斜杠就拆会把合法模型名拆坏——``provider/model`` 本身就是一种合法的
+    plain model id（routing 那边有同样的规则）。
+    """
+    r = env.client.post(
+        "/ui/api/model-order",
+        json={"model": "openrouter/gpt-5",
+              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert r.status_code == 400
+    # 400 的理由是「没有通道发布这个名字」，而不是「fakeprov/gpt-5 不存在」——
+    # 说明它没被当成通道前缀拆开（拆了就会去找 gpt-5）
+    assert "没有通道发布名为 openrouter/gpt-5 的模型" in r.text
+
+
+def test_model_order_clear_works_without_provider(env):
+    """省略 provider 也能清：路由/前端都不该被迫知道「归属通道」。"""
+    env.client.post("/ui/api/model-order",
+                    json={"model": "fake-model",
+                          "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert "fake-model" in env.state.model_order
+    r = env.client.post("/ui/api/model-order", json={"model": "fake-model", "targets": []})
+    assert r.status_code == 200, r.text
+    assert "fake-model" not in env.state.model_order
+
+
+def test_model_order_rejects_model_no_channel_publishes(env):
+    """裸名键也得是**真实存在**的模型名，否则 400（避免写入永不生效的死键）。"""
+    r = env.client.post("/ui/api/model-order",
+                        json={"model": "no-such-model",
+                              "targets": [{"provider": "fakeprov", "model": "fake-model"}]})
+    assert r.status_code == 400
+    assert "没有通道发布名为 no-such-model 的模型" in r.text
+
+
+def test_model_order_get_lists_exactly_the_config_keys(env):
+    """顺序页的数据源 = ``model_order`` 本身：配几个键就列几条，不多不少。
+
+    真机现象：页面上同一模型名出现四张重复卡片。根因是渲染源走的是通道目录
+    （``/ui/api/models``），同一个名字被四个通道各标一份 order。修法是把渲染源
+    换成这个接口——它原样返回配置里的键，所以「配置什么就展示什么」。
+
+    这条同时钉死「**不按通道展开**」：一个键只出现在一条 item 里。
+    """
+    env.client.post("/ui/api/model-order",
+                    json={"model": "fake-model",
+                          "targets": [{"provider": "fakeprov", "model": "fake-model"},
+                                      {"provider": "fakestream",
+                                       "model": "fake-stream-model"}]})
+    body = env.client.get("/ui/api/model-order").json()
+    assert [it["model"] for it in body["items"]] == ["fake-model"]
+    assert body["items"][0]["targets"] == ["fakeprov/fake-model",
+                                           "fakestream/fake-stream-model"]
+    assert body["items"][0]["marks"] == []
+
+    # 「+ 新增模型」选完还没保存时，配置里没有这个键 → 接口也不该凭空列出来
+    env.client.post("/ui/api/model-order", json={"model": "fake-model", "targets": []})
+    assert env.client.get("/ui/api/model-order").json()["items"] == []
+
+
+def test_model_order_get_reports_cooldown_marks(env):
+    """冷却状态随同一个接口下发，页面据此显示 ⏸（不改变键的集合）。"""
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    try:
+        env.client.post("/ui/api/model-order",
+                        json={"model": "fake-model",
+                              "targets": [{"provider": "fakeprov", "model": "fake-model"},
+                                          {"provider": "fakestream",
+                                           "model": "fake-stream-model"}]})
+        cooldown_mod.mark_failed("fakestream", "fake-stream-model", status=502)
+        items = env.client.get("/ui/api/model-order").json()["items"]
+        assert [it["model"] for it in items] == ["fake-model"]
+        assert [m["target"] for m in items[0]["marks"]] == ["fakestream/fake-stream-model"]
+        assert items[0]["marks"][0]["cooldown_s"] > 0
+    finally:
+        cooldown_mod._reset_for_tests()
+
+
+def test_order_page_renders_from_config_not_channel_catalog(env):
+    """顺序页的渲染源必须是配置接口，**不能**再遍历通道目录。
+
+    这是「页面里全是重复的」那次的根因：卡片来自 `MODELS.groups` 的每个 通道+模型
+    组合，同名模型在 N 个通道就被画 N 张。这条把渲染源钉在 `/ui/api/model-order`。
+    """
+    ui = env.client.get("/ui").text
+    pstart = ui.index("function pageRows()")
+    pbody = ui[pstart:ui.index("\n}", pstart)]
+    assert "orderRows()" in pbody, "卡片应来自 model_order 的键"
+    assert "MODELS" not in pbody, "渲染源不能再碰通道目录（那会按通道拆成重复卡片）"
+    # orderRows 读的是新接口
+    rstart = ui.index("function orderRows()")
+    rbody = ui[rstart:ui.index("\n}", rstart)]
+    assert "ORDER" in rbody and "items" in rbody
+    # 不再有「遍历目录建卡」的旧函数
+    assert "function orderedModels()" not in ui, "按通道展开的旧渲染源应已删除"
 
 
 def test_model_order_exposes_cooldown_marks(env):
@@ -421,9 +646,9 @@ def test_model_order_clear_removes_key_and_marks(env):
                                   "targets": []})
         assert r.status_code == 200
         assert r.json()["marks_cleared"] == 1
-        assert "fakeprov/fake-model" not in env.state.model_order
-        assert "fakeprov/fake-model" not in (settings_mod.load_settings()
-                                            .get("model_order") or {})
+        assert "fake-model" not in env.state.model_order
+        assert "fake-model" not in (settings_mod.load_settings()
+                                    .get("model_order") or {})
         assert cooldown_mod.is_marked("fakestream", "fake-stream-model") is False
     finally:
         cooldown_mod._reset_for_tests()
@@ -464,7 +689,7 @@ def test_model_order_mark_clear_endpoint(env):
         assert r.json()["marks_cleared"] == 2
         assert cooldown_mod.snapshot() == {}
         # 顺序不受影响
-        assert env.state.model_order["fakeprov/fake-model"]
+        assert env.state.model_order["fake-model"]
     finally:
         cooldown_mod._reset_for_tests()
 
@@ -556,10 +781,11 @@ def test_model_order_accepts_published_name_not_resolve_model_output(alias_env):
         json={"provider": "fakealias", "model": "glm-5.3",
               "targets": [{"provider": "fakealias", "model": "glm-5.3"}]})
     assert r.status_code == 200, r.text
-    # 存的是发布名（转发侧会自己做同样的归一），不是 gmodel
-    assert r.json()["model"] == "fakealias/glm-5.3"
+    # 目标存的是发布名（转发侧会自己做同样的归一），不是 gmodel
     assert r.json()["targets"] == ["fakealias/glm-5.3"]
-    assert alias_env.state.model_order["fakealias/glm-5.3"] == ["fakealias/glm-5.3"]
+    # 键是裸名（与提交的 model 一致）
+    assert r.json()["model"] == "glm-5.3"
+    assert alias_env.state.model_order["glm-5.3"] == ["fakealias/glm-5.3"]
 
     # 键也要能与 /ui/api/models 暴露的键对上（否则前端徽标永远不显示）
     models = alias_env.client.get("/ui/api/models").json()["groups"]
