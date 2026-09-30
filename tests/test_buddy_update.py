@@ -264,9 +264,47 @@ def test_syncs_dependencies_when_uv_is_available(tmp_path: pathlib.Path) -> None
 
     proc = _run_update(work, extra_path=uvdir)
 
-    assert proc.returncode == 0, proc.stdout
+    # 失败时**连 stderr 一起打**：git 的报错全在 stderr，只打 stdout 的话
+    # 在 CI 上只能看到「assert 3 == 0」这种毫无线索的输出（第一版就是）。
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     assert "同步依赖" in proc.stdout, proc.stdout
     assert marker.read_text().count("restart") == 1, "成功路径应该重启且只重启一次"
+
+
+def test_update_succeeds_even_if_opening_the_browser_fails(
+        tmp_path: pathlib.Path) -> None:
+    """更新成功之后「顺手打开管理页」失败，**不能**让整条命令报失败。
+
+    CI 上真实踩到的（无头机器没有浏览器）：
+
+        [buddy] 已更新 10911dc -> 601f226
+        [buddy] 同步依赖（uv sync）…
+        [buddy] 重启服务…
+        /usr/bin/open: w3m: not found      <- 到这儿才失败
+        exit 3
+
+    代码和依赖都已更新、服务也重启了，却以非零退出——用户会以为没更成。
+    根因是 ``open_ui`` 里 ``open`` 那支没写 ``|| true``，``set -e`` 把它
+    传了出去（``xdg-open`` 那支本来就有）。
+
+    这里往 PATH 塞一个必然失败的假 ``open`` 来复现：headless 环境等价物。
+    """
+    marker = tmp_path / "restart.log"
+    work = _make_repo(tmp_path, restart_marker=marker)
+    _advance_upstream(work, "new upstream commit")
+    badbin = tmp_path / "badbin"
+    badbin.mkdir()
+    fake_open = badbin / "open"
+    fake_open.write_text("#!/bin/sh\necho 'open: no browser' >&2\nexit 3\n")
+    fake_open.chmod(0o755)
+
+    proc = _run_update(work, extra_path=badbin)
+
+    assert marker.exists(), "前置条件：服务应该已经重启过了（更新本身是成功的）"
+    assert proc.returncode == 0, (
+        f"打开浏览器失败把整条 update 拖成了失败:\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
 
 
 def test_aborts_before_restart_when_uv_sync_fails(tmp_path: pathlib.Path) -> None:

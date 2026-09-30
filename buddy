@@ -283,8 +283,14 @@ cmd_update() {
 }
 
 open_ui() {
+    # 「顺手打开管理页」是**尽力而为**，打不开不该让整条命令失败。缺了
+    # `|| true` 时 `set -e` 会把失败往外传：无头机器 / 没装浏览器 / `open`
+    # 自己报错时，`buddy update` 会在**已经更新成功并重启完**之后以非零退出
+    # （CI 上实测 exit 3，日志里 "已更新 -> " "重启服务" 全打完了），
+    # 用户看到失败会以为没更成，实际早更完了。xdg-open 那支本来就带了
+    # `|| true`，open 这支漏了。
     if command -v open >/dev/null 2>&1; then
-        open "$UI_URL"
+        open "$UI_URL" 2>/dev/null || true
     elif command -v xdg-open >/dev/null 2>&1; then
         xdg-open "$UI_URL" 2>/dev/null || true
     else
