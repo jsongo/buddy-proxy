@@ -1273,6 +1273,31 @@ def test_zcode_quota_window_name_beats_distance_to_reset():
     assert "CREDIT_LIMIT" not in labels
 
 
+def test_zcode_quota_tolerates_junk_unit_and_number():
+    """``unit``/``number`` 当不可信输入：给成字符串也不能把面板搞崩。
+
+    上游真发 ``"5"``（字符串）的话，``3600 * "5"`` 在 Python 里是字符串
+    重复、**不报错**，然后拿它去比较就抛 ``TypeError`` —— 额度面板整块
+    挂掉。收类型时必须按「不行就当没给」处理，退回旧的三档推断。
+    """
+    def _lim(**kw):
+        return {"type": "CREDIT_LIMIT", "usage": 2000, "currentValue": 0,
+                "remaining": 2000, "percentage": 0, **kw}
+
+    # 数字用字符串送来：能干净地收成数，那就照常算出 5 小时档
+    for unit, number in ((3, "5"), ("3", 5), (3, 5.0)):
+        (item,) = _quota_items({"limits": [_lim(unit=unit, number=number)]})
+        assert item["label"] == "5 小时窗口", (unit, number, item)
+
+    # 收不干净（缺 / 零 / 负 / 类型不对）：退回推断，**不能**猜成小时档
+    for kw in ({"unit": 3, "number": None}, {"unit": 3}, {"unit": 3, "number": 0},
+               {"unit": 3, "number": -5}, {"unit": [3], "number": 5},
+               {"unit": 3, "number": {"v": 5}}, {"unit": None, "number": 5}):
+        (item,) = _quota_items({"limits": [_lim(**kw)]})   # 不抛异常是底线
+        assert item["label"] == "CREDIT_LIMIT", (kw, item)
+        assert item["remaining"] == 2000, kw
+
+
 def test_zcode_quota_unknown_unit_falls_back_without_lying():
     """unit 没见过时退回按剩余时间推断，且**不能**瞎猜成小时。
 

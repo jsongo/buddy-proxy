@@ -118,16 +118,41 @@ _UNIT_SECONDS: dict[int, int] = {
 }
 
 
+def _window_span(unit: Any, number: Any) -> float | None:
+    """把 ``unit``/``number`` 换算成窗口宽度（秒）；算不出来返回 ``None``。
+
+    两个字段都当**不可信输入**处理：上游若是给成字符串（``"5"``），
+    ``3600 * "5"`` 在 Python 里是字符串重复、不会报错，接着拿它去比较就
+    抛 ``TypeError``——额度面板整块崩掉。所以先把类型收干净，不行就当
+    「没给」，退回按剩余时间推断。
+
+    ``unit`` 的取值是上游自定枚举，只认真实返回值里见过的；不认识的
+    **不猜**——凭「3 像小时、6 像天」的直觉猜，猜错会把月档写成「6 天窗口」。
+    """
+    try:
+        mult = _UNIT_SECONDS.get(int(unit))
+    except (TypeError, ValueError):
+        return None
+    if mult is None:
+        return None
+    try:
+        n = float(number)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return mult * n
+
+
 def _window_label(
     reset_ts: float | None,
     ltype: str | None,
-    unit: int | None = None,
-    number: float | None = None,
+    span: float | None = None,
 ) -> str:
     """限额窗口的展示名。
 
-    **优先按上游给的 ``unit``/``number`` 算窗口宽度**，算不出来再退回按
-    「距下次重置还有多久」推断。
+    ``span``（窗口宽度，秒）由 :func:`_window_span` 从 ``unit``/``number``
+    算出；给了就**以它为准**，为 ``None`` 才退回按「距下次重置还有多久」推断。
 
     原先只用后者，会错得离谱：它把「离重置时间的远近」当成窗口大小，于是
     一个 *月* 档（重置还在 4 天后，但窗口本身是 30 天）被写成「每周窗口」；
@@ -139,8 +164,7 @@ def _window_label(
     """
     if ltype == "TIME_LIMIT":
         return "MCP 调用（月）"
-    if unit in _UNIT_SECONDS and number:
-        span = _UNIT_SECONDS[unit] * number
+    if span:
         if span <= 86400:
             return f"{_fmt_hours(span)} 小时窗口"
         if span <= 86400 * 10:
@@ -176,19 +200,18 @@ def _quota_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     limits = [l for l in (data.get("limits") or []) if isinstance(l, dict)]
 
     def _span(l: dict[str, Any]) -> float:
-        unit, number = l.get("unit"), l.get("number")
-        if unit in _UNIT_SECONDS and number:
-            return _UNIT_SECONDS[unit] * number
-        # 没给 unit 的条目排最后（排不出宽窄，就当它是最大的一档）
-        return float("inf")
+        """排序键：窗口宽度。算不出宽度的排最后（当它最大，不抢标题行）。"""
+        span = _window_span(l.get("unit"), l.get("number"))
+        return span if span is not None else float("inf")
 
     limits.sort(key=_span)
     items: list[dict[str, Any]] = []
     for l in limits:
         reset_ms = l.get("nextResetTime")
         reset_ts = reset_ms / 1000 if reset_ms else None
+        span = _window_span(l.get("unit"), l.get("number"))
         items.append({
-            "label": _window_label(reset_ts, l.get("type"), l.get("unit"), l.get("number")),
+            "label": _window_label(reset_ts, l.get("type"), span),
             "used": l.get("currentValue"),
             "total": l.get("usage"),
             "remaining": l.get("remaining"),
