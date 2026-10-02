@@ -17,11 +17,12 @@ Claude Sonnet/Opus 和 GPT-OSS。
 |---|---|
 | `models.json` | 模型表（id/描述/配额组）。**加删模型改这里，不改代码** |
 | `fingerprint.py` | UA / X-Client-* / x-goog-api-client 请求头指纹（版本自动探测） |
-| `credentials.py` | OAuth 凭证存取与刷新（`~/.buddy-proxy/antigravity_oauth.json`） |
+| `credentials.py` | OAuth 凭证存取与刷新（多账号：`~/.buddy-proxy/antigravity/` 目录） |
 | `setup.py` | loadCodeAssist / onboardUser onboarding（项目 ID 获取；daily→prod 端点 fallback） |
 | `login.py` | `buddy login antigravity`（PKCE + 本地回调；含 agy 登录态采用） |
 | `cli_bridge.py` | 与本机 agy CLI 凭证互通（**只读** keyring 导入） |
 | `convert.py` | OpenAI chat ↔ Antigravity envelope 双向转换（内层复用 gemini convert） |
+| `failover.py` | 多账号 failover：可用账号枚举 + 内存冷却 + UI 账号状态数据 |
 | `provider.py` | BaseProvider 实现（转发、SSE、协议转换、配额展示） |
 
 ## 使用
@@ -32,9 +33,33 @@ buddy login antigravity     # Google OAuth 登录（检测到本机 agy 登录�
 curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"antigravity/claude-sonnet-4-6","messages":[...]}'
 ```
 
-凭证文件 `~/.buddy-proxy/antigravity_oauth.json`（0600）：access_token 过期
-自动刷新；refresh_token 长期有效（Google 安装型应用不轮换）。删掉该文件 =
-退出登录。
+凭证存放 `~/.buddy-proxy/antigravity/`：`index.json`（账号清单，登录顺序即
+failover 顺位）+ 每账号一份 `<account_id>.json`（0600 原子写，account_id 由
+email 规范化，email 缺失时退 `acct-<token hash 前 12 位>`）。access_token
+过期自动刷新；refresh_token 长期有效（Google 安装型应用不轮换）。删掉某账号
+的 JSON 文件 = 退出该账号（索引自愈）；删除 `index.json` 全部账号即全退出。
+
+历史单账号文件 `~/.buddy-proxy/antigravity_oauth.json` 在首次访问时自动
+copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影响其它账号）。
+
+## 多账号与自动 failover
+
+- **登录即追加**：换 Google 账号再跑一次 `buddy login antigravity` 就是追加
+  备用账号；相同邮箱 = upsert 该账号凭据且顺位不变。上限 8 个。
+- **换号条件**：HTTP 429（额度）/ 403 / 401 强刷后仍拒 / 凭据层 AuthError /
+  缺 project_id → 冷却当前账号换下一个；业务 4xx（模型名等）原样透传不换号。
+- **冷却时长**：429 尊重 `Retry-After`（钳 1s~7d），默认 5 分钟；403/凭据
+  问题 60 秒。只放内存不落盘——重启清零，代价只是每账号重探一次。全账号
+  冷却时转发直接 429（通道级快速失败）。
+- **防串号**：`ensure_account_token(account_id)` 把 token 与 cred 快照同源
+  返回，project_id 从同一份快照取；每账号独立刷新锁 + 锁内重读双检。
+- **流式防重复计费**：首事件闸门（`_gate_first_event`）压住第一个上游事件
+  再定性——带内 429/403 error（一个字节没出网）冷却换号；语义事件
+  （candidates）出现即 committed，缓冲行经 `_ReplayStream` 补放、绝不重放；
+  语义前 EOF 视为假成功换号（不冷却）。
+- **可观测**：每次转发把实际服务的账号写入 `ACCOUNT_META`（metrics 落库可
+  归属）；管理页有独立 Antigravity 面板（各账号额度左右分栏 + 账号状态行，
+  数据来自 `failover.accounts_status()`，纯本地不触网）。
 
 ## 与本机 agy CLI 互通（只读导入）
 
