@@ -30,6 +30,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
+from ..core.errors import describe_exception
 from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
 from .config import CHAT_UA, DEFAULT_MODELS, MODEL_NAME_CANONICAL, X_SOURCE_SSO
 from .credentials import AuthError, ResolvedUpstream, resolve_upstream
@@ -441,7 +442,8 @@ class MimoProvider(BaseProvider):
                 detail={"error": {"message": "mimo upstream timeout", "type": "timeout"}},
             ) from exc
         except httpx.HTTPError as exc:
-            log.warning("mimo upstream error: %s", exc)
+            # 同 zcode：httpcore 映射出的异常可能自身 str() 为空，须沿链取描述
+            log.warning("mimo upstream error: %s", describe_exception(exc))
             raise HTTPException(
                 status_code=502,
                 detail={

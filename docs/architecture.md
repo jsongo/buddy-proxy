@@ -13,7 +13,7 @@ src/buddy_proxy/
   __main__.py            # CLI entry + repo-root resolution (parents[2])
   trae_provider.py       # published trae-cli entrypoint + trae façade
   core/                  # state, settings, paths, logging_setup, metrics,
-                         #   credit_estimate, desensitize, checkin
+                         #   credit_estimate, desensitize, checkin, errors
   protocols/             # anthropic_adapter, responses_adapter,
                          #   responses_projection, dsml_parser
   web/                   # routes, ui, model_list + models_config.json + static/
@@ -98,8 +98,11 @@ workers, or explicit provider shutdown lifecycles.
   (`_RETRYABLE_EXC`: `httpx.HTTPError` / `OSError`), or a non-2xx
   `JSONResponse`. A `StreamingResponse` is never replayed (double-billing risk;
   same invariant as `trae/pat/chat.py`). Known blind spot: codebuddy reports
-  upstream stream errors as an *in-band* error chunk, so its stream failures are
-  undetectable and never fail over.
+  upstream stream errors as an *in-band* error chunk, so its stream failures
+  never fail over. `metrics.SSEErrorExtractor` now spots that chunk in
+  `observability._metrics_stream` and records the request as failed, so the
+  metrics no longer show a false green — but the *routing* behaviour is
+  unchanged (a stream that already started is still never replayed).
   Conversely, **programming errors are not failover material**: a `TypeError`
   escaping a provider is re-raised, not treated as an upstream outage, so a real
   bug surfaces as a 500 instead of being masked by a working fallback channel.
@@ -122,7 +125,22 @@ workers, or explicit provider shutdown lifecycles.
 - `core/cooldown.py` owns transient target health: a failed target is skipped
   for a short TTL (escalating on repeat failure). It is deliberately **in-memory
   and not persisted** — a restart is a legitimate reason to re-probe, and user
-  intent lives in `settings.json`.
+  intent lives in `settings.json`. Not every failure is cooldown material: a
+  **local DNS resolution failure is machine-level**, not this upstream's fault.
+  Marking it cools *every* candidate at once and amplifies one blip into a
+  whole-model outage with no re-probe for five minutes (measured 2026-10-02:
+  all three candidates marked, then `model_order_skip reason=cooldown` for
+  5 minutes straight, zero upstream requests dispatched). `core/errors.py`
+  (`is_local_dns_failure`) classifies it and `forward` skips the mark — the
+  failover still moves to the next candidate, it just leaves no trace behind.
+  Classification **must walk the `__cause__` chain**: every provider converts
+  the `httpx`/`httpcore` error into `HTTPException(502)` at its boundary, so
+  checking the top-level type alone misses all of them. `core/errors.py` is a
+  leaf module (stdlib only), same convention as `core/cooldown.py`.
+  `describe_exception` lives there too: `httpcore` maps some failures onto
+  exceptions whose own `str()` is empty (`httpx.ReadError()`), and a bare `%s`
+  on those logs a blank line — it falls back to the type name and the first
+  non-empty cause.
 - The `model_order` editor lives in its own **Model order** tab of the bundled
   `/ui` page: one card per configured model, expanding to the reorderable target
   list. **Its render source is `GET /ui/api/model-order`, which returns the

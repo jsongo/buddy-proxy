@@ -1090,6 +1090,111 @@ def test_sse_usage_extractor_str_chunks():
     assert ex.usage["prompt_tokens"] == 7 and ex.usage["completion_tokens"] == 3
 
 
+def test_sse_error_extractor_openai_and_anthropic_shapes():
+    """带内错误提取：OpenAI ``data: {"error":...}`` 与 Anthropic ``event: error``。
+
+    2026-10-02 假绿灯回归：codebuddy 把上游错误做成正常 SSE 事件，生成器正常
+    结束，指标里却是 status=200 / error=""。提取器是那条路径的唯一线索。
+    """
+    from buddy_proxy.core.metrics import SSEErrorExtractor
+
+    # OpenAI 形态：error 在 data 行里
+    ex = SSEErrorExtractor()
+    ex.feed(b'data: {"error":{"message":"upstream overloaded","type":"api_error"}}\n\n')
+    assert ex.message == "upstream overloaded"
+
+    # Anthropic 形态：先 event: error 占位，紧随其后的 data 行给出真消息
+    ex2 = SSEErrorExtractor()
+    ex2.feed(b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error",'
+             b'"message":"boom"}}\n\n')
+    assert ex2.message == "boom"
+
+    # 只有 event: error 没有 data（被截断）也不能是空串
+    ex3 = SSEErrorExtractor()
+    ex3.feed(b"event: error\n\n")
+    assert ex3.message == "in-band error event"
+
+
+def test_sse_error_extractor_ignores_normal_stream():
+    """正常内容里出现 "error" 字样（代码片段、字段名）不得误报。"""
+    from buddy_proxy.core.metrics import SSEErrorExtractor
+
+    ex = SSEErrorExtractor()
+    ex.feed(b'data: {"choices":[{"delta":{"content":"the error handling code"}}]}\n\n')
+    ex.feed(b'data: {"choices":[{"delta":{"content":"def on_error(e): ..."}}]}\n\n')
+    ex.feed(b"data: [DONE]\n\n")
+    assert ex.message == ""
+
+    # 带 error 字段但不是错误（如 finish_reason 里的普通字符串）也不报
+    ex2 = SSEErrorExtractor()
+    ex2.feed(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+             b'"note":"no error here"}\n\n')
+    assert ex2.message == ""
+
+
+def test_sse_error_extractor_cross_chunk_and_first_wins():
+    """跨 chunk 断行要能重组；多个错误只留第一个（真因）。"""
+    from buddy_proxy.core.metrics import SSEErrorExtractor
+
+    ex = SSEErrorExtractor()
+    ex.feed(b'data: {"error":{"mess')
+    ex.feed(b'age":"first"}}\n\n')
+    assert ex.message == "first"
+
+    ex.feed(b'data: {"error":{"message":"second"}}\n\n')
+    assert ex.message == "first"
+
+    # 占位文案要让位给后来的真消息（event: error 先到、data 后到的情形）
+    ex2 = SSEErrorExtractor()
+    ex2.feed(b"event: error\n")
+    ex2.feed(b'data: {"error":{"message":"real cause"}}\n\n')
+    assert ex2.message == "real cause"
+
+
+def test_sse_error_extractor_error_word_split_across_chunks():
+    """"error" 一词被 chunk 边界从中间劈开也不能漏——两半都不含完整单词。
+
+    review 发现：快路径 `b"error" not in chunk` 在这种劈法下两半都直接 return，
+    错误整个丢失（假绿灯复发）。先缓冲、后判断才正确。
+    """
+    from buddy_proxy.core.metrics import SSEErrorExtractor
+
+    ex = SSEErrorExtractor()
+    ex.feed(b'data: {"err')                    # 前半不含完整 "error"
+    ex.feed(b'or":{"message":"boom"}}\n\n')    # 后半同样不含
+    assert ex.message == "boom"
+
+    # 对照：一个不含任何 "error" 字样的正常流，message 保持空
+    ex2 = SSEErrorExtractor()
+    ex2.feed(b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n')
+    ex2.feed(b"data: [DONE]\n\n")
+    assert ex2.message == ""
+
+
+def test_metrics_stream_records_in_band_error_as_500(env):
+    """带内错误的流必须记成失败——否则就是「客户端零字节、指标 200」的假绿灯。"""
+    from buddy_proxy.codebuddy_provider.observability import _metrics_stream
+
+    async def inner():
+        # 复刻事故里 codebuddy 的实际产出：仅 54 字节的错误体，正常结束
+        yield b'data: {"error":{"message":"upstream returned 503","type":"api_error"}}\n\n'
+
+    async def drain():
+        chunks = []
+        async for c in _metrics_stream(
+                inner(), env.state.metrics, provider_id="codebuddy", model_id="glm-5.3",
+                protocol="openai", started=time.time()):
+            chunks.append(c)
+        return chunks
+
+    chunks = asyncio.run(drain())
+    # 透传不改变字节
+    assert len(chunks) == 1 and b"upstream returned 503" in chunks[0]
+    rec = env.state.metrics.snapshot()["recent"][0]
+    assert rec["status"] == 500
+    assert "in-band error" in rec["error"] and "upstream returned 503" in rec["error"]
+
+
 def test_metrics_record_ttft_and_credit_in_recent(env):
     env.state.metrics.record(provider="fakeprov", model="fake-model",
                              stream=True, status=200, duration_ms=900,

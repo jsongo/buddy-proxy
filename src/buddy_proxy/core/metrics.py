@@ -133,6 +133,76 @@ class SSEUsageExtractor:
                 self.usage[k] = v if cur is None else max(cur, v or 0)
 
 
+class SSEErrorExtractor:
+    """从上游 SSE 字节流里提取**带内错误**（provider 用正常 SSE 事件报的错）。
+
+    **Why:** codebuddy 的 ``pipeline.stream_upstream`` 把上游错误做成了带内事件
+    （``{"error": {...}}`` / ``event: error``）而不是抛异常——流因此**正常结束**，
+    ``_metrics_stream`` 看不到任何异常、按 200 记账。2026-10-02 实测就是这样：
+    一条 codebuddy 请求实际只发了 54 字节错误体、客户端什么都没收到，
+    指标里却是 ``status=200, chunk_count=3, error=""`` 的漂亮记录（假绿灯）。
+    UI 的失败率、模型可用性判断全建立在这份数据上，假绿灯会让排查彻底跑偏。
+
+    只认**明确的错误信号**，不猜语义：Anthropic/OpenAI 的 ``error`` 事件、
+    Responses 的 ``type: error``、doubao 的 ``{"type": "error"}``。正常内容里
+    出现 "error" 这个词不算。
+    """
+
+    def __init__(self) -> None:
+        self._buf = b""
+        self.message: str = ""
+
+    def feed(self, chunk: bytes | str) -> None:
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8")
+        # 必须先无条件缓冲再判断：「error」一词可能被 chunk 边界从中间劈开
+        # （b'data: {"err' + b'or":...），先判后缓冲会让两半都漏掉。
+        # 缓冲区只留最后一个残行，大小有界（与 SSEUsageExtractor 同一套纪律）。
+        self._buf += chunk
+        if b"error" not in self._buf:
+            # 无错误的流残行也留不住太多字节：有换行就清掉已扫过的部分
+            lines = self._buf.rsplit(b"\n", 1)
+            self._buf = lines[-1] if len(lines) == 2 else self._buf
+            return
+        lines = self._buf.split(b"\n")
+        self._buf = lines.pop()  # 残行留给下一个 chunk
+        for line in lines:
+            line = line.strip()
+            # 行级过滤与缓冲区判断保持**同样区分大小写**：上游错误键按协议都是
+            # 小写（"error" / event: error），大小写混判只会造成「缓冲区漏过、
+            # 行级才认得」的静默不一致。
+            if not line or b"error" not in line:
+                continue
+            if line.startswith(b"data:"):
+                line = line[5:].strip()
+            elif line.startswith(b"event:"):
+                # Anthropic 的 `event: error` 只是**声明**下面 data 行是错误事件，
+                # 真正的原因在 data 里。这里只做兜底标记（data 行解析出消息时会
+                # 覆盖它），让「有 event 行但 data 解析失败」的情况也不至于漏报。
+                if b"error" in line and not self.message:
+                    self.message = "in-band error event"
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            err = payload.get("error")
+            if err is None and payload.get("type") == "error":
+                err = payload.get("message") or payload
+            if err is None:
+                continue
+            if isinstance(err, dict):
+                err = err.get("message") or err.get("type") or "in-band error"
+            # 第一个错误即真因，后续不覆盖；但兜底占位文案要让位给真实消息。
+            # **不能**在这里提前 return：feed() 会被逐 chunk 反复调用以重组断行，
+            # 中途跳出会丢字节。
+            text = str(err)[:300]
+            if not self.message or self.message == "in-band error event":
+                self.message = text
+
+
 class MetricsCollector:
     """线程安全的请求指标收集器。"""
 
