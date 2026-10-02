@@ -4,13 +4,15 @@
 ?alt=sse``，envelope 见 convert.py），请求/响应双向转换的骨架与 gemini 通道
 同款；差异：
 
+- 多账号 failover：按登录顺序主备降级（见 failover.py），429/403/凭据失效
+  冷却当前账号换下一个；首个语义事件到达后绝不重放（防重复计费）。
 - 端点 fallback：daily-cloudcode-pa 优先、cloudcode-pa 兜底，请求级网络错误
   /5xx/404 才换端点（4xx 业务错误换端点没意义）。
 - reasoning_effort 自动映射成 gemini 3 系模型名的 effort 后缀。
 - quota：上游有 ``fetchAvailableModels``（带各模型剩余比例与重置时间），
   可画真进度条；拿不到时退化为静态说明（与 gemini 同策略）。
 
-认证：OAuth（buddy login antigravity），access_token 过期自动刷新（401 重试一次）。
+认证：OAuth（buddy login antigravity，支持多账号），access_token 过期自动刷新。
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import json
 import logging
 import secrets
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Sequence
 
@@ -28,9 +31,11 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
+from ..core.metrics import ACCOUNT_META
 from ..gemini.convert import gemini_response_to_chat
+from . import failover
 from .convert import apply_effort_suffix, chat_to_antigravity_request
-from .credentials import AuthError, ensure_access_token, has_cred, load_cred
+from .credentials import AuthError, ensure_account_token, has_cred, list_accounts, load_cred
 
 log = logging.getLogger(__name__)
 
@@ -146,82 +151,201 @@ class AntigravityProvider(BaseProvider):
         entry = _MODEL_BY_ID.get(model) or MODELS[0]
         upstream_model = apply_effort_suffix(entry, body.get("reasoning_effort"))
 
-        # token 刷新是同步 urllib；丢线程池避免卡事件循环
-        access_token = await asyncio.to_thread(_token_or_raise)
-
-        cred = load_cred() or {}
-        project_id = str(cred.get("project_id") or "")
-        if not project_id:
+        # failover 循环：按登录顺位尝试可用账号（429/403/凭据失效 → 冷却换号）
+        accounts = failover.available_accounts()
+        if not accounts:
             raise HTTPException(
-                status_code=401,
-                detail={
-                    "error": {
-                        "message": "antigravity 凭据缺 project_id，请重新 `buddy login antigravity`",
-                        "type": "authentication_error",
-                    }
-                },
+                status_code=429,
+                detail={"error": {
+                    "message": "antigravity 所有账号均在冷却中（额度耗尽或凭据问题），稍后自动恢复",
+                    "type": "rate_limit_error",
+                }},
             )
-
-        upstream_body = chat_to_antigravity_request(
-            body, project_id=project_id, model=upstream_model
-        )
-        method = "streamGenerateContent" if stream else "generateContent"
 
         from .fingerprint import auth_headers
 
+        meta = ACCOUNT_META.get()  # metrics 账号归属（_instrument 放入的 dict）
         client = await self._get_client()
-        resp = await self._send_with_fallback(
-            client, method, upstream_body, auth_headers(access_token, upstream_model, stream), stream
-        )
+        method = "streamGenerateContent" if stream else "generateContent"
+        last_status = 0
+        last_detail = ""
 
-        # 401：access_token 失效（比如文件被手工改过）——刷新重试一次
-        if resp.status_code == 401:
-            if stream:
-                await resp.aread()
-            await resp.aclose()
-            access_token = await asyncio.to_thread(_refresh_or_raise)
+        for acct in accounts:
+            # token 刷新是同步 urllib；丢线程池避免卡事件循环。
+            # token 与 cred 同源返回：project_id 从同一份 cred 取，多账号不串号。
+            try:
+                access_token, cred = await asyncio.to_thread(ensure_account_token, acct.id)
+            except AuthError as exc:
+                failover.mark_cooldown(acct.id, reason=f"凭据不可用: {exc}")
+                continue
+            project_id = str(cred.get("project_id") or "")
+            if not project_id:
+                failover.mark_cooldown(acct.id, reason="缺 project_id（onboarding 未完成）")
+                continue
+            if meta is not None:
+                meta["account"] = acct.id
+
+            upstream_body = chat_to_antigravity_request(
+                body, project_id=project_id, model=upstream_model
+            )
             resp = await self._send_with_fallback(
-                client, method, upstream_body, auth_headers(access_token, upstream_model, stream), stream
+                client, method, upstream_body,
+                auth_headers(access_token, upstream_model, stream), stream,
             )
 
-        if resp.status_code >= 400:
+            # 401：token 被上游拒（比如文件被手工改过）——强刷一次重试同账号；
+            # 仍拒说明凭据层面失效，冷却换号
+            if resp.status_code == 401:
+                await _drain_and_close(resp, stream)
+                try:
+                    access_token, _ = await asyncio.to_thread(
+                        ensure_account_token, acct.id, force_refresh=True)
+                except AuthError as exc:
+                    failover.mark_cooldown(acct.id, reason=f"强刷失败: {exc}")
+                    continue
+                resp = await self._send_with_fallback(
+                    client, method, upstream_body,
+                    auth_headers(access_token, upstream_model, stream), stream,
+                )
+                if resp.status_code == 401:
+                    last_status, last_detail = 401, await _error_detail(resp, stream)
+                    await _drain_and_close(resp, stream)
+                    failover.mark_cooldown(acct.id, reason="401 强刷后仍被拒")
+                    continue
+
+            # 403/429：账号级拒绝（额度/风控）——冷却该账号换下一个
+            if resp.status_code in (403, 429):
+                last_status = resp.status_code
+                last_detail = await _error_detail(resp, stream)
+                failover.mark_cooldown(
+                    acct.id,
+                    retry_after=resp.headers.get("Retry-After"),
+                    quota=resp.status_code == 429,
+                    reason=f"HTTP {resp.status_code}{(': ' + last_detail) if last_detail else ''}",
+                )
+                await _drain_and_close(resp, stream)
+                continue
+
+            if resp.status_code >= 400:
+                # 其余业务 4xx（模型名不合法等）：换号没意义，原样透传
+                if stream:
+                    await resp.aread()
+                try:
+                    return _upstream_error_response(resp)
+                finally:
+                    await resp.aclose()
+
+            # 200：过首事件闸门——首个上游事件若是 429/403 error，还没向客户端
+            # 吐过任何字节，可以安全冷却换号；见到语义事件后绝不重放（防重复计费）
+            gate = await self._gate_first_event(resp, stream)
+            if gate.account_error:
+                last_status, last_detail = gate.code, gate.message
+                failover.mark_cooldown(
+                    acct.id, quota=gate.code == 429,
+                    reason=f"带内 error {gate.code}: {gate.message}")
+                await _drain_and_close(gate.resp, stream)
+                continue
+            if gate.eof:
+                # 语义事件之前断流/空流：没向客户端吐过字节，换下一个账号
+                await _drain_and_close(gate.resp, stream)
+                continue
+
             if stream:
-                await resp.aread()
-            try:
-                return _upstream_error_response(resp)
-            finally:
-                await resp.aclose()
+                from ..gemini.provider import _to_anthropic_stream, _to_openai_stream
 
-        if stream:
-            from ..gemini.provider import _to_anthropic_stream, _to_openai_stream
-
-            if protocol == "anthropic":
+                replay = _ReplayStream(gate.resp, gate.buffered)
+                if protocol == "anthropic":
+                    return StreamingResponse(
+                        _to_anthropic_stream(replay, upstream_model),
+                        media_type="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "Connection": "close"},
+                    )
                 return StreamingResponse(
-                    _to_anthropic_stream(resp, upstream_model),
+                    _to_openai_stream(replay, upstream_model),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "Connection": "close"},
                 )
-            return StreamingResponse(
-                _to_openai_stream(resp, upstream_model),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "Connection": "close"},
-            )
 
+            payload = gate.payload
+            if payload is None:
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": {"message": "antigravity upstream returned non-JSON",
+                                      "type": "bad_gateway"}},
+                )
+            await gate.resp.aclose()
+            chat = gemini_response_to_chat(payload, model=upstream_model)
+            if protocol == "anthropic":
+                from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
+
+                chat = chat_completion_to_anthropic_message(chat, original)
+            return JSONResponse(content=chat)
+
+        raise HTTPException(
+            status_code=last_status if last_status in (401, 403, 429) else 502,
+            detail={"error": {
+                "message": (f"antigravity 所有账号均不可用（最后错误 HTTP {last_status or 'n/a'}"
+                            f"{(': ' + last_detail) if last_detail else ''}）"),
+                "type": "rate_limit_error" if last_status in (403, 429) else "bad_gateway",
+            }},
+        )
+
+    async def _gate_first_event(self, resp: httpx.Response, stream: bool) -> "_Gate":
+        """压住第一个上游事件再决定透传还是换号。
+
+        非流式：全量解析 JSON，``error.code ∈ {429,403}`` 视为账号级错误
+        （此时一个字节都没出网，换号绝对安全）。流式：缓冲原始 SSE 行直到
+        第一条能定性的事件——见 candidates 即语义已至（committed，缓冲行随
+        透传补放，客户端无损）；error 节点按 code 分类；只有 usageMetadata
+        则继续等；语义事件前断流/EOF 按 eof 处理（换号）。
+        """
+        if not stream:
+            try:
+                payload = resp.json()
+            except Exception:
+                return _Gate(resp=resp, committed=True, payload=None)
+            err = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(err, dict):
+                code = int(err.get("code") or 0)
+                if code in (429, 403):
+                    return _Gate(resp=resp, account_error=True, code=code,
+                                 message=str(err.get("message") or ""))
+            return _Gate(resp=resp, committed=True,
+                         payload=payload if isinstance(payload, dict) else None)
+
+        buffered: list[str] = []
         try:
-            payload = resp.json()
-        except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail={"error": {"message": "antigravity upstream returned non-JSON", "type": "bad_gateway"}},
-            ) from exc
-        finally:
-            await resp.aclose()
-        chat = gemini_response_to_chat(payload, model=upstream_model)
-        if protocol == "anthropic":
-            from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
-
-            chat = chat_completion_to_anthropic_message(chat, original)
-        return JSONResponse(content=chat)
+            async for line in resp.aiter_lines():
+                buffered.append(line)
+                stripped = line.strip()
+                if not stripped.startswith("data:"):
+                    continue
+                data = stripped[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                inner = payload.get("response") if isinstance(payload.get("response"), dict) else payload
+                if not isinstance(inner, dict):
+                    continue
+                err = inner.get("error")
+                if isinstance(err, dict):
+                    code = int(err.get("code") or 0)
+                    if code in (429, 403):
+                        return _Gate(resp=resp, account_error=True, code=code,
+                                     message=str(err.get("message") or ""))
+                    # 其它带内错误（400 等）：换号没意义，缓冲行随透传交给转换器
+                    return _Gate(resp=resp, committed=True, buffered=buffered)
+                if inner.get("candidates"):
+                    return _Gate(resp=resp, committed=True, buffered=buffered)
+                # 仅 usageMetadata 等非语义事件：继续等下一条
+        except httpx.HTTPError:
+            return _Gate(resp=resp, eof=True)
+        return _Gate(resp=resp, eof=True)  # 语义事件前 EOF：假成功，换号
 
     # ---- 内部 ----
 
@@ -360,7 +484,7 @@ class AntigravityProvider(BaseProvider):
         """
         from .fingerprint import auth_headers
 
-        token = await asyncio.to_thread(_token_or_raise)
+        token = await asyncio.to_thread(_primary_token)
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await self._send_with_fallback(
                 client, "fetchAvailableModels", {}, auth_headers(token), stream=False
@@ -374,12 +498,19 @@ class AntigravityProvider(BaseProvider):
 
 
 # ---------------------------------------------------------------------------
-# token 错误转 HTTP（与 gemini/provider 同款）
+# failover 支撑：token 错误转 HTTP / 闸门类型 / 流适配
 # ---------------------------------------------------------------------------
 
-def _token_or_raise() -> str:
+def _primary_token() -> str:
+    """主账号 token（quota/health 这类管理面用，不走 failover）。"""
+    accounts = list_accounts()
+    if not accounts:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"message": "antigravity 未登录", "type": "authentication_error"}},
+        )
     try:
-        return ensure_access_token()
+        return ensure_account_token(accounts[0].id)[0]
     except AuthError as exc:
         raise HTTPException(
             status_code=401,
@@ -387,23 +518,59 @@ def _token_or_raise() -> str:
         ) from exc
 
 
-def _refresh_or_raise() -> str:
-    from .credentials import refresh_cred
+@dataclass
+class _Gate:
+    """首事件闸门的判定结果。"""
+    resp: httpx.Response
+    committed: bool = False  # 已见语义事件：缓冲行必须透传，绝不重放
+    buffered: list[str] = field(default_factory=list)  # 闸门期间缓冲的原始 SSE 行
+    payload: dict[str, Any] | None = None  # 非流式：解析好的 JSON
+    account_error: bool = False  # 429/403 账号级错误：冷却换号
+    code: int = 0
+    message: str = ""
+    eof: bool = False  # 语义事件前断流/EOF：假成功，换号
 
-    cred = load_cred()
-    if cred is None:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": {"message": "antigravity 未登录", "type": "authentication_error"}},
-        )
+
+class _ReplayStream:
+    """闸门缓冲行 → 真实流的适配器（先补放缓冲，再接原流）。
+
+    gemini 转换器只用 ``aiter_lines()``/``aclose()``，实现这两个就够了，
+    转换器零改动。
+    """
+
+    def __init__(self, resp: httpx.Response, buffered: list[str]) -> None:
+        self._resp = resp
+        self._buffered = list(buffered)
+
+    async def aiter_lines(self) -> AsyncIterator[str]:
+        for line in self._buffered:
+            yield line
+        async for line in self._resp.aiter_lines():
+            yield line
+
+    async def aclose(self) -> None:
+        await self._resp.aclose()
+
+
+async def _drain_and_close(resp: httpx.Response, stream: bool) -> None:
+    """读完丢弃响应体并关闭（换号前必须回收连接，别挂着半开流）。"""
     try:
-        cred = refresh_cred(cred)
-    except AuthError as exc:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": {"message": f"刷新凭据失败: {exc}", "type": "authentication_error"}},
-        ) from exc
-    return cred["access_token"]
+        if stream:
+            await resp.aread()
+    finally:
+        await resp.aclose()
+
+
+async def _error_detail(resp: httpx.Response, stream: bool) -> str:
+    """从错误响应体抽 ``error.message``（只用于日志/客户端报错文案）。"""
+    try:
+        if stream:
+            await resp.aread()
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 - 文案而已，拿不到就空着
+        return ""
+    err = payload.get("error") if isinstance(payload, dict) else None
+    return str(err.get("message") or "") if isinstance(err, dict) else ""
 
 
 # ---------------------------------------------------------------------------
