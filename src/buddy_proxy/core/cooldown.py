@@ -116,7 +116,9 @@ def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -
     两种时长，按失败形态分流：
 
     - **机器级突发**：突发窗口内已有 ``_BURST_PROVIDERS`` 个**不同通道**对同一模型
-      失败 → 多半是本机网络/代理在抖（隧道层 502 这类），不是哪个上游的毛病。
+      发生**网络类失败**（传输层异常，或 ≥500——隧道层 502 这类；429 配额/限流
+      **不算**，多通道同时限流是上游/账号自身的状态，缩成短冷却等于帮它解除武装）
+      → 多半是本机网络/代理在抖，不是哪个上游的毛病。
       本次与窗口内已标记的通道一律只冷却 ``_BURST_COOLDOWN_S``，且不累计升级
       ——网络秒级自愈后立即放行，不再重演「故障早好了、冷却还在锁」。
       各通道的隧道层失败与上游自身 502 无法逐条区分（响应体都是从隧道里回来的），
@@ -132,11 +134,15 @@ def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -
     key = (provider_id, model_id)
     now = time.time()
     with _lock:
-        burst = _prune_burst(model_id, now)
-        burst.append((now, provider_id))
-        _burst[model_id] = burst
-        window_providers = {p for _, p in burst}
-        machine = len(window_providers) >= _BURST_PROVIDERS
+        if status is None or status >= 500:  # 网络类失败才进突发窗口（见上）
+            burst = _prune_burst(model_id, now)
+            burst.append((now, provider_id))
+            _burst[model_id] = burst
+            window_providers = {p for _, p in burst}
+            machine = len(window_providers) >= _BURST_PROVIDERS
+        else:
+            window_providers = set()
+            machine = False
         if machine:
             span = _BURST_COOLDOWN_S
             escalated = False

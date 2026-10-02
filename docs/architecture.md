@@ -147,7 +147,10 @@ workers, or explicit provider shutdown lifecycles.
   error page), which is *not* classifiable per-request: the tunnel error body
   and a real upstream 502 look identical once wrapped. So `core/cooldown.py`
   uses a statistical signal instead: **≥2 distinct channels failing for the
-  same model within a 60s window ⇒ machine-level burst** — the current target
+  same model within a 60s window ⇒ machine-level burst** (network-class
+  failures only — transport errors and 5xx; 429 quota rejections are the
+  upstream's own state and never enter the window, so simultaneous rate
+  limiting keeps its full 5-minute cooldown and escalation) — the current target
   and the already-marked ones in the window are (re)marked for only 30s and
   never count toward escalation. The first-failing target gets shortened
   retroactively (it was marked 5 min before the second channel's failure
