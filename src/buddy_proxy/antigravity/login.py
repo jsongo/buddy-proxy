@@ -32,9 +32,10 @@ from .credentials import (
     AuthError,
     _expiry_from,
     _token_request,
-    cred_path,
+    account_cred_path,
     fetch_user_email,
-    save_cred,
+    list_accounts,
+    save_account_cred,
 )
 from .setup import SetupError, setup_code_assist
 
@@ -180,7 +181,12 @@ def login_interactive(open_browser: bool = True) -> dict:
         cred = _exchange(cb.code, redirect_uri, verifier)
         print(f"[Antigravity] 登录成功: {cred.get('email') or '(未知邮箱)'}")
         print(f"     项目: {cred.get('project_id')}  tier: {cred.get('tier')}")
-        print(f"     凭据文件: {cred_path()}")
+        print(f"     凭据文件: {account_cred_path(str(cred.get('account_id') or ''))}")
+        accounts = list_accounts()
+        if len(accounts) > 1:
+            mine = next((i for i, a in enumerate(accounts) if a.id == cred.get("account_id")), None)
+            if mine is not None:
+                print(f"     账号顺位: #{mine + 1}（共 {len(accounts)} 个账号，额度耗尽自动切换下一个）")
         print("     启动代理时加 --antigravity（或 ANTIGRAVITY_ENABLED=1）即可启用该通道。")
         print("     若网关正在运行，需 `buddy restart` 才会加载新凭据。")
         return cred
@@ -189,18 +195,29 @@ def login_interactive(open_browser: bool = True) -> dict:
         server.server_close()
 
 
-def resume_onboarding() -> dict:
+def resume_onboarding(account_id: str | None = None) -> dict:
     """免浏览器重试 onboarding：用已保存的 token 再走一遍 setup。
 
     针对「OAuth 已成功、onboarding 失败」的中间态。token 失效会自动刷新。
+    多账号下 ``account_id`` 缺省时定位「有 token 缺 project」的账号（按
+    failover 顺位取第一个）——完整登录中断后重跑自动续上那个账号。
     """
-    from .credentials import ensure_access_token, load_cred
+    from .credentials import ensure_account_token, list_accounts, load_account_cred
 
-    cred = load_cred()
-    if cred is None:
-        raise LoginError("没有已保存的登录态，请先运行 `buddy login antigravity`")
+    if account_id:
+        if load_account_cred(account_id) is None:
+            raise LoginError(f"账号 {account_id} 不存在")
+    else:
+        account_id = next(
+            (a.id for a in list_accounts()
+             if not (load_account_cred(a.id) or {}).get("project_id")),
+            None)
+        if account_id is None:
+            raise LoginError(
+                "没有待续跑的账号（已登录账号都完成了 onboarding）；"
+                "换号/新增账号请直接 `buddy login antigravity`")
     try:
-        token = ensure_access_token(cred)
+        token, cred = ensure_account_token(account_id)
     except AuthError as exc:
         raise LoginError(f"刷新 token 失败（可能需要重新登录）: {exc}") from exc
     try:
@@ -210,8 +227,7 @@ def resume_onboarding() -> dict:
     cred["project_id"] = info["project_id"]
     cred["tier"] = info["tier"]
     cred["tier_name"] = info["tier_name"]
-    cred["access_token"] = token
-    save_cred(cred)
+    save_account_cred(cred)
     return cred
 
 
@@ -223,7 +239,7 @@ def adopt_cli_login() -> dict:
     access token 过期时用同一 client 直接刷新。
     """
     from .cli_bridge import cli_cached_email, cli_creds_usable, cli_token, load_cli_creds, to_buddy_format
-    from .credentials import access_token_valid, refresh_cred
+    from .credentials import access_token_valid, refresh_account_cred
 
     payload = load_cli_creds()
     if payload is None:
@@ -238,7 +254,7 @@ def adopt_cli_login() -> dict:
     cred = to_buddy_format(cli_token(payload))
     if cred["refresh_token"] and not access_token_valid(cred):
         try:
-            refresh_cred(cred)
+            refresh_account_cred(cred)
         except AuthError as exc:
             raise LoginError(f"agy 的 refresh_token 已失效（{exc}），请在 agy 里重新登录") from exc
 
@@ -247,19 +263,19 @@ def adopt_cli_login() -> dict:
         cred["email"] = email
 
     # 与 _exchange 同序：token 先落盘，onboarding 失败授权不白费
-    save_cred(cred)
+    save_account_cred(cred)
     try:
         info = setup_code_assist(cred["access_token"])
     except SetupError as exc:
         raise LoginError(
             f"Antigravity onboarding 失败: {exc}\n"
-            f"    token 已保存（{cred_path()}），修好上面问题后重跑 "
-            f"`buddy login antigravity` 会自动续跑。"
+            f"    token 已保存（{account_cred_path(str(cred.get('account_id') or ''))}），"
+            f"修好上面问题后重跑 `buddy login antigravity` 会自动续跑。"
         ) from exc
     cred["project_id"] = info["project_id"]
     cred["tier"] = info["tier"]
     cred["tier_name"] = info["tier_name"]
-    save_cred(cred)
+    save_account_cred(cred)
     return cred
 
 
@@ -291,20 +307,21 @@ def _exchange(code: str, redirect_uri: str, verifier: str) -> dict:
 
     # 先把 token 落盘再做 onboarding：onboarding 失败时授权不白费——
     # 重试只需再跑 onboarding，不用重新点浏览器授权。
-    save_cred(cred)
+    # （save_account_cred 是幂等 upsert：同邮箱更新原账号，新邮箱追加。）
+    save_account_cred(cred)
 
     try:
         info = setup_code_assist(cred["access_token"])
     except SetupError as exc:
         raise LoginError(
             f"Antigravity onboarding 失败: {exc}\n"
-            f"    token 已保存（{cred_path()}），修好上面问题后重跑 "
-            f"`buddy login antigravity` 会自动续跑（不会重新打开浏览器）；"
-            f"要换账号请先删除该文件。"
+            f"    token 已保存（{account_cred_path(str(cred.get('account_id') or ''))}），"
+            f"修好上面问题后重跑 `buddy login antigravity` 会自动续跑"
+            f"（不会重新打开浏览器）。"
         ) from exc
     cred["project_id"] = info["project_id"]
     cred["tier"] = info["tier"]
     cred["tier_name"] = info["tier_name"]
 
-    save_cred(cred)
+    save_account_cred(cred)
     return cred

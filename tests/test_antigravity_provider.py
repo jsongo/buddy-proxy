@@ -53,7 +53,7 @@ def test_quota_falls_back_to_note_on_fetch_failure(provider, tmp_path, monkeypat
                      "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
                      "project_id": "p"})
     monkeypatch.setattr(provider, "_fetch_available_models",
-                        lambda: (_ for _ in ()).throw(RuntimeError("down")))
+                        lambda account_id=None: (_ for _ in ()).throw(RuntimeError("down")))
     quota = provider.quota()
     assert quota is not None and len(quota["items"]) == 1
     assert quota["items"][0]["percent"] is None  # 拿不到数据就不画进度条
@@ -77,7 +77,7 @@ def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
             info["resetTime"] = reset
         return {"quotaInfo": info}
 
-    async def _fake_fetch():
+    async def _fake_fetch(account_id=None):
         # 真实响应形态：models.<变体名>.quotaInfo.remainingFraction
         return {"models": {
             "gemini-3.1-pro-low": _quota(0.9, "2026-10-02T20:28:46Z"),
@@ -138,6 +138,54 @@ def test_iso_to_epoch():
     assert _iso_to_epoch("") == 0.0
     assert _iso_to_epoch(None) == 0.0
     assert _iso_to_epoch("garbage") == 0.0
+
+
+def test_quota_multi_account_labels_and_failure_notice(provider, tmp_path, monkeypatch):
+    """多账号：并发查询、label 带 AG #N 前缀、失败账号不拖垮整页只插说明条。"""
+    import buddy_proxy.antigravity.provider as prov
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_account_cred({"access_token": "a", "refresh_token": "r",
+                             "expiry": "2099-01-01T00:00:00+00:00",
+                             "email": "u@x.com", "project_id": "p"})
+    creds.save_account_cred({"access_token": "a2", "refresh_token": "r2",
+                             "expiry": "2099-01-01T00:00:00+00:00",
+                             "email": "v@y.com", "project_id": "p2"})
+    monkeypatch.setattr(provider, "_fetch_available_models", lambda account_id: (
+        (_ for _ in ()).throw(RuntimeError("down")) if account_id == "v@y.com"
+        else {"models": {
+            "gemini-3.1-pro-low": {"quotaInfo": {"remainingFraction": 0.9,
+                                                 "resetTime": "2026-10-02T20:28:46Z"}},
+            "claude-sonnet-4-6": {"quotaInfo": {"remainingFraction": 1.0}},
+        }}))
+    # _quota_one 的工厂直跑（绕开临时事件循环，mock 是普通函数不是 coroutine）
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: factory())
+
+    quota = provider.quota()
+    items = quota["items"]
+    assert items[0]["query_failed"] is True  # 说明条插首位（benefits 认标记走短缓存）
+    assert "1/2 个账号查询失败" in items[0]["remaining"]
+    ag1 = [i for i in items if i["label"].startswith("AG #1 · ")]
+    assert len(ag1) == 2  # u@x.com 的 Gemini/Claude 两组
+    assert ag1[0]["remaining"] == 900.0 and ag1[0]["percent"] == 10.0
+    assert ag1[0]["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:28:46Z")
+    assert not any(i["label"].startswith("AG #2") for i in items)  # 失败账号无条目
+
+
+def test_health_multi_account_lists_accounts(provider, tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_account_cred({"access_token": "a", "refresh_token": "r",
+                             "expiry": "2099-01-01T00:00:00+00:00",
+                             "email": "u@x.com", "project_id": "p", "tier": "free-tier"})
+    creds.save_account_cred({"access_token": "a2", "refresh_token": "r2",
+                             "expiry": "2099-01-01T00:00:00+00:00",
+                             "email": "v@y.com", "project_id": "p2"})
+    health = provider.health()
+    assert health["configured"] is True
+    assert health["email"] == "u@x.com" and health["project_id"] == "p"  # 主账号语义兼容
+    assert [a["email"] for a in health["accounts"]] == ["u@x.com", "v@y.com"]
+    assert health["accounts"][1]["project_id"] == "p2"
 
 
 def test_models_table_upstream_names():

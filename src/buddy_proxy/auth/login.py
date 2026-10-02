@@ -503,16 +503,24 @@ def _login_gemini(open_browser: bool = True, **_kwargs) -> int:
 def _login_antigravity(open_browser: bool = True, **_kwargs) -> int:
     """antigravity 登录：Google OAuth（PKCE + 本地回调），Antigravity 免费通道。
 
-    流程与 gemini 登录同构，client/scopes 用 Antigravity 自己的。与本机
-    agy（Antigravity CLI）互通是单向读取：agy 的登录态在系统 keyring，检测
-    到就问用户是否直接采用（默认 yes，省一次浏览器授权）；keyring 只读，
-    登录结果不回写（agy 没有明文文件可写）。
+    流程与 gemini 登录同构，client/scopes 用 Antigravity 自己的。支持多账号：
+    相同邮箱重新登录=更新凭据（failover 顺位不变），新邮箱=追加为备用账号。
+    与本机 agy（Antigravity CLI）互通是单向读取：agy 的登录态在系统 keyring，
+    检测到就问用户是否直接采用（默认 yes，省一次浏览器授权）；keyring 只读，
+    登录结果不回写（agy 没有明文文件可写）——keyring 只有一个账号坐标，第二个
+    及以后的账号走浏览器授权。
     """
     from buddy_proxy.antigravity import cli_bridge
-    from buddy_proxy.antigravity.credentials import load_cred
+    from buddy_proxy.antigravity.credentials import list_accounts, load_account_cred
     from buddy_proxy.antigravity.login import LoginError, adopt_cli_login, login_interactive, resume_onboarding
 
-    buddy_cred = load_cred()
+    accounts = list_accounts()
+    if accounts:
+        print(f"[Antigravity] 已有 {len(accounts)} 个账号：")
+        for i, a in enumerate(accounts):
+            cred_i = load_account_cred(a.id) or {}
+            ok = "✓" if cred_i.get("project_id") else "（缺 project，登录时可续跑 onboarding）"
+            print(f"     #{i + 1} {a.email or a.id}  {ok}")
 
     # 1) 本机 agy 已有登录态（keyring）→ 问一声，默认直接用
     payload = cli_bridge.load_cli_creds()
@@ -521,10 +529,11 @@ def _login_antigravity(open_browser: bool = True, **_kwargs) -> int:
         if usable:
             who = cli_bridge.cli_cached_email(payload) or "未知账号"
             print(f"[Antigravity] 检测到本机 Antigravity CLI（agy）已有登录态（{who}，{note}）。")
-            if buddy_cred and buddy_cred.get("project_id") and buddy_cred.get("email") \
-                    and buddy_cred["email"] != who:
-                print(f"             （当前 buddy 登录的是 {buddy_cred['email']}，"
-                      f"直接采用会切换到 agy 的账号）")
+            known = [a.email for a in accounts if a.email]
+            if who in known:
+                print("             （该邮箱已在账号列表里，采用它会更新对应账号的凭据）")
+            elif accounts:
+                print("             （这是新邮箱，采用后会追加为备用账号）")
             if _ask_default_yes("             直接使用它吗？（跳过浏览器授权，Y/n）"):
                 try:
                     cred = adopt_cli_login()
@@ -535,28 +544,31 @@ def _login_antigravity(open_browser: bool = True, **_kwargs) -> int:
                     print("             落回浏览器授权流程（与 gemini 通道同款兜底）。\n")
                     # adopt 可能已把 token 落盘（onboarding 阶段失败），刷新
                     # 后让下面的 resume 分支先试免浏览器续跑
-                    buddy_cred = load_cred()
+                    accounts = list_accounts()
         else:
             print(f"[Antigravity] 本机 agy 登录态不可用（{note}），改走浏览器登录。")
 
-    cred = buddy_cred
-    if cred:
-        if cred.get("project_id"):
-            print("[OK] antigravity 已有登录态；重新登录会覆盖（换号/刷新授权请继续）。")
-            print(f"     当前账号: {cred.get('email') or '(未知)'}  project: {cred.get('project_id')}")
-        else:
-            # 上次 OAuth 成功但 onboarding 没走完：token 还在，先试免浏览器续跑
-            print("[Antigravity] 检测到已保存的 token 但缺 project（上次 onboarding 未完成），")
-            print("             先尝试直接续跑 onboarding（不需要再点浏览器授权）…")
-            try:
-                cred = resume_onboarding()
-            except LoginError as exc:
-                print(f"[Antigravity] 续跑失败: {exc}")
-                print("             如已修好账号问题仍失败，可删掉凭据文件后重新走完整登录：")
-                print("             rm ~/.buddy-proxy/antigravity_oauth.json && buddy login antigravity")
-                return 1
-            _print_antigravity_ready(cred)
-            return 0
+    pending = next(
+        (a for a in accounts
+         if not (load_account_cred(a.id) or {}).get("project_id")),
+        None)
+    if pending is not None:
+        # 上次 OAuth 成功但 onboarding 没走完：token 还在，先试免浏览器续跑
+        print(f"[Antigravity] 账号 {pending.email or pending.id} 缺 project（上次 onboarding 未完成），")
+        print("             先尝试直接续跑 onboarding（不需要再点浏览器授权）…")
+        try:
+            cred = resume_onboarding(pending.id)
+        except LoginError as exc:
+            print(f"[Antigravity] 续跑失败: {exc}")
+            print("             如已修好账号问题仍失败，可删除该账号的凭据文件后重新走完整登录：")
+            print(f"             rm ~/.buddy-proxy/antigravity/{pending.id}.json && buddy login antigravity")
+            return 1
+        _print_antigravity_ready(cred)
+        return 0
+
+    if accounts:
+        print("[OK] antigravity 已有登录态；继续登录：相同邮箱=更新凭据，"
+              "新邮箱=追加为备用账号（failover 自动切换）。")
 
     try:
         cred = login_interactive(open_browser=open_browser)

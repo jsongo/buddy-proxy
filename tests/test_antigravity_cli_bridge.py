@@ -265,7 +265,9 @@ def test_login_entry_shows_buddy_account_when_switching(tmp_path, monkeypatch, c
     rc = auth_login._login_antigravity(open_browser=False)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "当前 buddy 登录的是 old@x.com" in out
+    # 多账号语义：old@x.com 已在账号列表；agy 的邮箱是新的 → 提示追加为备用账号
+    assert "已有 1 个账号" in out and "old@x.com" in out
+    assert "追加为备用账号" in out
 
 
 def test_login_entry_unusable_agy_state_falls_through(tmp_path, monkeypatch, capsys):
@@ -309,7 +311,7 @@ def test_login_entry_adopt_failure_falls_through_to_resume(tmp_path, monkeypatch
                      "expiry": "2099-01-01T00:00:00+00:00", "email": "agy@x.com"})
     monkeypatch.setattr(
         ag_login, "resume_onboarding",
-        lambda: {"email": "agy@x.com", "tier": "t", "project_id": "p"})
+        lambda account_id=None: {"email": "agy@x.com", "tier": "t", "project_id": "p"})
 
     rc = auth_login._login_antigravity(open_browser=False)
     assert rc == 0

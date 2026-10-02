@@ -501,6 +501,17 @@ async def ui_traepat_accounts(request: Request):
     return await asyncio.to_thread(accounts_status)
 
 
+@app.get("/ui/api/antigravity/accounts")
+async def ui_antigravity_accounts(request: Request):
+    """antigravity 各账号本地凭证/冷却状态（纯本地，不触网，不含秘密）。"""
+    _ensure_local(request)
+    try:
+        from ..antigravity import failover
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "antigravity 通道不可用"}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.post("/ui/api/traepat/refresh-tokens")
 async def ui_traepat_refresh_tokens(request: Request):
     """立即补签 traepat 缺失/临期 Token；健康账号不强刷。"""
