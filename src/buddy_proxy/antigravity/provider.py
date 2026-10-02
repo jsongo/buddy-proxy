@@ -515,6 +515,20 @@ class AntigravityProvider(BaseProvider):
             "level": str(cred.get("tier_name") or cred.get("tier") or "free-tier"),
         }
 
+    def quota_epoch(self) -> str:
+        """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。
+
+        benefits 层的 quota 缓存键只有 provider id（TTL 300s）——加了新账号
+        后，旧的单账号快照还会在缓存里顶满 5 分钟，前端看到的还是「一份额度」，
+        看起来就像多账号被合并了（2026-10-03 实测）。键里带上账号指纹后，
+        账号列表一变键就变，旧缓存自然失效（读的是本地 index，纯内存级开销）。
+        """
+        try:
+            accts = list_accounts()
+        except Exception:  # noqa: BLE001 - 拿不到就退回常量键，宁可多查不强撑旧值
+            return "unknown"
+        return ",".join(f"{a.id}#{a.priority}" for a in accts) or "empty"
+
     def _quota_one(
         self, acct: Any, index: int, *, multi: bool
     ) -> tuple[list[dict[str, Any]], bool]:

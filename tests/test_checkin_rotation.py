@@ -334,3 +334,44 @@ def test_claimable_now_predicate_ignores_junk():
     assert claimable_now({"claimable": True, "checked_in": True}) is False
     assert claimable_now({"claimable": True}) is True
     assert claimable_now({"claimable": True, "checked_in": False}) is True
+
+
+def test_quota_cache_key_tracks_provider_epoch(tmp_path, monkeypatch):
+    """quota 缓存键带 provider 声明的 ``quota_epoch``：代一变就重查，不回旧快照。
+
+    实测（2026-10-03）：antigravity 加了账号 #2 后，benefits 的旧单账号快照
+    还在缓存里顶满 TTL（300s），前端只渲染出一份额度，看起来就像多账号被
+    合并了。benefits 层不认识「账号列表」，只能由 provider 自己声明缓存代
+    （antigravity 用账号指纹；没声明这个方法的通道键保持原样，不受影响）。
+    """
+    calls = []
+
+    class _Epoch:
+        id = "epochy"
+        name = "Epochy"
+        supports_checkin = False
+        n = 0
+
+        def quota_epoch(self):
+            return f"gen-{self.n}"
+
+        def quota(self):
+            calls.append(self.n)
+            return {"items": [{"label": f"gen-{self.n}", "remaining": 1,
+                               "total": 2, "used": None, "percent": None,
+                               "reset_ts": None}]}
+
+    p = _Epoch()
+    state, mgr = _manager(tmp_path, monkeypatch, {"epochy": p})
+
+    snap1 = asyncio.run(mgr.snapshot())
+    asyncio.run(mgr.snapshot())                    # 同代 → 缓存命中，不重查
+    assert calls == [0], "同一缓存代内不该重复打 quota"
+    p.n = 1
+    snap3 = asyncio.run(mgr.snapshot())            # 代变 → 重查新代
+    assert calls == [0, 1], "缓存代变了必须重查，旧快照不能继续顶"
+
+    q1 = next(x for x in snap1["providers"] if x["id"] == "epochy")["quota"]
+    q3 = next(x for x in snap3["providers"] if x["id"] == "epochy")["quota"]
+    assert q1["items"][0]["label"] == "gen-0"
+    assert q3["items"][0]["label"] == "gen-1"
