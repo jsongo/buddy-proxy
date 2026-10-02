@@ -1,61 +1,25 @@
-"""管理 UI：/ui 页面与 /ui/api/* 管理接口。
+"""管理 UI：模型目录、停用/限时/顺序管理与一键测试。
 
-功能：
-- 按 provider 分组的模型列表，一键「设为默认启用模型」（settings.py 持久化）
-- 每个模型一键测试：发一条 "hi"，返回延迟 / token / 回复预览
-- 按 provider/模型维度聚合的请求统计（metrics.py），含近 14 天图表与最近请求
-- provider 健康状态总览
-
-安全约定：/ui/api/* 仅允许本机（127.0.0.1 / ::1）访问；如确需从局域网打开
-管理页操作，设置环境变量 ``BUDDY_PROXY_ADMIN_OPEN=1`` 放开（自担风险）。
-/v1/* 代理端点不受此限制。
+模型 helpers 与相关接口同一文件——helper 的注释（裸名口径、resolve_model
+映射坑）就是这些接口的实现说明，拆开反而要来回跳。
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import os
-import re
 import time
-from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
 
-from buddy_proxy.core.state import app, get_state, _get_state_or_none
+from buddy_proxy.core import cooldown as cooldown_mod
+from buddy_proxy.core import settings as settings_mod
+from buddy_proxy.core.state import app, get_state
 from buddy_proxy.web.model_list import load_models_from_local_config
 from buddy_proxy.codebuddy_provider import forward_chat
-from buddy_proxy.benefits import BenefitsManager, read_checkin_settings
-from buddy_proxy.core import settings as settings_mod
-from buddy_proxy.core import cooldown as cooldown_mod
 
-# 一键测试发送的内容与 token 上限（够穿透 thinking 模型的少量预算）
-TEST_PROMPT = "hi"
-TEST_MAX_TOKENS = 256
-TEST_TIMEOUT_S = 120
-
-_LOCAL_HOSTS = {"127.0.0.1", "::1", "testclient"}
-
-
-def _ensure_local(request: Request) -> None:
-    """管理接口仅限本机访问（防 LAN 内误触计费请求 / 篡改配置）。"""
-    if os.getenv("BUDDY_PROXY_ADMIN_OPEN") == "1":
-        return
-    host = request.client.host if request.client else ""
-    if host not in _LOCAL_HOSTS:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"message": "管理接口仅限本机访问；如需放开请设 BUDDY_PROXY_ADMIN_OPEN=1"}},
-        )
-
-
-def _err_text(detail: Any) -> str:
-    if isinstance(detail, dict):
-        detail = (detail.get("error") or {}).get("message") or detail
-    return str(detail)
+from .common import TEST_MAX_TOKENS, TEST_PROMPT, TEST_TIMEOUT_S, _ensure_local, _err_text, _ms
 
 
 # ---------------------------------------------------------------------------
@@ -213,36 +177,75 @@ def _normalize_model_ref(provider: str, model: str, state: Any) -> tuple[str, st
     return pid, bare
 
 
+def _canonical_order_target(provider: str, model: str, state: Any) -> str:
+    """把一个候选目标校验并归一成 ``provider/裸模型名``（model_order 目标口径）。
+
+    ``provider`` 留空时用 :func:`_owner_provider` 找归属通道，**但那只用来校验**：
+    调用方若用它拼 ``model_order`` 的键，务必自己剥掉前缀存裸名（键的口径见
+    :func:`ui_model_order`）。
+
+    **必须按「对外发布的 id」校验，而不是 ``_normalize_model_ref`` 的结果**：后者会把
+    名字再过一遍通道的 ``resolve_model``，那是**转发期**的映射（qoder 把对外名
+    ``glm-5.3`` 归一成上游内部 key ``gmodel``），拿它去比对通道目录必然失败——
+    目录里发布的是 ``glm-5.3``。用 ``_normalize_model_ref`` 校验会让「选择器给出的、
+    ``/v1/models`` 也确认存在的」目标被 400 拒掉。
+
+    转发侧会自己对裸名做同样的归一，所以这里存对外名是安全的、也是可读的。
+    """
+    if not (provider or "").strip():
+        provider, model = _split_known_prefix(model)
+    if not provider:
+        provider = _owner_provider(model, state)
+    pid = provider.strip()
+    bare = _bare_model_id(model, pid)
+    _validate_model(pid, bare, state)
+    return settings_mod.model_key(pid, bare)
+
+
+def _split_known_prefix(model: str) -> tuple[str, str]:
+    """把 ``<已知通道>/<名>`` 拆成 ``(通道, 名)``；不是这个形态就返回 ``("", 原串)``。
+
+    为什么要拆：老配置里的键是 ``zcode/glm-5.3``，顺序页照着配置原样展示，用户
+    点点改改再保存时提交回来的就是那个带前缀的串。不拆的话 ``_owner_provider``
+    会去目录里找一个**名字真叫** ``zcode/glm-5.3`` 的模型，必然 400。
+
+    **只认 :data:`settings.KNOWN_PROVIDER_IDS` 里的通道名**：``provider/model``
+    本身也是合法的普通模型 id（``openrouter/gpt-5``），见不得斜杠就拆会把它们
+    拆坏。别名 ``workbuddy`` 借 :func:`settings.model_key` 一并归一。
+    """
+    head, sep, tail = (model or "").strip().partition("/")
+    if sep and tail.strip():
+        pid, _, bare = settings_mod.model_key(head, tail).partition("/")
+        if pid in settings_mod.KNOWN_PROVIDER_IDS:
+            return pid, bare
+    return "", (model or "").strip()
+
+
+def _owner_provider(model: str, state: Any) -> str:
+    """模型名没带通道时，找出**哪个通道认识它**（用于校验/拼 ``target``）。
+
+    只用于「校验这个模型名是真实存在的」，**不参与 ``model_order`` 的落键**——
+    键一律是裸名（`fake-model`），运行时对所有发布它的通道生效。挑第一个认识的
+    通道即可：与转发侧 ``_resolve_auto`` 的「精确匹配轮」顺序一致，于是
+    「能保存的」正好是「能路由到的」。
+    """
+    for group in _model_groups(state):
+        gid = group.get("id") or ""
+        if not gid:
+            continue
+        for item in group.get("models") or []:
+            if not isinstance(item, dict):
+                continue
+            if _bare_model_id(item.get("id") or "", gid) == model:
+                return gid
+    raise HTTPException(
+        status_code=400,
+        detail={"error": {"message": f"没有通道发布名为 {model} 的模型"}})
+
+
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
-
-@app.get("/ui/api/overview")
-async def ui_overview(request: Request):
-    _ensure_local(request)
-    state = get_state()
-    auth = {} if state.mock_dir is not None else (state.client.session.get("auth") or {})
-    providers_health = {pid: p.health() for pid, p in getattr(state, "providers", {}).items()}
-
-    default_model = getattr(state, "default_model", None)
-    provider = model = None
-    if default_model and "/" in default_model:
-        provider, model = default_model.split("/", 1)
-    elif default_model:
-        model = default_model
-
-    return {
-        "uptime_seconds": int(time.time() - state.started_at),
-        "authenticated": bool(auth.get("accessToken")),
-        "providers": providers_health,
-        "default_provider": getattr(state, "default_provider", "codebuddy"),
-        "default_model": {"provider": provider, "model": model, "raw": default_model},
-        "runtime": getattr(state, "runtime_info", {}),
-        # 设置文件健康度：损坏时前端顶部弹红色条幅。load_settings 会静默吞掉
-        # 语法错误（容错需要），若不显式告知，用户只会看到「设置项全没了」。
-        "settings": settings_mod.settings_health(),
-    }
-
 
 @app.get("/ui/api/models")
 async def ui_models(request: Request):
@@ -308,346 +311,6 @@ async def ui_models(request: Request):
                     "open": settings_mod.model_schedule_open(windows),
                 }
     return {"groups": groups, "default_model": default_model}
-
-
-@app.get("/ui/api/stats")
-async def ui_stats(request: Request):
-    _ensure_local(request)
-    state = get_state()
-    metrics = getattr(state, "metrics", None)
-    if metrics is None:
-        return {"models": [], "daily": [], "model_daily": [], "recent": [], "summary": {}, "credits_map": {}}
-    snap = metrics.snapshot(days=30)
-
-    def _credits_tag(v: Any) -> Any:
-        """倍率统一成展示字符串：数字（如 qoder 的 price_factor 0.2）补「x」前缀，
-        目录里本就是 "x1.83 credits" 这类字符串的原样保留。"""
-        if isinstance(v, (int, float)):
-            return f"x{v:g}"
-        return v
-
-    # 模型积分倍率，按「通道/模型」为键——同一模型跨通道倍率不同
-    # （如 glm-5.3 在 codebuddy 是 x0.79、trae 是 x0.40）。CodeBuddy 走
-    # models_config，其余通道取各自 models() 声明的 credits。
-    snap["credits_map"] = {}
-    for m in load_models_from_local_config():
-        if m.get("credits"):
-            snap["credits_map"][f"codebuddy/{m['id']}"] = m.get("credits")
-    for p in getattr(state, "providers", {}).values():
-        prefix = f"{p.id}/"
-        for m in p.models():
-            if m.get("credits"):
-                mid = str(m.get("id") or "")
-                # models() 的 id 可能已带「provider/」前缀（如 qoder 的
-                # to_openai_model），剥掉再拼键——否则键变成 qoder/qoder/x，
-                # 前端按「provider/裸名」查永远落空，倍率从来不显示
-                if mid.startswith(prefix):
-                    mid = mid[len(prefix):]
-                snap["credits_map"].setdefault(
-                    settings_mod.model_key(p.id, mid), _credits_tag(m.get("credits")))
-    return snap
-
-
-@app.get("/ui/api/logs")
-async def ui_logs(request: Request, start: str = "", end: str = "",
-                  page: int = 1, page_size: int = 20,
-                  provider: str = "", model: str = "", client: str = ""):
-    """请求日志分页查询：按日期范围直接读 metrics.jsonl + 30 天归档（服务端分页）。
-
-    provider/model/client：逗号分隔白名单（UI 快速筛选，组内 OR、组间 AND），空 = 不筛。
-    """
-    _ensure_local(request)
-    state = get_state()
-    metrics = getattr(state, "metrics", None)
-    if metrics is None:
-        return {"rows": [], "total": 0, "page": 1, "page_size": page_size,
-                "pages": 1, "clients": [], "from_disk": False}
-    provs = [p.strip() for p in provider.split(",") if p.strip()] or None
-    mds = [m.strip() for m in model.split(",") if m.strip()] or None
-    cls = [c.strip() for c in client.split(",") if c.strip()] or None
-    return await asyncio.to_thread(
-        metrics.query_logs, start or None, end or None, page, page_size, provs, mds, cls)
-
-
-@app.get("/ui/api/benefits")
-async def ui_benefits(request: Request):
-    """打卡状态 + 打卡日历 + 各通道额度（带 5 分钟缓存，避免频打上游）。"""
-    _ensure_local(request)
-    state = get_state()
-    manager = getattr(state, "benefits", None)
-    if manager is None:
-        return {"providers": [], "calendar": [], "auto_checkin": False,
-                "checkin_time": "09:30", "checkin_enabled_providers": []}
-    return await manager.snapshot()
-
-
-@app.get("/ui/api/qoder/auth")
-async def ui_qoder_auth(request: Request):
-    """Qoder 登录/鉴权状态 + 账号信息（供管理页鉴权面板展示）。
-
-    纯本地读取，不触网：返回区域、账号、token 过期时间与来源，前端据此
-    提示「未登录 / 即将过期 / 正常」，并可给出重新登录的命令。
-    """
-    _ensure_local(request)
-    state = get_state()
-    provider = getattr(state, "providers", {}).get("qoder")
-    if provider is None:
-        return {"enabled": False, "authenticated": False}
-
-    try:
-        from ..qoder.credentials import auth_state_path, load_state, resolve_credential
-        from ..qoder.config import REGIONS
-
-        region = provider.region()
-        info: dict[str, Any] = {
-            "enabled": True,
-            "region": region.key,
-            "region_label": region.label,
-            "regions": sorted(REGIONS),
-            "endpoint": region.infer_base,
-            "state_file": str(auth_state_path()),
-            "login_command": "buddy login qoder",
-        }
-    except Exception as exc:  # noqa: BLE001 - 状态面板不该因读取失败而 500
-        return {"enabled": True, "authenticated": False, "error": str(exc)[:200]}
-
-    try:
-        cred = resolve_credential(region)
-    except Exception:
-        cred = None
-
-    saved = load_state()
-    # 内存凭据里的 plan 是额度接口回填的，可能比状态文件新（同一进程内）。
-    live_plan = getattr(cred, "plan", "") if cred else ""
-    now_ms = int(time.time() * 1000)
-    expires_at = (cred.expires_at_ms if cred else 0) or int(saved.get("expires_at_ms") or 0)
-    info.update({
-        "authenticated": cred is not None,
-        "uid": (cred.uid if cred else "") or saved.get("uid") or "",
-        "name": (cred.name if cred else "") or saved.get("name") or "",
-        "email": (cred.email if cred else "") or saved.get("email") or "",
-        "plan": live_plan or saved.get("plan") or "",
-        "source": cred.source if cred else "",
-        "expires_at_ms": expires_at or None,
-        "expires_in_days": (
-            round((expires_at - now_ms) / 86400000, 1) if expires_at else None
-        ),
-        "expired": bool(expires_at and expires_at <= now_ms),
-        "has_refresh_token": bool(
-            (cred.refresh_token if cred else "") or saved.get("refresh_token")
-        ),
-        "updated_at_ms": saved.get("updated_at_ms"),
-    })
-    return info
-
-
-@app.post("/ui/api/qoder/models/refresh")
-async def ui_qoder_models_refresh(request: Request):
-    """从上游刷新 Qoder 模型目录（管理页「刷新模型」按钮）。"""
-    _ensure_local(request)
-    state = get_state()
-    provider = getattr(state, "providers", {}).get("qoder")
-    if provider is None:
-        raise HTTPException(status_code=503, detail={"error": {"message": "qoder 通道未启用"}})
-    models = await provider.refresh_models(force=True)
-    return {"ok": True, "count": len(models), "models": models}
-
-
-@app.post("/ui/api/checkin")
-async def ui_checkin(request: Request):
-    """立即打卡：向上游领取今日签到积分并记录历史。"""
-    _ensure_local(request)
-    state = get_state()
-    manager = getattr(state, "benefits", None)
-    if manager is None:
-        raise HTTPException(status_code=503, detail={"error": {"message": "打卡功能未初始化"}})
-    body = await request.json()
-    provider_id = (body.get("provider") or "").strip()
-    if not provider_id:
-        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 provider"}})
-    return await manager.claim_now(provider_id)
-
-
-@app.get("/ui/api/traepat/model-status")
-async def ui_traepat_model_status_cached(request: Request):
-    """读取 traepat 模型负载缓存（纯本地，不触网）；无缓存返回空壳供页面默认展示。"""
-    _ensure_local(request)
-    try:
-        from ..trae.pat import fetch_pat_model_status
-    except Exception:
-        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
-    return await asyncio.to_thread(fetch_pat_model_status, False, True)
-
-
-@app.post("/ui/api/traepat/model-status")
-async def ui_traepat_model_status(request: Request):
-    """手动触发 traepat 模型负载查询（10 分钟内重复触发走缓存，避免频打上游）。"""
-    _ensure_local(request)
-    try:
-        from ..trae.pat import fetch_pat_model_status
-    except Exception:
-        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
-    return await asyncio.to_thread(fetch_pat_model_status)
-
-
-@app.get("/ui/api/traepat/accounts")
-async def ui_traepat_accounts(request: Request):
-    """traepat 各账号本地凭证/冷却状态 + 后台自愈循环最近一轮结果（纯本地，不触网）。"""
-    _ensure_local(request)
-    try:
-        from ..trae.pat import accounts_status
-    except Exception:
-        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
-    return await asyncio.to_thread(accounts_status)
-
-
-@app.get("/ui/api/antigravity/accounts")
-async def ui_antigravity_accounts(request: Request):
-    """antigravity 各账号本地凭证/冷却状态（纯本地，不触网，不含秘密）。"""
-    _ensure_local(request)
-    try:
-        from ..antigravity import failover
-    except Exception:
-        raise HTTPException(status_code=503, detail={"error": {"message": "antigravity 通道不可用"}})
-    return await asyncio.to_thread(failover.accounts_status)
-
-
-@app.post("/ui/api/traepat/refresh-tokens")
-async def ui_traepat_refresh_tokens(request: Request):
-    """立即补签 traepat 缺失/临期 Token；健康账号不强刷。"""
-    _ensure_local(request)
-    try:
-        from ..trae.pat import refresh_missing_tokens
-    except Exception:
-        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
-    return await asyncio.to_thread(refresh_missing_tokens)
-
-
-@app.get("/ui/api/codebuddy/usage-records")
-async def ui_codebuddy_usage_records(
-    request: Request, days: int = 7, page: int = 1, page_size: int = 20
-):
-    """CodeBuddy 按请求积分消耗流水（WorkBuddy「使用记录」同源，实扣口径）。
-
-    暂无 UI 消费方，先以管理接口形式备用（curl 即可查），参数：
-    days（默认 7）、page、page_size（≤100）。
-    """
-    _ensure_local(request)
-    state = get_state()
-    provider = (getattr(state, "providers", {}) or {}).get("codebuddy")
-    if provider is None:
-        # 未显式启用 codebuddy 通道时回退默认实例（与 BenefitsManager 同口径）
-        from buddy_proxy.codebuddy_provider import _default_codebuddy
-        provider = _default_codebuddy
-
-    def _fetch():
-        end = time.strftime("%Y-%m-%d %H:%M:%S")
-        start = time.strftime("%Y-%m-%d %H:%M:%S",
-                              time.localtime(time.time() - days * 86400))
-        return provider.usage_records(start, end, page_num=page, page_size=page_size)
-
-    try:
-        return await asyncio.to_thread(_fetch)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail={"error": {"message": str(exc)[:300]}})
-
-
-# 自动打卡后台循环随应用启停（uvicorn 生命周期）。
-# 启动失败只记日志，不阻断代理本身。
-async def _start_benefits_loop() -> None:
-    try:
-        state = _get_state_or_none()
-        manager = getattr(state, "benefits", None) if state else None
-        if isinstance(manager, BenefitsManager):
-            manager.start()
-    except Exception as exc:
-        print(f"[Benefits] auto checkin loop failed to start: {exc}")
-
-
-async def _stop_benefits_loop() -> None:
-    try:
-        state = _get_state_or_none()
-        manager = getattr(state, "benefits", None) if state else None
-        if isinstance(manager, BenefitsManager):
-            await manager.stop()
-    except Exception:
-        pass
-
-
-app.router.on_startup.append(_start_benefits_loop)
-app.router.on_shutdown.append(_stop_benefits_loop)
-
-
-@app.get("/ui/api/settings")
-async def ui_settings_get(request: Request):
-    _ensure_local(request)
-    state = get_state()
-    cfg = read_checkin_settings()
-    return {
-        "default_model": getattr(state, "default_model", None),
-        "default_provider": getattr(state, "default_provider", "codebuddy"),
-        "auto_checkin": cfg["auto_checkin"],
-        "checkin_time": cfg["checkin_time"],
-        "path": str(settings_mod.settings_path()),
-    }
-
-
-@app.post("/ui/api/settings")
-async def ui_settings_post(request: Request):
-    _ensure_local(request)
-    state = get_state()
-    body = await request.json()
-
-    update: dict[str, Any] = {}
-    if "default_model" in body:
-        raw = settings_mod.normalize_default_model(body.get("default_model") or "")
-        if raw:
-            if "/" in raw:
-                provider_id, model_id = raw.split("/", 1)
-                provider_id, model_id = _normalize_model_ref(provider_id, model_id, state)
-                _validate_model(provider_id, model_id, state)
-                # 指定了通道的默认模型顺带把兜底通道对齐（显式前缀路由优先级一致）
-                update["default_provider"] = provider_id
-            elif not _model_exists_anywhere(raw, state):
-                raise HTTPException(
-                    status_code=400,
-                    detail={"error": {"message": f"裸模型 id {raw} 未命中任何已启用通道的模型列表"}},
-                )
-            update["default_model"] = raw
-        else:
-            # 清空默认模型：恢复「按客户端请求原样路由」
-            update["default_model"] = ""
-    if body.get("default_provider"):
-        pid = body["default_provider"]
-        if pid != "codebuddy" and pid not in getattr(state, "providers", {}):
-            raise HTTPException(
-                status_code=400,
-                detail={"error": {"message": f"provider {pid} 未启用"}},
-            )
-        update["default_provider"] = pid
-    if "auto_checkin" in body:
-        update["auto_checkin"] = bool(body["auto_checkin"])
-    if "checkin_time" in body:
-        raw_time = str(body["checkin_time"] or "").strip()
-        if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", raw_time):
-            raise HTTPException(
-                status_code=400,
-                detail={"error": {"message": f"打卡时间格式应为 HH:MM，收到 {raw_time!r}"}},
-            )
-        update["checkin_time"] = raw_time
-
-    if not update:
-        raise HTTPException(status_code=400, detail={"error": {"message": "没有可更新的设置字段"}})
-
-    saved = settings_mod.save_settings(update)
-    # 热更新运行态（"" 与 None 都视为未设置）
-    if "default_model" in update:
-        state.default_model = update["default_model"] or None
-    if "default_provider" in update:
-        state.default_provider = update["default_provider"]
-    return {"ok": True, "settings": {k: saved.get(k) for k in ("default_model", "default_provider")}}
 
 
 @app.post("/ui/api/model-toggle")
@@ -720,72 +383,6 @@ async def ui_model_schedule(request: Request):
         {"model_schedules": {k: {"windows": v} for k, v in sorted(current.items())}})
     return {"ok": True, "model": key, "windows": windows,
             "open": settings_mod.model_schedule_open(windows) if windows else None}
-
-
-def _canonical_order_target(provider: str, model: str, state: Any) -> str:
-    """把一个候选目标校验并归一成 ``provider/裸模型名``（model_order 目标口径）。
-
-    ``provider`` 留空时用 :func:`_owner_provider` 找归属通道，**但那只用来校验**：
-    调用方若用它拼 ``model_order`` 的键，务必自己剥掉前缀存裸名（键的口径见
-    :func:`ui_model_order`）。
-
-    **必须按「对外发布的 id」校验，而不是 ``_normalize_model_ref`` 的结果**：后者会把
-    名字再过一遍通道的 ``resolve_model``，那是**转发期**的映射（qoder 把对外名
-    ``glm-5.3`` 归一成上游内部 key ``gmodel``），拿它去比对通道目录必然失败——
-    目录里发布的是 ``glm-5.3``。用 ``_normalize_model_ref`` 校验会让「选择器给出的、
-    ``/v1/models`` 也确认存在的」目标被 400 拒掉。
-
-    转发侧会自己对裸名做同样的归一，所以这里存对外名是安全的、也是可读的。
-    """
-    if not (provider or "").strip():
-        provider, model = _split_known_prefix(model)
-    if not provider:
-        provider = _owner_provider(model, state)
-    pid = provider.strip()
-    bare = _bare_model_id(model, pid)
-    _validate_model(pid, bare, state)
-    return settings_mod.model_key(pid, bare)
-
-
-def _split_known_prefix(model: str) -> tuple[str, str]:
-    """把 ``<已知通道>/<名>`` 拆成 ``(通道, 名)``；不是这个形态就返回 ``("", 原串)``。
-
-    为什么要拆：老配置里的键是 ``zcode/glm-5.3``，顺序页照着配置原样展示，用户
-    点点改改再保存时提交回来的就是那个带前缀的串。不拆的话 ``_owner_provider``
-    会去目录里找一个**名字真叫** ``zcode/glm-5.3`` 的模型，必然 400。
-
-    **只认 :data:`settings.KNOWN_PROVIDER_IDS` 里的通道名**：``provider/model``
-    本身也是合法的普通模型 id（``openrouter/gpt-5``），见不得斜杠就拆会把它们
-    拆坏。别名 ``workbuddy`` 借 :func:`settings.model_key` 一并归一。
-    """
-    head, sep, tail = (model or "").strip().partition("/")
-    if sep and tail.strip():
-        pid, _, bare = settings_mod.model_key(head, tail).partition("/")
-        if pid in settings_mod.KNOWN_PROVIDER_IDS:
-            return pid, bare
-    return "", (model or "").strip()
-
-
-def _owner_provider(model: str, state: Any) -> str:
-    """模型名没带通道时，找出**哪个通道认识它**（用于校验/拼 ``target``）。
-
-    只用于「校验这个模型名是真实存在的」，**不参与 ``model_order`` 的落键**——
-    键一律是裸名（`fake-model`），运行时对所有发布它的通道生效。挑第一个认识的
-    通道即可：与转发侧 ``_resolve_auto`` 的「精确匹配轮」顺序一致，于是
-    「能保存的」正好是「能路由到的」。
-    """
-    for group in _model_groups(state):
-        gid = group.get("id") or ""
-        if not gid:
-            continue
-        for item in group.get("models") or []:
-            if not isinstance(item, dict):
-                continue
-            if _bare_model_id(item.get("id") or "", gid) == model:
-                return gid
-    raise HTTPException(
-        status_code=400,
-        detail={"error": {"message": f"没有通道发布名为 {model} 的模型"}})
 
 
 @app.post("/ui/api/model-order")
@@ -1057,31 +654,3 @@ async def ui_test(request: Request):
         "finish_reason": (choices[0].get("finish_reason") if choices else None),
         "usage": payload.get("usage") or {},
     }
-
-
-def _ms(started: float) -> int:
-    return round((time.time() - started) * 1000)
-
-
-@app.get("/ui", response_class=HTMLResponse)
-async def ui_page():
-    # no-cache：页面随代码更新，别让浏览器拿旧缓存（管理页无性能顾虑）
-    return HTMLResponse(content=_PAGE_HTML, headers={"Cache-Control": "no-cache"})
-
-
-@app.get("/")
-async def ui_root():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/ui")
-
-
-# ---------------------------------------------------------------------------
-# 页面（单文件、零依赖，无外链 CDN）
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# 页面（单文件、零依赖，无外链 CDN）：源码在 static/index.html，此处读取
-# ---------------------------------------------------------------------------
-
-_PAGE_HTML = (Path(__file__).parent / "static" / "index.html").read_text(
-    encoding="utf-8")

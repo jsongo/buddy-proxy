@@ -19,7 +19,9 @@ import subprocess
 
 import pytest
 
-INDEX = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static/index.html"
+STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
+# quotaHeadSum 在拆分后的 static/benefits.js（原 index.html 内联 JS，2026-10-03 拆出）
+BENEFITS_JS = STATIC / "benefits.js"
 FUNC_RE = re.compile(r"function quotaHeadSum\(q\) \{(.*?)\n\}\n", re.S)
 
 pytestmark = pytest.mark.skipif(
@@ -29,9 +31,9 @@ pytestmark = pytest.mark.skipif(
 
 def _run_js(body: str) -> str:
     """抽出 quotaHeadSum 跑一遍（带最小 DOM 无关的桩）。"""
-    text = INDEX.read_text(encoding="utf-8")
+    text = BENEFITS_JS.read_text(encoding="utf-8")
     match = FUNC_RE.search(text)
-    assert match, "index.html 里找不到 quotaHeadSum（被改名/挪走了？）"
+    assert match, "benefits.js 里找不到 quotaHeadSum（被改名/挪走了？）"
     stub = """
 globalThis.esc = s => String(s);
 globalThis.fmtNum = n => (Math.round(n * 100) / 100).toLocaleString('en-US');
@@ -157,7 +159,7 @@ def test_the_render_path_uses_the_helper_not_a_bare_find():
     这条盯的是「改了个函数但没接上去」——helper 写得再对，渲染处若仍留着
     ``.find(it => ...)``，界面就还是老样子（这个 bug 的本质就是渲染处的取值）。
     """
-    text = INDEX.read_text(encoding="utf-8")
+    text = BENEFITS_JS.read_text(encoding="utf-8")
     assert "quotaHeadSum(q)" in text, "渲染处没有调用 quotaHeadSum"
     # 只扫渲染那段（quota-list 的赋值处），不能全文件扫：helper 自己内部
     # 就写着 ``const head = usable[0]``（未声明可合计时的兜底），全局扫会误报

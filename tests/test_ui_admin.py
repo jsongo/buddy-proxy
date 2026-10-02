@@ -143,14 +143,40 @@ def twin_env(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # /ui 页面与只读 API
 # ---------------------------------------------------------------------------
+def _ui_source(client) -> str:
+    """页面 HTML + 全部静态 JS 的合并文本。
+
+    前端 JS 从 index.html 拆到 static/*.js 后（2026-10-03 拆分），原先
+    「往 /ui 页面 HTML 里 grep 前端函数」的测试要跟到新文件；这个 helper
+    把两处拼起来，保持测试语义不变。
+    """
+    text = client.get("/ui").text
+    for name in ("benefits.js", "charts.js", "app.js"):
+        r = client.get(f"/ui/{name}")
+        assert r.status_code == 200, f"{name} 未正常 serve: {r.status_code}"
+        text += "\n" + r.text
+    return text
+
+
 def test_ui_page_served(env):
     r = env.client.get("/ui")
     assert r.status_code == 200
     assert "Buddy Proxy 控制台" in r.text
     assert r.headers["content-type"].startswith("text/html")
-    # 告警条幅的 DOM 与渲染函数都在页面里（数据到了才 .show）
+    # 告警条幅的 DOM 在页面里、渲染函数在静态 JS 里（数据到了才 .show）
     assert 'id="alertbar"' in r.text
-    assert "function renderAlert" in r.text
+    assert "function renderAlert" in _ui_source(env.client)
+
+
+def test_ui_static_files_served(env):
+    """拆分后的静态 JS/CSS 都走白名单路由，且 no-cache。"""
+    for name, ctype in (("app.js", "text/javascript"), ("benefits.js", "text/javascript"),
+                        ("charts.js", "text/javascript"), ("style.css", "text/css")):
+        r = env.client.get(f"/ui/{name}")
+        assert r.status_code == 200, name
+        assert r.headers["content-type"].startswith(ctype)
+        assert r.headers.get("cache-control") == "no-cache"
+    assert env.client.get("/ui/nope.txt").status_code == 404
 
 
 def test_root_redirects_to_ui(env):
@@ -596,7 +622,7 @@ def test_order_page_renders_from_config_not_channel_catalog(env):
     这是「页面里全是重复的」那次的根因：卡片来自 `MODELS.groups` 的每个 通道+模型
     组合，同名模型在 N 个通道就被画 N 张。这条把渲染源钉在 `/ui/api/model-order`。
     """
-    ui = env.client.get("/ui").text
+    ui = _ui_source(env.client)
     pstart = ui.index("function pageRows()")
     pbody = ui[pstart:ui.index("\n}", pstart)]
     assert "orderRows()" in pbody, "卡片应来自 model_order 的键"
@@ -831,7 +857,7 @@ def test_order_provider_list_not_from_MODELS(env):
     MODELS 只在「模型」标签页加载过才有值；若从这里取通道列表，直接进顺序页
     时下拉框会是空的（下拉即不可用），等于「添加时不能选」。这条把它钉死。
     """
-    ui = env.client.get("/ui").text
+    ui = _ui_source(env.client)
     start = ui.index("async function ensureOrderOptions(")
     end = ui.index("\n}", start)
     body = ui[start:end]
@@ -850,7 +876,7 @@ def test_model_table_has_no_inline_order_entry(env):
     配置项一多，「顺序·3」这种短标签也读不出是什么）。编辑入口统一到
     「模型顺序」页签，这里只留一个徽标说明「已配几档」。
     """
-    ui = env.client.get("/ui").text
+    ui = _ui_source(env.client)
     assert "openOrderModal" not in ui, "行内顺序弹窗应已删除"
     assert "async function saveOrder(" not in ui, "弹窗的保存函数应已删除"
     # 徽标保留：模型表仍要知道这个模型配了几档、几档在冷却
@@ -866,7 +892,7 @@ def test_order_page_renders_pending_draft_cards(env):
     `m["order"]` 存在的、**已配置**的模型）渲染，未曾保存过的模型卡片永远建不
     出来，看起来就是点了没反应。新增的 `pageRows()` 把草稿里的键并进渲染源。
     """
-    ui = env.client.get("/ui").text
+    ui = _ui_source(env.client)
     # 页面渲染走 pageRows，而不是只认已配置的 orderedModels
     start = ui.index("function renderOrderPage()")
     body = ui[start:ui.index("\n}", start)]
@@ -890,7 +916,7 @@ def test_order_save_wont_post_empty_targets_when_dom_desynced(env):
     就被当成用户输入 POST 出去，服务端配置**静默抹平**——实测
     qoder/qwen3.8-max 的 `["qoder/qwen3.8-max","trae/qwen3.8-max"]` 就这样没了。
     """
-    ui = env.client.get("/ui").text
+    ui = _ui_source(env.client)
     start = ui.index("function orderPageIntendedItems(")
     body = ui[start:ui.index("\n}", start)]
     # 折叠态：只有草稿存在才认它（那是这轮编辑的结果），没有草稿就是不可信
