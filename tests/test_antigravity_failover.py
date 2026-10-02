@@ -75,10 +75,10 @@ def two_accounts():
 
     upstream = _Upstream()
     provider = AntigravityProvider()
-    provider._client = httpx.AsyncClient(
-        transport=httpx.MockTransport(upstream),
-        timeout=provider._TIMEOUT if hasattr(provider, "_TIMEOUT") else 5.0,
-    )
+    import buddy_proxy.antigravity.provider as prov
+
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(upstream),
+                                         timeout=prov._TIMEOUT)
     return provider, upstream
 
 
@@ -279,6 +279,22 @@ def test_stream_gate_eof_switches_without_cooldown(two_accounts, monkeypatch):
     assert "pong" in _stream_text(sr)
     assert failover.cooldown_left("u@x.com") == (0.0, "")
     assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+
+
+def test_stream_gate_buffer_cap_committed(two_accounts, monkeypatch):
+    """闸门缓冲超过上限：按 committed 透传放行，不无界攒内存也不冷却。"""
+    import buddy_proxy.antigravity.provider as prov
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    keepalive = b": keepalive\n\n" * (prov._GATE_BUFFER_MAX_LINES + 10)
+    up.plan["tok-u@x.com"] = (200, keepalive + _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    sr = _run(provider, stream=True)
+    assert sr.status_code == 200
+    assert failover.cooldown_left("u@x.com") == (0.0, "")  # 放行不冷却
+    assert up.calls == ["tok-u@x.com"]  # 不换号
 
 
 # ---------------------------------------------------------------------------

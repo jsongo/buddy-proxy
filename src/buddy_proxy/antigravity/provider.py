@@ -52,6 +52,8 @@ ENDPOINTS = (
     "https://cloudcode-pa.googleapis.com",
 )
 _TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=15.0)
+#: 流式首事件闸门的缓冲行上限（防异常上游无界攒内存，见 _gate_first_event）。
+_GATE_BUFFER_MAX_LINES = 256
 
 #: 模型表放 JSON（models.json，随包分发）：实测要增删模型改文件就行。
 _MODELS_JSON = Path(__file__).with_name("models.json")
@@ -304,6 +306,7 @@ class AntigravityProvider(BaseProvider):
 
             payload = gate.payload
             if payload is None:
+                await gate.resp.aclose()
                 raise HTTPException(
                     status_code=502,
                     detail={"error": {"message": "antigravity upstream returned non-JSON",
@@ -353,6 +356,10 @@ class AntigravityProvider(BaseProvider):
         try:
             async for line in resp.aiter_lines():
                 buffered.append(line)
+                if len(buffered) > _GATE_BUFFER_MAX_LINES:
+                    # 上游一直发非语义事件（心跳/注释刷屏）：按已到达透传放行，
+                    # 别让每个请求无界攒内存；定性交给转换器
+                    return _Gate(resp=resp, committed=True, buffered=buffered)
                 stripped = line.strip()
                 if not stripped.startswith("data:"):
                     continue
