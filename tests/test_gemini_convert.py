@@ -295,6 +295,11 @@ def test_resume_onboarding_uses_saved_token(tmp_path, monkeypatch):
     from buddy_proxy.gemini import login as gm_login
 
     monkeypatch.setenv("GEMINI_OAUTH_JSON", str(tmp_path / "g.json"))
+    # 这条测试曾是真实污染源：resume_onboarding 会把凭证回写 ~/.gemini，
+    # 没有 GEMINI_CLI_HOME 隔离时写的是真目录（假邮箱 a@b.c 进了
+    # google_accounts.json）。conftest 现已全局隔离，这里显式再写一道
+    # 是给读者留痕——任何绕过 conftest 直接跑本文件的方式也安全。
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path / "cli-home"))
     creds.save_cred({"access_token": "tok", "refresh_token": "r",
                      "expiry": "2099-01-01T00:00:00+00:00", "email": "a@b.c"})
 
