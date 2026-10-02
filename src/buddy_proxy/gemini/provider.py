@@ -31,7 +31,6 @@ from ..providers.base import BaseProvider
 from .convert import (
     chat_to_gemini_request,
     gemini_response_to_chat,
-    iter_gemini_sse_payloads,
 )
 from .credentials import AuthError, ensure_access_token, has_cred, load_cred
 

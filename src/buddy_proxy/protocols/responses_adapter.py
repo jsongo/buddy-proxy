@@ -12,8 +12,7 @@ from __future__ import annotations
 import json
 import os
 import time
-import uuid
-from typing import Any, Iterator
+from typing import Any
 
 
 def _rand_id(prefix: str = "resp_") -> str:

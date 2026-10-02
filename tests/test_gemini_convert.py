@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from buddy_proxy.gemini.convert import (
     chat_to_gemini_request,

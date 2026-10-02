@@ -41,7 +41,7 @@ import os
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Sequence
+from typing import Any, AsyncIterator, Sequence
 
 import httpx
 from fastapi import HTTPException

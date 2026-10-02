@@ -21,7 +21,6 @@ import asyncio
 import concurrent.futures
 import json
 import logging
-import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -134,7 +133,7 @@ def _iso_to_epoch(value: Any) -> float:
     if not raw:
         return 0.0
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
     except ValueError:

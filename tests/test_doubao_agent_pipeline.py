@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from buddy_proxy.doubao.cdp_client import CDPDoubaoClient
 from buddy_proxy.doubao.provider import _DOUBAO_CHAT_MODELS

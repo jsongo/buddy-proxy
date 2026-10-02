@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import stat
-from pathlib import Path
 
 import httpx
 import pytest

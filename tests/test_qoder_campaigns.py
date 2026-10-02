@@ -18,7 +18,6 @@ import json
 from buddy_proxy.qoder.campaigns import (
     CLAIM_ACTION,
     Campaign,
-    CampaignClient,
     ClaimResult,
     campaign_headers,
 )

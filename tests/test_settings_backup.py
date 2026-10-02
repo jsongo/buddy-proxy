@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import stat
 
@@ -128,21 +127,6 @@ def test_backup_cleans_up_its_own_partial_temp_file(monkeypatch):
         settings_mod._backup_settings(settings_mod.settings_path(),
                                       {"default_provider": "codebuddy"})
     assert not (settings_mod.settings_path().parent / ("." + tmp_name)).exists()
-
-
-def test_backup_does_not_replace_a_readable_settings_file_on_bad_json():
-    """设置文件损坏（读不出来）时按「无上一版」处理，不拿空 dict 覆盖备份。
-
-    否则一次 json 解析失败就会把好备份抹成 ``{}``，护栏反而成了数据丢失源。
-    """
-    settings_mod.save_settings({"default_provider": "codebuddy"})
-    settings_mod.save_settings({"default_model": "codebuddy/auto"})
-    good = _bak().read_text(encoding="utf-8")
-
-    settings_mod.settings_path().write_text("{ not json", encoding="utf-8")
-    settings_mod.save_settings({"default_provider": "trae"})
-
-    assert _bak().read_text(encoding="utf-8") == good, "坏 JSON 不该污染已有的好备份"
 
 
 def test_backup_does_not_replace_a_readable_settings_file_on_bad_json():

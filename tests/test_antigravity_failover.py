@@ -209,7 +209,6 @@ def test_no_available_accounts_fast_429(two_accounts):
 
 
 def test_account_meta_records_selected_account(two_accounts, monkeypatch):
-    from buddy_proxy.antigravity import failover
     from buddy_proxy.core.metrics import ACCOUNT_META
 
     provider, up = two_accounts

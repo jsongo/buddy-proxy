@@ -155,7 +155,7 @@ def test_keyring_service_account_names():
 
 def test_adopt_cli_login(tmp_path, monkeypatch):
     from buddy_proxy.antigravity import cli_bridge, credentials as creds
-    from buddy_proxy.antigravity import cli_bridge, login as ag_login
+    from buddy_proxy.antigravity import login as ag_login
 
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
     monkeypatch.setattr(cli_bridge, "load_cli_creds", lambda: _keyring_payload())
@@ -170,7 +170,7 @@ def test_adopt_cli_login(tmp_path, monkeypatch):
 
 def test_adopt_cli_login_refreshes_expired(tmp_path, monkeypatch):
     from buddy_proxy.antigravity import cli_bridge, credentials as creds
-    from buddy_proxy.antigravity import cli_bridge, login as ag_login
+    from buddy_proxy.antigravity import login as ag_login
 
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
     monkeypatch.setattr(cli_bridge, "load_cli_creds",
@@ -187,7 +187,7 @@ def test_adopt_cli_login_refreshes_expired(tmp_path, monkeypatch):
 def test_adopt_cli_login_onboard_fail_keeps_token(tmp_path, monkeypatch):
     """导入时 onboarding 失败：token 也要先落盘（agy 的授权不白费）。"""
     from buddy_proxy.antigravity import cli_bridge, credentials as creds
-    from buddy_proxy.antigravity import cli_bridge, login as ag_login
+    from buddy_proxy.antigravity import login as ag_login
 
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
     monkeypatch.setattr(cli_bridge, "load_cli_creds", lambda: _keyring_payload())
@@ -216,7 +216,7 @@ def test_adopt_cli_login_no_creds(tmp_path, monkeypatch):
 def test_login_entry_uses_agy_creds_on_enter(tmp_path, monkeypatch, capsys):
     import buddy_proxy.auth.login as auth_login
     from buddy_proxy.antigravity import cli_bridge, credentials as creds
-    from buddy_proxy.antigravity import cli_bridge, login as ag_login
+    from buddy_proxy.antigravity import login as ag_login
 
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
     monkeypatch.setattr(cli_bridge, "load_cli_creds", lambda: _keyring_payload())
@@ -250,7 +250,7 @@ def test_login_entry_no_declines_browser_flow(tmp_path, monkeypatch, capsys):
 def test_login_entry_shows_buddy_account_when_switching(tmp_path, monkeypatch, capsys):
     import buddy_proxy.auth.login as auth_login
     from buddy_proxy.antigravity import cli_bridge, credentials as creds
-    from buddy_proxy.antigravity import cli_bridge, login as ag_login
+    from buddy_proxy.antigravity import login as ag_login
 
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
     monkeypatch.setattr(cli_bridge, "load_cli_creds", lambda: _keyring_payload())  # agy@x.com
