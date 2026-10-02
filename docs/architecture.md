@@ -15,13 +15,15 @@ src/buddy_proxy/
   core/                  # state, settings, paths, logging_setup, metrics,
                          #   credit_estimate, desensitize, checkin, errors
   protocols/             # anthropic_adapter, responses_adapter,
-                         #   responses_projection, dsml_parser
+                         #   responses_projection, dsml_parser (解析层),
+                         #   dsml_scanner (底层扫描原语)
   web/                   # routes, ui, model_list + models_config.json + static/
   providers/             # base.py (BaseProvider), zcode.py
   auth/                  # login, trae_work_login, trae_work_login_server
   codebuddy_provider/    # default provider pkg; client.py = CodeBuddy HTTP client
   trae/                  # trae domain (credentials, transport, sse, pat, ...)
-  doubao/                # doubao domain (provider.py, cdp_client)
+  qoder/                 # qoder domain (provider + convert/errors/quota helpers)
+  doubao/                # doubao domain (provider, cdp_client, payloads, ws)
 ```
 
 `core.state` imports `CodeBuddyClient` / `BaseProvider` only under
