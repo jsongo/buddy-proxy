@@ -1,10 +1,12 @@
 """antigravity 登录 / onboarding / 凭据存储单元测试。
 
-ANTIGRAVITY_OAUTH_JSON 由 conftest autouse 指到 tmp，不碰真实凭据。
+ANTIGRAVITY_STATE_DIR（多账号目录）与 ANTIGRAVITY_OAUTH_JSON（旧单账号
+迁移源）都由 conftest autouse 指到 tmp，不碰真实凭据。
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import urllib.error
@@ -26,44 +28,149 @@ def _cred(**over):
 
 
 # ---------------------------------------------------------------------------
-# credentials：落盘 / 刷新
+# credentials：多账号存储（index.json + 每账号文件 + 迁移）
 # ---------------------------------------------------------------------------
 
-def test_cred_save_load_roundtrip(tmp_path, monkeypatch):
+def test_account_cred_roundtrip(tmp_path, monkeypatch):
     from buddy_proxy.antigravity import credentials as creds
 
-    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
-    path = creds.save_cred(_cred())
-    assert path.name == "ag.json"
+    ref = creds.save_account_cred(_cred())
+    assert ref.id == "u@x.com" and ref.priority == 0
+    path = creds.account_cred_path(ref.id)
+    assert path.name == "u@x.com.json"
     assert path.stat().st_mode & 0o777 == 0o600
-    assert creds.load_cred()["refresh_token"] == "rt"
-    assert creds.has_cred()
+    assert creds.load_account_cred(ref.id)["refresh_token"] == "rt"
+    assert creds.has_accounts()
+    assert [a.id for a in creds.list_accounts()] == ["u@x.com"]
 
-    (tmp_path / "ag.json").write_text("{bad")
-    assert creds.load_cred() is None  # 损坏 → None
-    (tmp_path / "ag.json").write_text(json.dumps({"access_token": "x"}))
-    assert creds.load_cred() is None  # 缺 refresh_token → None
+    path.write_text("{bad")
+    assert creds.load_account_cred(ref.id) is None  # 损坏 → None
+    path.write_text(json.dumps({"access_token": "x"}))
+    assert creds.load_account_cred(ref.id) is None  # 缺 refresh_token → None
 
 
-def test_refresh_cred_updates_and_saves(tmp_path, monkeypatch):
+def test_legacy_migration_copies_as_first_account(tmp_path, monkeypatch):
     from buddy_proxy.antigravity import credentials as creds
 
-    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
-    creds.save_cred(_cred(expiry="2000-01-01T00:00:00+00:00"))
+    legacy = tmp_path / "antigravity_oauth.json"
+    legacy.write_text(json.dumps({**_cred(), "project_id": "proj-old"}))
+
+    accounts = creds.list_accounts()  # 首次访问触发迁移
+    assert [a.id for a in accounts] == ["u@x.com"]
+    assert accounts[0].priority == 0
+    cred = creds.load_account_cred("u@x.com")
+    assert cred["project_id"] == "proj-old"
+    assert cred["account_id"] == "u@x.com"
+    assert legacy.exists()  # copy 语义：旧文件保留作备份
+
+
+def test_migration_failure_falls_back_to_logged_out(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    (tmp_path / "antigravity_oauth.json").write_text("{bad")
+    assert creds.list_accounts() == []  # 迁移源损坏 → 视为未登录，不抛
+
+
+def test_save_upsert_overrides_same_email(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_account_cred(_cred())
+    creds.save_account_cred(_cred(access_token="at2", project_id="p1"))
+    accounts = creds.list_accounts()
+    assert len(accounts) == 1 and accounts[0].priority == 0  # 重新登录不改顺位
+    assert creds.load_account_cred("u@x.com")["access_token"] == "at2"
+
+
+def test_save_new_email_appends_with_higher_priority(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_account_cred(_cred())
+    creds.save_account_cred(_cred(email="v@y.com", refresh_token="rt2"))
+    accounts = creds.list_accounts()
+    assert [a.id for a in accounts] == ["u@x.com", "v@y.com"]
+    assert [a.priority for a in accounts] == [0, 1]
+
+
+def test_account_id_falls_back_to_token_hash(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    ref = creds.save_account_cred(_cred(email=""))
+    assert ref.id == "acct-" + hashlib.sha256(b"rt").hexdigest()[:12]
+
+
+def test_max_accounts_cap(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    for i in range(8):
+        creds.save_account_cred(_cred(email=f"u{i}@x.com", refresh_token=f"rt{i}"))
+    with pytest.raises(creds.AuthError, match="上限"):
+        creds.save_account_cred(_cred(email="u9@x.com", refresh_token="rt9"))
+
+
+def test_index_self_heals_when_cred_file_removed(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_account_cred(_cred())
+    creds.account_cred_path("u@x.com").unlink()
+    assert creds.list_accounts() == []  # 删文件 = 退出该账号
+
+
+def test_delete_account(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_account_cred(_cred())
+    assert creds.delete_account("u@x.com") is True
+    assert creds.list_accounts() == []
+    assert not creds.account_cred_path("u@x.com").exists()
+    assert creds.delete_account("u@x.com") is False  # 再删一次 = 没这账号
+
+
+def test_refresh_account_cred_updates_and_saves(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_account_cred(_cred(expiry="2000-01-01T00:00:00+00:00"))
     monkeypatch.setattr(creds, "_token_request", lambda data, timeout=30.0: {
         "access_token": "fresh", "expires_in": 3600, "scope": "s2"})
 
-    cred = creds.refresh_cred(creds.load_cred())
+    cred = creds.refresh_account_cred(creds.load_account_cred("u@x.com"))
     assert cred["access_token"] == "fresh"
     assert cred["scope"] == "s2"
-    assert creds.load_cred()["access_token"] == "fresh"  # 已落盘
+    assert creds.load_account_cred("u@x.com")["access_token"] == "fresh"  # 已落盘
+    assert len(creds.list_accounts()) == 1  # 刷新走 upsert，不产生新条目
 
     def _reject(data, timeout=30.0):
         raise creds.AuthError("Google token 接口拒绝: invalid_grant")
 
     monkeypatch.setattr(creds, "_token_request", _reject)
     with pytest.raises(creds.AuthError, match="invalid_grant"):
-        creds.refresh_cred(cred)
+        creds.refresh_account_cred(cred)
+
+
+def test_ensure_account_token_returns_paired_snapshot(tmp_path, monkeypatch):
+    """token 与 cred 快照同源：刷新后 project_id 从同一份 cred 拿（防串号）。"""
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_account_cred(_cred(expiry="2000-01-01T00:00:00+00:00", project_id="proj-1"))
+    monkeypatch.setattr(creds, "_token_request", lambda data, timeout=30.0: {
+        "access_token": "fresh", "expires_in": 3600})
+
+    token, snap = creds.ensure_account_token("u@x.com")
+    assert token == "fresh"
+    assert snap["project_id"] == "proj-1"
+    assert creds.load_account_cred("u@x.com")["access_token"] == "fresh"
+
+    # 有效期内直接用，不再请求 token 接口
+    token, _ = creds.ensure_account_token("u@x.com")
+    assert token == "fresh"
+
+    # force_refresh：token 被上游拒后的强刷路径
+    monkeypatch.setattr(creds, "_token_request", lambda data, timeout=30.0: {
+        "access_token": "fresh2", "expires_in": 3600})
+    token, _ = creds.ensure_account_token("u@x.com", force_refresh=True)
+    assert token == "fresh2"
+
+    with pytest.raises(creds.AuthError, match="不存在"):
+        creds.ensure_account_token("ghost@x.com")
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +234,9 @@ def test_exchange_success(tmp_path, monkeypatch):
 
     cred = ag_login._exchange("code", "uri", "ver")
     assert cred["project_id"] == "proj-x"
-    saved = json.loads((tmp_path / "ag.json").read_text())
+    saved = creds.load_cred()
     assert saved["project_id"] == "proj-x"
+    assert len(creds.list_accounts()) == 1  # 落在多账号目录，不再是裸单文件
 
 
 def test_resume_onboarding(tmp_path, monkeypatch):

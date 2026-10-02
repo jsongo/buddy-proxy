@@ -8,8 +8,9 @@
   resume_onboarding 挂上「回写 ~/.gemini」后，跑一轮全量测试就把假登录态
   （token "tok"、邮箱 a@b.c）写进了真实 ~/.gemini，`buddy login gemini`
   差点把假 token 当真用。
-- `ANTIGRAVITY_OAUTH_JSON`（antigravity 凭据文件）同理：登录/onboarding
-  测试都会 save_cred 落盘。
+- antigravity 多账号状态（`ANTIGRAVITY_STATE_DIR`，index.json + 每账号
+  cred 文件都在里面）与历史单账号文件（`ANTIGRAVITY_OAUTH_JSON`，迁移源）
+  同理：登录/onboarding/quota 测试都会落盘。
 
 个别测试想自定路径时在测试体内再 setenv 覆盖即可（autouse fixture 先跑，
 测试体里的 monkeypatch.setenv 后生效）。
@@ -24,4 +25,5 @@ import pytest
 def _isolate_gemini_state_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("GEMINI_OAUTH_JSON", str(tmp_path / "gemini_oauth.json"))
     monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path / "gemini-cli-home"))
+    monkeypatch.setenv("ANTIGRAVITY_STATE_DIR", str(tmp_path / "antigravity"))
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "antigravity_oauth.json"))
