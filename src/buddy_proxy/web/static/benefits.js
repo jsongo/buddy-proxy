@@ -354,10 +354,32 @@ async function refreshTraepatTokens(btn) {
   if (btn) { btn.disabled = false; btn.textContent = old || '补签 Token'; }
 }
 
-// ---- ANTIGRAVITY 面板（trae PAT 同款布局：额度按账号左右两栏 + 账号状态一行）----
+// ---- ANTIGRAVITY 面板（trae PAT 同款布局：每账号一块，标题=邮箱、副标题=状态，
+//      下面是它自己的各组进度条）----
 // 数据两路：额度走 /ui/api/benefits 里 antigravity 条目（label 带「AG #N · 」前缀，
-// 组名渲染后替换成账号邮箱），账号状态走 /ui/api/antigravity/accounts（纯本地不触网，
-// 压成一行简报）。未登录时整个面板隐藏。
+// 组名/副标题由账号数据回填），账号状态走 /ui/api/antigravity/accounts（纯本地不触
+// 网）。未登录时整个面板隐藏。
+let AG_ACCTS = null;  // 最近一次 accounts 快照；render 先用它，避免每 30s 闪回「AG #N」
+
+function _ag_acct_for(idx) {
+  // idx=null（单账号组名无 AG #N 前缀）只在恰有一个账号时能对上
+  if (!AG_ACCTS) return null;
+  if (idx == null) return AG_ACCTS.length === 1 ? AG_ACCTS[0] : null;
+  return AG_ACCTS.find(a => a.index === idx) || null;
+}
+
+function _ag_sub_html(a) {
+  // 副标题（进度条上面那行 muted 小字）：缺 project / token 剩余 / 冷却
+  if (!a) return '';
+  const bits = [];
+  if (!a.project_id) bits.push('缺 project');
+  if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
+  for (const c of a.cooling || []) bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${c.minutes_left}min`);
+  return bits.length
+    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-ag-sub>${esc(bits.join(' · '))}</div>`
+    : '';
+}
+
 function renderAntigravityPanel() {
   const panel = document.getElementById('antigravity-panel');
   if (!panel) return;
@@ -365,8 +387,7 @@ function renderAntigravityPanel() {
   if (!ag) { panel.innerHTML = ''; return; }
 
   // 按「AG #N」分组（label 形如「AG #1 · Gemini 组（…）」），与 trae 的 PAT #N 同款切法；
-  // 单账号时 label 无前缀，整体落进一个组。组名最终显示为账号邮箱（下方 accounts 回填）。
-  // query_failed 说明条不进分组，横贯全宽展示。
+  // 单账号时 label 无前缀，整体落进一个组。query_failed 说明条不进分组，横贯全宽展示。
   const groups = new Map();
   const notices = [];
   for (const it of ag.quota.items || []) {
@@ -377,13 +398,17 @@ function renderAntigravityPanel() {
     if (!groups.has(grp)) groups.set(grp, []);
     groups.get(grp).push(Object.assign({}, it, {label: sub}));
   }
-  // 组名先按「AG #N」渲染并挂 data-ag-idx 占位——额度接口（benefits）不含邮箱，
-  // 等 loadAntigravityAccounts 拿到账号后再把组名替换成邮箱（分组与账号直接对上）。
+  // 组名=邮箱、副标题=账号状态：额度接口（benefits）不含邮箱，先挂 data-ag-idx
+  // 占位；已有 AG_ACCTS 快照则同步直接渲染（30s 轮询重建面板不闪内部代号），
+  // 没有就等 loadAntigravityAccounts 回填。
   const quotaHtml = [...groups.entries()].map(([grp, its]) => {
     const m = grp.match(/^AG #(\d+)$/);
+    const idx = m ? Number(m[1]) : null;
+    const acct = _ag_acct_for(idx);
     return `
     <div class="pat-pkg">
-      <div class="pat-pkg-name"${m ? ` data-ag-idx="${m[1]}"` : ''}>${esc(grp)}</div>
+      <div class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</div>
+      ${_ag_sub_html(acct)}
       ${its.map(quotaItemHtml).join('')}
     </div>`;
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
@@ -399,43 +424,35 @@ function renderAntigravityPanel() {
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       <div class="pat-quota-grid">${quotaHtml}</div>
-      <div class="pat-col-head" style="margin-top:10px"><span>账号状态</span></div>
-      <div id="antigravity-accounts"><div class="empty" style="padding:8px 0">账号状态加载中…</div></div>
     </div>`;
   loadAntigravityAccounts();
 }
 
 async function loadAntigravityAccounts() {
-  const box = document.getElementById('antigravity-accounts');
-  if (!box) return;
   try {
     const r = await api('/ui/api/antigravity/accounts');
-    if (!r.enabled) { box.innerHTML = '<div class="empty" style="padding:8px 0">未登录任何账号</div>'; return; }
+    if (!r.enabled) { AG_ACCTS = []; return; }
     const accts = r.accounts || [];
-    // 邮箱上牌：额度分组名 AG #N 换成对应账号邮箱。单账号时组名没有 AG #N
-    // 前缀（后端 label 不加），整组只有一个名字，直接替换。
-    if (accts.length === 1 && !document.querySelector('#antigravity-panel [data-ag-idx]')) {
-      const name = document.querySelector('#antigravity-panel .pat-pkg-name');
-      if (name) name.textContent = accts[0].email;
-    } else {
-      for (const a of accts) {
-        const el = document.querySelector(`#antigravity-panel [data-ag-idx="${a.index}"]`);
-        if (el) el.textContent = a.email;
+    // 数据没变就不动 DOM——renderAntigravityPanel 已用同一份快照渲染过
+    if (JSON.stringify(accts) === JSON.stringify(AG_ACCTS)) return;
+    AG_ACCTS = accts;
+    // 就地回填：组名换成邮箱、组名后插副标题。多账号按 data-ag-idx 对应；
+    // 单账号组名没有前缀（后端 label 不加），唯一 .pat-pkg-name 直接替换。
+    for (const a of accts) {
+      const el = (accts.length === 1)
+        ? document.querySelector('#antigravity-panel .pat-pkg-name')
+        : document.querySelector(`#antigravity-panel [data-ag-idx="${a.index}"]`);
+      if (!el) continue;
+      el.textContent = a.email;
+      // 副标题总是重写：状态变了（token 走低/冷却结束消失）要跟上，不是只防重复插
+      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-ag-sub')) {
+        el.nextElementSibling.remove();
       }
+      const sub = _ag_sub_html(a);
+      if (sub) el.insertAdjacentHTML('afterend', sub);
     }
-    // 账号状态压成一行：邮箱已在各组名上，这里只剩每号的 token/冷却简报
-    const line = accts.map((a) => {
-      const bits = [];
-      if (!a.project_id) bits.push('缺 project');
-      if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
-      for (const c of a.cooling || []) bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${c.minutes_left}min`);
-      return `#${a.index} ${bits.join(' · ')}`.trim();
-    }).join(' ｜ ');
-    box.innerHTML = line
-      ? `<div class="pat-acct"><span class="muted">${esc(line)}</span></div>`
-      : '<div class="empty" style="padding:8px 0">无账号</div>';
   } catch (e) {
-    box.innerHTML = `<div class="empty" style="padding:8px 0">账号状态加载失败：${esc(e.message)}</div>`;
+    // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
   }
 }
 
