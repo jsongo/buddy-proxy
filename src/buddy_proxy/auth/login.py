@@ -8,6 +8,7 @@
     python -m buddy_proxy.auth.login zcode               # 检查并打印 zcode 凭据配置指引（API key，无交互登录）
     python -m buddy_proxy.auth.login doubao              # 打印豆包（CDP）说明
     python -m buddy_proxy.auth.login mimo                # 小米账号浏览器登录（同 qoder 的 device flow）
+    python -m buddy_proxy.auth.login gemini              # Google OAuth（Gemini 免费通道，与 ~/.gemini 登录态互通）
 
 可选参数：
     --no-browser    codebuddy 登录不自动打开浏览器，只打印授权链接
@@ -34,9 +35,11 @@ PROVIDER_ALIASES: dict[str, str] = {
     "qder": "qoder",
     "qodercn": "qoder",
     "qoder-cn": "qoder",
+    # 通道 id 是 gemini-cli（/v1/models 前缀），登录命令两写等价。
+    "gemini-cli": "gemini",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder", "gemini")
 
 
 def _login_codebuddy(open_browser: bool = True) -> int:
@@ -394,6 +397,100 @@ def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
     return 0
 
 
+def _ask_default_yes(question: str) -> bool:
+    """问一句，默认 yes（直接回车、EOF、非交互终端都算 yes）。"""
+    if not sys.stdin.isatty():
+        print(f"{question}（非交互终端，默认是）")
+        return True
+    try:
+        answer = input(question).strip().lower()
+    except EOFError:
+        return True
+    except KeyboardInterrupt:
+        print()
+        return False
+    return answer in ("", "y", "yes")
+
+
+def _print_gemini_ready(cred: dict) -> None:
+    print(f"[OK] gemini 登录成功: {cred.get('email') or '(未知邮箱)'}")
+    print(f"     tier: {cred.get('tier')}  project: {cred.get('project_id')}")
+    print("     凭据与本机 gemini CLI（~/.gemini）已互通，两边任一登录即可互用。")
+    print("     启动代理时加 --gemini（或 GEMINI_ENABLED=1）即可启用该通道。")
+    print("     若网关正在运行，需 `buddy restart` 才会加载新凭据。")
+
+
+def _login_gemini(open_browser: bool = True, **_kwargs) -> int:
+    """gemini 登录：Google OAuth（PKCE + 本地回调），免费 Code Assist 通道。
+
+    流程与 gemini CLI 的 authWithWeb 一致：本地随机端口收回调 → code 换
+    token → loadCodeAssist/onboardUser 拿托管项目 → 凭据落盘
+    ``~/.buddy-proxy/gemini_oauth.json``。
+
+    与本机 Gemini CLI 互通：两边用同一个 OAuth client，登录结果双向同步——
+    进入时先读 ``~/.gemini/oauth_creds.json``，有可用登录态就问用户是否
+    直接采用（默认 yes，省一次浏览器授权）；登录成功后也会把凭证按 CLI
+    的格式写回 ``~/.gemini``。
+
+    --no-browser 供远程 SSH：链接在本地浏览器打开后，把跳转的完整 URL
+    粘回终端（也支持浏览器能回跳本机时直接等回调）。
+
+    中间态（token 已保存、onboarding 没完成）不重开浏览器：直接重试
+    onboarding——OAuth 授权已经成功过，再点一次纯浪费。
+    """
+    from buddy_proxy.gemini import cli_bridge
+    from buddy_proxy.gemini.credentials import load_cred
+    from buddy_proxy.gemini.login import LoginError, adopt_cli_login, login_interactive, resume_onboarding
+
+    # 1) 本机 Gemini CLI 已有登录态 → 问一声，默认直接用（省一次浏览器授权）
+    cli_creds = cli_bridge.load_cli_creds()
+    if cli_creds is not None:
+        usable, note = cli_bridge.cli_creds_usable(cli_creds)
+        if usable:
+            who = cli_bridge.cli_cached_email() or "未知账号"
+            print(f"[Gemini] 检测到本机 Gemini CLI 已有登录态（{who}，{note}）。")
+            if _ask_default_yes("         直接使用它吗？（跳过浏览器授权，Y/n）"):
+                try:
+                    cred = adopt_cli_login()
+                except LoginError as exc:
+                    print(f"\n[X] 采用 Gemini CLI 登录态失败: {exc}")
+                    return 1
+                _print_gemini_ready(cred)
+                return 0
+        else:
+            print(f"[Gemini] 本机 Gemini CLI 登录态不可用（{note}），改走浏览器登录。")
+
+    cred = load_cred()
+    if cred:
+        if cred.get("project_id"):
+            print("[OK] gemini 已有登录态；重新登录会覆盖（换号/刷新授权请继续）。")
+            print(f"     当前账号: {cred.get('email') or '(未知)'}  project: {cred.get('project_id')}")
+        else:
+            # 上次 OAuth 成功但 onboarding 没走完：token 还在，先试免浏览器续跑
+            print("[Gemini] 检测到已保存的 token 但缺 project（上次 onboarding 未完成），")
+            print("         先尝试直接续跑 onboarding（不需要再点浏览器授权）…")
+            try:
+                cred = resume_onboarding()
+            except LoginError as exc:
+                print(f"[Gemini] 续跑失败: {exc}")
+                print("         如已修好账号问题仍失败，可删掉凭据文件后重新走完整登录：")
+                print(f"         rm ~/.buddy-proxy/gemini_oauth.json && buddy login gemini")
+                return 1
+            _print_gemini_ready(cred)
+            return 0
+
+    try:
+        cred = login_interactive(open_browser=open_browser)
+    except KeyboardInterrupt:
+        print("\n[Gemini] 已取消。")
+        return 1
+    except LoginError as exc:
+        print(f"\n[X] gemini 登录失败: {exc}")
+        return 1
+    _print_gemini_ready(cred)
+    return 0
+
+
 _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
@@ -401,6 +498,7 @@ _DISPATCH = {
     "doubao": _login_doubao,
     "mimo": _login_mimo,
     "qoder": _login_qoder,
+    "gemini": _login_gemini,
 }
 
 
@@ -410,9 +508,9 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder)，默认 codebuddy")
+                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder) / gemini，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
-                        help="codebuddy/trae/mimo/qoder 登录不自动打开浏览器，只打印链接")
+                        help="codebuddy/trae/mimo/qoder/gemini 登录不自动打开浏览器，只打印链接")
     args = parser.parse_args()
 
     provider = PROVIDER_ALIASES.get(args.provider.strip().lower(), args.provider.strip().lower())

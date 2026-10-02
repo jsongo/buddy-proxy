@@ -17,7 +17,7 @@
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）与 **Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）与 **Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通），统一经 `/v1/models` 列出、按模型名路由
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
 ---
@@ -209,9 +209,9 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 
 ## 模型列表
 
-模型目录由 `src/buddy_proxy/web/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **45 个模型**，分属两个通道；`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
+模型目录由 `src/buddy_proxy/web/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **46 个模型**，分属两个通道；`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
 
-**CodeBuddy 通道**（18 个）——直接用模型名，无前缀：
+**CodeBuddy 通道**（19 个）——直接用模型名，无前缀：
 
 | id | name | credits |
 |---|---|---|
@@ -231,6 +231,7 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
 | `kimi-k2.6` | Kimi-K2.6 | x0.52 |
 | `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | x0.11 |
+| `space-bunny` | Space-Bunny | x0.03 |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
 
@@ -319,8 +320,12 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 - **模型顺序（候选上游换档）** — 独立的**模型顺序**页签，**`model_order` 里配了几个键就显示几张
   卡片**，不多不少。展开后是交互式的候选上游列表：可增删，可**拖拽 ⠿ 或按 ▲▼** 调整顺序。
   请求从上往下按序尝试，某个渠道在**尚未向客户端输出任何内容**就失败时换下一档，并给失败目标打
-  5 分钟冷却标记（反复失败延长至 1 小时），期间自动跳过。已开始流式返回后不再换档（否则上游会
-  重复计费）——因此 CodeBuddy 的流式错误不会触发换档，把它排在末位更实用。键就是**裸模型名**
+  5 分钟冷却标记（反复失败延长至 1 小时），期间自动跳过。**本机 DNS 解析失败是唯一不打标记的
+  例外**：那是你机器的毛病、不是某个上游的毛病，一次抖动会让所有候选同时失败，全打上冷却就等于
+  把一秒的抖动放大成五分钟的整模型不可用、期间连重试的机会都没有（2026-10-02 实际发生过）。
+  这种情况照常换下一档，只是不留标记。已开始流式返回后不再换档（否则上游会
+  重复计费）——因此 CodeBuddy 的流式错误不会触发换档，把它排在末位更实用；这类流内错误至少会
+  在请求日志里记成失败，而不再算作一次 200。键就是**裸模型名**
   （`deepseek-v4.1-flash`）：含义是「指定这个模型时按这个顺序选通道，默认第一个」，一条即覆盖
   所有发布该名字的通道。目标写成 `provider/model`。清空全部目标即恢复历史行为（纯按模型 id
   路由）。持久化到设置文件的 `model_order`。模型行上的**清冷却**按钮可立即重试被冷却的目标，
@@ -483,6 +488,9 @@ providers:
 --zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
+--qoder                   启用 Qoder provider（COSY 签名，千问3.8 / GLM / Kimi）
+--gemini                  启用 Gemini provider（Google OAuth，Code Assist 免费额度；
+                          登录态与本机 gemini CLI 互通）
 --login                   启动时浏览器登录（会打开浏览器并打印登录链接）
 --no-browser              不自动打开浏览器。隐式/后台补认证（如自动打卡轮询）
                           无论如何都不会弹浏览器、也不会打印登录链接，只留一行
@@ -491,7 +499,7 @@ providers:
 --mock-dir DIR            使用录制的响应（测试用）
 ```
 
-环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED`（置 `1` 等同对应开关）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`MIMO_API_KEY` / `MIMO_BASE_URL`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
+环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` / `QODER_ENABLED` / `GEMINI_ENABLED`（置 `1` 等同对应开关）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`MIMO_API_KEY` / `MIMO_BASE_URL`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
 
 Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期间的心跳秒数，默认 45，`0` 关闭——避免像 Ethan 那种 120s 分块超时的客户端中断长生成）、`WB_TRAE_NATIVE_TOOLS`（全部 Trae 请求是否走原生通道，默认 `1`，`0` 回落到旧的提示词教文本协议）、`WB_TRAE_IDE_VERSION_CODE`（Trae 客户端版本头，默认 `20260906`——上游按此头放开各模型能力，某模型突然 4001 时调高它）、`WB_TRAE_NONSTREAM_MAX_S`（非流式聚合上限）、`WB_TRAE_SEMANTIC_TIMEOUT`、`WB_TRAE_TOKEN_KEEPALIVE_S`（后台 Token 刷新间隔）。
 
@@ -738,6 +746,40 @@ Qoder 通道声明了 `supports_checkin`，因此会和 CodeBuddy 一起出现�
   才代表真发了 Credits。
 - **别信顶层 `claimable`** 来判断能不能领：它把 `VIEW_DETAILS` 类活动也算进来了。
   真正的判据是**逐条**看 `actionType == "CLAIM_BENEFIT" && claimStatus == "CLAIMABLE"`。
+
+### 7. Gemini Provider（`gemini/` 子包）
+
+Google **Gemini CLI** 的免费额度（Code Assist individuals），挂 `gemini/` 前缀：
+
+```bash
+uv run buddy login gemini   # Google OAuth（PKCE + 本地回调）
+uv run python -m buddy_proxy --desensitize --gemini
+```
+
+网关走的是与真实 gemini CLI 相同的 `v1internal:generateContent` 端点，请求指纹
+（UA / `x-goog-api-client` / 不发 safetySettings）逐项对齐本机真 CLI 0.33.1——
+对齐表与防封号注意事项见 `src/buddy_proxy/gemini/README.md`。
+
+**登录与本机 gemini CLI 双向互通**（两边是同一个 OAuth client，凭证互认）：
+
+- `buddy login gemini` 成功后，凭证按 CLI 的格式回写 `~/.gemini/`
+  （`oauth_creds.json` 合并写 0600、`settings.json` 补
+  `security.auth.selectedType=oauth-personal`、`google_accounts.json`
+  记 active 邮箱）——写完 `gemini` 命令直接有登录态，不用再登一次。
+- 反过来，`~/.gemini/oauth_creds.json` 已有可用登录态时，`buddy login gemini`
+  会先问「直接使用它吗？」（默认 yes，跳过浏览器授权）；access token 过期
+  会用同一 client 自动刷新，onboarding 自动补跑。
+
+模型（免费层社区实测：flash 系约 250 请求/天、2.5-pro 约 100 请求/天，超了上游
+429 原样透传）：`gemini/gemini-2.5-flash` / `-pro` / `-flash-lite`、
+`gemini-3-pro-preview` / `gemini-3-flash-preview`。模型表在
+`src/buddy_proxy/gemini/models.json`（`verified` 跑通后手工置 true）。
+
+免费层的 prompt 会被 Google 审查用于训练（onboarding 响应里明说）——敏感内容
+别走这条通道。
+
+> `--gemini` 只在想用这条通道时才需要；不加则 provider 不注册，`gemini/...`
+> 模型名落到兜底通道。
 
 ## 免责声明
 

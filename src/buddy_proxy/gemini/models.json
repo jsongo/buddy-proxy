@@ -1,0 +1,40 @@
+{
+  "_comment": "Gemini CLI (Code Assist) 免费通道模型表。id 为上游模型名（/v1/models 里的 gemini/* 前缀后部分）。实测不可用的挪到 disabled 并注明原因。",
+  "models": [
+    {
+      "id": "gemini-2.5-flash",
+      "description": "Gemini 2.5 Flash (Code Assist free tier)",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": false
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "description": "Gemini 2.5 Pro (Code Assist free tier)",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": false
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "description": "Gemini 2.5 Flash Lite (Code Assist free tier)",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": false
+    },
+    {
+      "id": "gemini-3-pro-preview",
+      "description": "Gemini 3 Pro Preview (Code Assist free tier)",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": false
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "description": "Gemini 3 Flash Preview (Code Assist free tier)",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": false
+    }
+  ]
+}

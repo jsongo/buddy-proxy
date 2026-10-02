@@ -148,6 +148,7 @@ def test_alias_table_is_pinned():
     assert set(auth_login.PROVIDER_ALIASES) == {
         "workbuddy", "cb",
         "quoder", "qodor", "qder", "qodercn", "qoder-cn",
+        "gemini-cli",  # 与通道 id 同名：登录命令两写等价
     }
     for alias, target in auth_login.PROVIDER_ALIASES.items():
         assert target in auth_login.KNOWN_PROVIDERS, f"{alias} 指向了未知通道"

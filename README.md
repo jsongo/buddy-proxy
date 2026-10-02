@@ -17,7 +17,7 @@
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Multi-account** — isolated session files for work / personal accounts
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login) and **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi) and **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI); all listed by `/v1/models` and routed by model name
 - **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
 ---
@@ -45,7 +45,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini)
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 ./buddy update             # update to the latest code (git pull -> uv sync -> restart)
 
@@ -90,9 +90,9 @@ The script:
 
 ## Models
 
-The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **45 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
+The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **46 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
 
-**CodeBuddy channel** (18) — bare model ids, no prefix:
+**CodeBuddy channel** (19) — bare model ids, no prefix:
 
 | id | name | credits |
 |---|---|---|
@@ -112,6 +112,7 @@ The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — 
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
 | `kimi-k2.6` | Kimi-K2.6 | x0.52 |
 | `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | x0.11 |
+| `space-bunny` | Space-Bunny | x0.03 |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
 
@@ -166,7 +167,7 @@ Open <http://127.0.0.1:8787/ui> in a browser (or just run `buddy start` / `buddy
 - **Quota** — remaining allowance per provider at a glance: CodeBuddy credit packs (total remaining + per-pack detail), Trae total allowance + entitlement pack expiry, ZCode 5-hour / monthly windows with reset times, MiMo weekly quota + plan validity. CodeBuddy's pack detail is capped at 4 rows for display, but its "total remaining" figures are always accumulated over **every** pack — the cap never truncates the sum. Each card's headline is driven by an explicit `sum_items` flag from the provider (the panel headline adds the buckets up when set, otherwise takes the first item), because the per-item rows are not comparable across channels: Qoder's subscription quota + add-on pack + dedicated credits are genuinely coexisting allowances whose sum is the account total (the upstream's own `totalUsagePercentage` is computed the same way), whereas Trae's entitlement packs are a *breakdown* of the total allowance it already reports (adding them double-counts) and ZCode / MiMo report different units (5-hour window vs monthly window; percent vs days). Providers that can be summed must therefore opt in; the default is off so a new channel is never silently mis-added. Quota responses are cached for 5 minutes. The Trae PAT standard pool has no active query API — its usage is collected **passively** from the `4031` (quota exhausted) error body, and because that error only fires when the pool is already full, a snapshot that is past its `reset_ts` is shown as "reset · pending confirmation" rather than as a stale 100%. The quota page is the only network-touching endpoint in the admin UI, so its queries are bounded four ways: the gateway is probed for reachability first (DNS+TCP precheck — if unreachable the whole round is skipped and per-account caches are served instead), each account request times out after 6 seconds, accounts are queried concurrently on a shared thread pool, and the whole round is capped at 8 seconds (accounts that miss it fall back to their caches while their requests finish in the background) so latency does not grow with the account count. When the gateway is unreachable or some accounts fail, the page shows an explicit "n/m accounts got no fresh data" notice in a warning colour instead of spinning indefinitely; such failures are cached for only 30 seconds (successes keep the 5-minute cache) so a brief network blip self-heals on the next round.
 - **Trae PAT accounts** — per-account cards showing local credential and cooldown state (read purely locally, never touching the network), one-click token refresh that only fills in missing/expiring tokens, and the upstream's per-model load status for the PAT channel (cached for 10 minutes).
 - **Model toggle & schedule** — disable/enable an individual `(provider, model)` pair (a disabled pair fails fast), and restrict one to time windows such as `22:00–08:00` or `12:00–14:00`. Both persist to the settings file.
-- **Model order (candidate failover)** — its own **Model order** tab shows **one card per key in `model_order`** — whatever the config lists is what the page shows, nothing expanded from the channel catalog. Each card expands to an interactive list of candidate upstreams you can add to, delete from, or **drag / ▲▼** to reorder. Requests try them top-down: when a channel fails **before anything was written to the client**, the proxy moves to the next one and marks the failed target with a 5-minute cooldown (extended to 1 hour on repeated failures), skipping it while it lasts. Once streaming has started there is no failover (the upstream would bill twice) — so CodeBuddy's in-stream errors never trigger it, and putting CodeBuddy last is the practical choice. The key is the **bare model name** (`deepseek-v4.1-flash`): it means "when this model is requested, try these channels in this order, the first by default", so one entry covers every channel that publishes the name. Targets are written as `provider/model`. An empty list restores the historical behaviour (route purely by model id). Persists to `model_order` in the settings file. A **clear-cooldown** button on the model row retries cooled targets immediately without touching the order.
+- **Model order (candidate failover)** — its own **Model order** tab shows **one card per key in `model_order`** — whatever the config lists is what the page shows, nothing expanded from the channel catalog. Each card expands to an interactive list of candidate upstreams you can add to, delete from, or **drag / ▲▼** to reorder. Requests try them top-down: when a channel fails **before anything was written to the client**, the proxy moves to the next one and marks the failed target with a 5-minute cooldown (extended to 1 hour on repeated failures), skipping it while it lasts. One failure is deliberately **not** marked: a **local DNS resolution failure**. That is your machine's problem, not the upstream's — it hits every candidate at once, so cooling them all would turn a one-second blip into five minutes of "model unavailable" with not even a re-probe, which is exactly what happened on 2026-10-02. Such a failure still moves on to the next candidate, it just leaves no mark. Once streaming has started there is no failover (the upstream would bill twice) — so CodeBuddy's in-stream errors never trigger it, and putting CodeBuddy last is the practical choice; those in-stream errors are at least recorded as failures in the request log rather than counted as a 200. The key is the **bare model name** (`deepseek-v4.1-flash`): it means "when this model is requested, try these channels in this order, the first by default", so one entry covers every channel that publishes the name. Targets are written as `provider/model`. An empty list restores the historical behaviour (route purely by model id). Persists to `model_order` in the settings file. A **clear-cooldown** button on the model row retries cooled targets immediately without touching the order.
 - **Settings health banner** — `load_settings()` swallows a corrupt settings file by design (one bad comma must not take the proxy down), which used to mean *every* settings-backed feature silently vanished at once with nothing to go on. The admin UI now probes the file on load and shows a red banner at the top when it exists but cannot be parsed, quoting the raw JSON error.
 - **Request log** — paginated request log read from `logs/metrics.jsonl` plus the 30-day archive, filtered by date range, provider, model and client. The **Credit** column shows the per-request amount when the upstream reports it (CodeBuddy, Qoder, and any channel that fills `usage`), falling back to a `≈` estimate — for trae, measured per-token input/output rates (`MEASURED_CREDIT_RATES`, reconciled against the official usage records) scaled by `current multiplier / calibration multiplier` so a `MODEL_CREDITS` edit tracks panel price changes automatically, with the multiplier-based rough estimate for models not yet measured; and the official GLM Coding Plan deduction coefficients (with cache-hit and time-of-day discounts) for zcode — and `—` when neither exists. Shown to 2 decimals like Qoder's own site; the raw value stays in `logs/metrics.jsonl`. Note **cached tokens are nearly free**: a 164k-input request that hit ~99% cache cost 0.12 credits, while a 12k-input request with no cache cost 0.31 — so a large input column does not imply a large bill.
 
@@ -399,6 +400,34 @@ account really has; packages with `available: false` (expired/invalidated) are s
 
 > `--qoder` is only needed when you want this channel; without it the provider is not registered and `qoder/...` model names fall through to the fallback provider.
 
+## Gemini provider (optional)
+
+Google's **Gemini CLI** free quota (Code Assist for individuals), exposed under the `gemini/` prefix:
+
+```bash
+uv run buddy login gemini   # Google OAuth (PKCE + local callback)
+uv run python -m buddy_proxy --desensitize --gemini
+curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"gemini/gemini-2.5-flash","messages":[...]}'
+```
+
+The gateway talks to the same `v1internal:generateContent` endpoint as the real gemini CLI, with the CLI's own request fingerprint (UA, `x-goog-api-client`, no `safetySettings` — see `src/buddy_proxy/gemini/README.md` for the full alignment table and the risk notes).
+
+**Login is interoperable with the local `gemini` CLI** — both sides use the same OAuth client, so the credentials are mutually recognized:
+
+- After `buddy login gemini` succeeds, the credentials are written back into `~/.gemini` in the CLI's own format (`oauth_creds.json`, `settings.json` auth type, `google_accounts.json`) — the `gemini` command has a login state immediately, without running its own login.
+- When `~/.gemini/oauth_creds.json` already holds a usable login, `buddy login gemini` offers to reuse it (default yes, no browser round-trip); expired access tokens are refreshed with the same OAuth client, and onboarding is completed automatically.
+
+Models (free tier, community-measured: ~250 req/day flash / ~100 req/day 2.5-pro, upstream 429s pass through as-is):
+
+| Model id | Upstream | Notes |
+|---|---|---|
+| `gemini/gemini-2.5-flash` / `-pro` / `-flash-lite` | Gemini 2.5 series | list lives in `src/buddy_proxy/gemini/models.json` (`verified` flags update after a real run) |
+| `gemini/gemini-3-pro-preview` / `gemini-3-flash-preview` | Gemini 3 preview | may 404 until Google enables the channel for the account |
+
+Free-tier prompts may be reviewed by Google for training (the onboarding response says so) — keep sensitive content off this channel.
+
+> `--gemini` is only needed when you want this channel; without it the provider is not registered and `gemini/...` model names fall through to the fallback provider.
+
 ## Connect clients
 
 ### Codex CLI
@@ -525,6 +554,9 @@ providers:
 --zcode                   enable the ZCode provider (Zhipu GLM, Anthropic passthrough)
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
+--qoder                   enable the Qoder provider (COSY-signed, Qwen3.8/GLM/Kimi)
+--gemini                  enable the Gemini provider (Google OAuth, Code Assist free quota;
+                          login state is shared with the local gemini CLI)
 --login                   browser login at startup (opens the browser; prints the login URL)
 --no-browser              don't auto-open a browser. Implicit/background re-auth (e.g. the
                           auto-checkin poll) never opens a browser and never prints a login
@@ -534,7 +566,7 @@ providers:
 --mock-dir DIR            serve recorded fixtures (testing)
 ```
 
-Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` (`1` enables that provider, same as the flags), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `MIMO_API_KEY` / `MIMO_BASE_URL`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
+Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` / `QODER_ENABLED` / `GEMINI_ENABLED` (`1` enables that provider, same as the flags), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `MIMO_API_KEY` / `MIMO_BASE_URL`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
 
 Trae stream tuning: `WB_TRAE_HEARTBEAT_INTERVAL` (heartbeat while waiting for the buffered upstream response, seconds, default 45, `0` disables — keeps clients with per-chunk timeouts like Ethan's 120s from aborting long generations), `WB_TRAE_NATIVE_TOOLS` (native channel for all Trae requests — native function calling for tool requests, preset-free chat for plain ones; default `1`; `0` falls back to the legacy prompt-taught text protocol with leak guards), `WB_TRAE_IDE_VERSION_CODE` (Trae client version header, default `20260906` — the upstream gates per-model capabilities by this header; raise it when a model suddenly 4001s), `WB_TRAE_NONSTREAM_MAX_S` (non-streaming aggregation cap), `WB_TRAE_SEMANTIC_TIMEOUT`, `WB_TRAE_TOKEN_KEEPALIVE_S` (background token refresh interval).
 
