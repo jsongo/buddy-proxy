@@ -37,11 +37,51 @@ _ESCALATE_HITS = 3
 #: 抖动而非当日额度耗尽，1 小时足够且误伤小。
 _ESCALATE_COOLDOWN_S = 3600
 
+#: 机器级故障的判定窗口（秒）与触发通道数：窗口内 **≥N 个不同通道**对同一模型失败
+#: → 判为机器级故障（本机网络/代理抖动），见 :func:`mark_failed`。2026-10-02 晚间
+#: 事故实录：本机 Clash 隧道中断，qoder/codebuddy/trae 三通道在 50 秒内全灭
+#: （trae 直接报 ``Tunnel connection failed: 502``），全模型锁死 5 分钟——而故障
+#: 本身约 5 分钟后自愈，冷却时长恰好与中断时长重叠。识别出这类突发后缩成短冷却，
+#: 让「网络刚恢复就放行」成为可能。
+_BURST_WINDOW_S = 60
+_BURST_PROVIDERS = 2
+#: 机器级故障的短冷却（秒）。
+_BURST_COOLDOWN_S = 30
+
 #: ``(provider_id, model_id)`` → 解禁时刻（epoch 秒）。
 _marks: dict[tuple[str, str], float] = {}
 #: ``(provider_id, model_id)`` → 窗口内失败时间戳列表。
 _hits: dict[tuple[str, str], list[float]] = {}
+#: ``model_id`` → 窗口内 ``(时间戳, provider_id)`` 列表（机器级突发判定用）。
+_burst: dict[str, list[tuple[float, str]]] = {}
 _lock = threading.Lock()
+
+
+def _prune_burst(model_id: str, now: float) -> list[tuple[float, str]]:
+    """返回突发窗口内的 ``(时间戳, provider_id)``（顺带丢弃过期的）。调用方须持有 ``_lock``。"""
+    entries = [e for e in _burst.get(model_id, []) if now - e[0] < _BURST_WINDOW_S]
+    if entries:
+        _burst[model_id] = entries
+    else:
+        _burst.pop(model_id, None)
+    return entries
+
+
+def _shorten_to_burst_locked(model_id: str, provider_ids: set[str], now: float) -> None:
+    """把窗口内其它通道对该模型的长冷却缩到突发短档，并清掉它们的升级计数。
+
+    突发判定的不对称问题：第一个失败的目标落标记时还没有第二通道的证据，只能先按
+    普通故障记；等第二个通道也失败、机器级判定成立时，回头把「同样是机器级故障
+    受害者」的它一起缩掉——否则最先失败的目标反而被锁得最久。升级计数一并清空：
+    机器级失败不是这个上游的错，不该累计到「反复失败升级 1 小时」上。
+
+    调用方须持有 ``_lock``。
+    """
+    for pid in provider_ids:
+        k = (pid, model_id)
+        if _marks.get(k, 0.0) > now + _BURST_COOLDOWN_S:
+            _marks[k] = now + _BURST_COOLDOWN_S
+        _hits.pop(k, None)
 
 
 def _prune_hits(key: tuple[str, str], now: float) -> list[float]:
@@ -73,8 +113,18 @@ def _drop_expired(now: float) -> None:
 def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -> float:
     """标记一次失败，返回解禁时刻（epoch 秒）。
 
-    短窗口内累计失败达到 ``_ESCALATE_HITS`` 次则升级为 ``_ESCALATE_COOLDOWN_S``，
-    否则用 ``_TARGET_COOLDOWN_S``。始终取 ``max``，短冷却不得缩短已有的长冷却。
+    两种时长，按失败形态分流：
+
+    - **机器级突发**：突发窗口内已有 ``_BURST_PROVIDERS`` 个**不同通道**对同一模型
+      失败 → 多半是本机网络/代理在抖（隧道层 502 这类），不是哪个上游的毛病。
+      本次与窗口内已标记的通道一律只冷却 ``_BURST_COOLDOWN_S``，且不累计升级
+      ——网络秒级自愈后立即放行，不再重演「故障早好了、冷却还在锁」。
+      各通道的隧道层失败与上游自身 502 无法逐条区分（响应体都是从隧道里回来的），
+      所以用「多通道同时失败」这个统计特征判定，接受少量误判（两个上游真同时坏，
+      也只是冷却转 30 秒轮换，换档仍正常工作）。
+    - **普通失败**：短窗口内累计达到 ``_ESCALATE_HITS`` 次升级为
+      ``_ESCALATE_COOLDOWN_S``，否则 ``_TARGET_COOLDOWN_S``。始终取 ``max``，
+      短冷却不得缩短已有的长冷却（机器级路径例外——见上，突发缩档是**有意**回写）。
 
     只记 provider / model / status，**绝不记录上游响应体**（隐私红线，见
     docs/architecture.md）。
@@ -82,22 +132,43 @@ def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -
     key = (provider_id, model_id)
     now = time.time()
     with _lock:
-        # 注意：_prune_hits 返回的是**新列表**（且空时会删键），append 后必须写回 dict，
-        # 否则本次失败不会被计入，升级永远触发不了。
-        hits = _prune_hits(key, now)
-        hits.append(now)
-        _hits[key] = hits
-        escalated = len(hits) >= _ESCALATE_HITS
-        span = _ESCALATE_COOLDOWN_S if escalated else _TARGET_COOLDOWN_S
-        until = max(_marks.get(key, 0.0), now + span)
-        _marks[key] = until
-    log.warning(
-        "目标 %s/%s 换档失败，冷却 %d 分钟%s（触发状态=%s，窗口内第%d次）",
-        provider_id, model_id, span // 60,
-        "（已升级）" if escalated else "（首次，未升级）",
-        status if status is not None else "unknown", len(hits),
-    )
-    return until
+        burst = _prune_burst(model_id, now)
+        burst.append((now, provider_id))
+        _burst[model_id] = burst
+        window_providers = {p for _, p in burst}
+        machine = len(window_providers) >= _BURST_PROVIDERS
+        if machine:
+            span = _BURST_COOLDOWN_S
+            escalated = False
+            # 本次走机器级短档，不累计升级计数；窗口内其它通道回头一起缩（见上）。
+            _hits.pop(key, None)
+            _shorten_to_burst_locked(model_id, window_providers - {provider_id}, now)
+            _marks[key] = now + span
+        else:
+            # 注意：_prune_hits 返回的是**新列表**（且空时会删键），append 后必须写回 dict，
+            # 否则本次失败不会被计入，升级永远触发不了。
+            hits = _prune_hits(key, now)
+            hits.append(now)
+            _hits[key] = hits
+            escalated = len(hits) >= _ESCALATE_HITS
+            span = _ESCALATE_COOLDOWN_S if escalated else _TARGET_COOLDOWN_S
+            until = max(_marks.get(key, 0.0), now + span)
+            _marks[key] = until
+    if machine:
+        log.warning(
+            "目标 %s/%s 换档失败，疑似机器级故障（%d 秒内 %d 个通道同时失败），"
+            "冷却 %d 秒（触发状态=%s）",
+            provider_id, model_id, _BURST_WINDOW_S, len(window_providers),
+            span, status if status is not None else "unknown",
+        )
+    else:
+        log.warning(
+            "目标 %s/%s 换档失败，冷却 %d 分钟%s（触发状态=%s，窗口内第%d次）",
+            provider_id, model_id, span // 60,
+            "（已升级）" if escalated else "（首次，未升级）",
+            status if status is not None else "unknown", len(hits),
+        )
+    return _marks[key]
 
 
 def is_marked(provider_id: str, model_id: str) -> bool:
@@ -123,18 +194,22 @@ def clear(provider_id: str | None = None, model_id: str | None = None) -> int:
     - 只给 ``provider_id`` → 清该通道下所有目标（含只残留计数的键）；
     - 都不给 → 全清（供 UI「全部重试」与测试隔离用）。
 
-    清标记**一律连带清升级计数**，与自然到期（:func:`_drop_expired`）保持同语义：
-    两者都表示「这个目标恢复了」。
+    清标记**一律连带清升级计数**与突发窗口里的记录（否则清完冷却，下一枪失败还会
+    被窗口里残留的旧失败顶成「机器级」），与自然到期（:func:`_drop_expired`）保持
+    同语义：两者都表示「这个目标恢复了」。
     """
     with _lock:
         if provider_id is None:
             removed = len(_marks)
             _marks.clear()
             _hits.clear()
+            _burst.clear()
             return removed
         if model_id is not None:
             removed = 1 if _marks.pop((provider_id, model_id), None) is not None else 0
             _hits.pop((provider_id, model_id), None)
+            _burst[model_id] = [e for e in _burst.get(model_id, [])
+                                if e[1] != provider_id]
             return removed
         # 同时扫 _hits：该通道下可能只留有升级计数、标记已自然过期（那些键不在 _marks 里）
         keys = {k for k in _marks if k[0] == provider_id}
@@ -142,6 +217,8 @@ def clear(provider_id: str | None = None, model_id: str | None = None) -> int:
         for k in keys:
             _marks.pop(k, None)
             _hits.pop(k, None)
+        for mid in list(_burst):
+            _burst[mid] = [e for e in _burst[mid] if e[1] != provider_id]
         return len(keys)
 
 

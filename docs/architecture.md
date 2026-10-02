@@ -141,6 +141,20 @@ workers, or explicit provider shutdown lifecycles.
   exceptions whose own `str()` is empty (`httpx.ReadError()`), and a bare `%s`
   on those logs a blank line — it falls back to the type name and the first
   non-empty cause.
+  DNS is not the only machine-level failure mode. Same evening, ~1 hour later:
+  the local Clash tunnel died and qoder/codebuddy/trae all failed within 50
+  seconds — but with genuine `502 Bad Gateway` responses (the tunnel's own
+  error page), which is *not* classifiable per-request: the tunnel error body
+  and a real upstream 502 look identical once wrapped. So `core/cooldown.py`
+  uses a statistical signal instead: **≥2 distinct channels failing for the
+  same model within a 60s window ⇒ machine-level burst** — the current target
+  and the already-marked ones in the window are (re)marked for only 30s and
+  never count toward escalation. The first-failing target gets shortened
+  retroactively (it was marked 5 min before the second channel's failure
+  proved the burst); burst evidence is wiped by `clear()` so a manual
+  clear-cooldown can't be overridden by stale window entries. Accepted
+  trade-off: two genuinely-broken channels failing within 60s also get 30s
+  marks — failover still works, the marks just rotate faster.
 - The `model_order` editor lives in its own **Model order** tab of the bundled
   `/ui` page: one card per configured model, expanding to the reorderable target
   list. **Its render source is `GET /ui/api/model-order`, which returns the

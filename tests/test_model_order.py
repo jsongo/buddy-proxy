@@ -417,6 +417,102 @@ def test_describe_exception_reads_through_empty_message():
     assert len(describe_exception(ValueError("x" * 1000))) == 300
 
 
+# --- 2.5 机器级突发（多通道同时失败 → 短冷却）---------------------------------
+
+
+class _FakeClock:
+    """cooldown 模块内 time.time() 的替身：手动拨针，精确控制突发窗口滑动。"""
+
+    def __init__(self):
+        self.t = 1_000_000.0
+
+    def time(self):
+        return self.t
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(cooldown_mod, "time", clock)
+    yield clock
+
+
+def test_two_channels_failing_together_get_short_cooldown(tmp_path, monkeypatch):
+    """两个通道 60 秒内先后失败 → 机器级突发，双双只冷却 30 秒。
+
+    2026-10-02 晚间事故回归：本机代理隧道中断，qoder/codebuddy/trae 在 50 秒内
+    全灭，各自被按「上游自己的毛病」锁 5 分钟——而故障约 5 分钟后自愈，冷却时长
+    恰好与中断时长重叠。机器级突发该用短冷却，让「网络刚恢复就放行」成为可能。
+    """
+    client, _, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"],
+                                  a_behavior="raise502", b_behavior="raise502")
+    r = _post(client)
+    assert r.status_code == 502
+    # pa 先失败时没有第二个通道的证据、按普通故障记 5 分钟；pb 失败坐实突发后，
+    # pa 要被**回头**缩短——否则最先失败的目标反而被锁得最久。
+    assert 0 < cooldown_mod.remaining("pa", "m1") <= 30
+    assert 0 < cooldown_mod.remaining("pb", "m1") <= 30
+
+
+def test_single_channel_failure_keeps_long_cooldown(tmp_path, monkeypatch):
+    """只有一个通道失败（另一个正常接住）→ 不算突发，照常 5 分钟。"""
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="raise502")
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert cooldown_mod.remaining("pa", "m1") > 240
+
+
+def test_burst_window_slides_and_recovers(fake_clock):
+    """窗口滑动：60 秒内两个通道算突发；窗口滑走后回到普通长冷却判定。"""
+    c = cooldown_mod
+    c.mark_failed("pa", "m1", status=502)      # t0：第一个，普通 5 分钟
+    assert c.remaining("pa", "m1") > 240
+    fake_clock.t += 18                          # 第二个通道 18 秒后也失败 → 突发成立
+    c.mark_failed("pb", "m1", status=502)
+    assert 0 < c.remaining("pb", "m1") <= 30
+    assert 0 < c.remaining("pa", "m1") <= 30
+    fake_clock.t += 30                          # 短冷却到期：双双解禁
+    assert not c.is_marked("pa", "m1") and not c.is_marked("pb", "m1")
+    fake_clock.t += 45                          # 距前两次失败均已超 60 秒，窗口滑走
+    c.mark_failed("pc", "m1", status=502)
+    assert c.remaining("pc", "m1") > 240        # 只剩它自己失败 → 普通 5 分钟
+
+
+def test_burst_never_escalates_even_with_repeated_failures(fake_clock):
+    """持续故障期间反复失败也只 30 秒，绝不升级到 1 小时。
+
+    升级机制是为「反复失败的**真上游**」准备的；机器级失败不是上游的错，
+    不能让它吃到升级档，否则一次 5 分钟的网络抖动又变回 1 小时锁死。
+    """
+    c = cooldown_mod
+    for i in range(6):                          # 普通失败 3 次就该升级了
+        if i:
+            fake_clock.t += 31                  # 冷却过期、突发窗口（60 秒）还在
+        c.mark_failed("pa", "m1", status=502)
+        c.mark_failed("pb", "m1", status=502)
+    assert 0 < c.remaining("pa", "m1") <= 30
+    assert 0 < c.remaining("pb", "m1") <= 30
+
+
+def test_burst_is_per_model(fake_clock):
+    """不同模型的失败不互相触发：突发按模型分窗，两个模型各坏各的不算机器级。"""
+    c = cooldown_mod
+    c.mark_failed("pa", "m1", status=502)
+    c.mark_failed("pb", "m2", status=502)
+    assert c.remaining("pa", "m1") > 240
+    assert c.remaining("pb", "m2") > 240
+
+
+def test_clear_wipes_burst_evidence(fake_clock):
+    """清冷却连带清突发窗口：否则残留的旧失败会把下一个受害者误判成机器级。"""
+    c = cooldown_mod
+    c.mark_failed("pa", "m1", status=502)
+    c.clear("pa", "m1")
+    c.mark_failed("pb", "m1", status=502)
+    assert c.remaining("pb", "m1") > 240
+
+
 # --- 3. 冷却标记语义 ----------------------------------------------------------
 
 
