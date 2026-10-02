@@ -351,20 +351,26 @@ class AntigravityProvider(BaseProvider):
         }
 
     async def _fetch_available_models(self) -> dict[str, Any]:
-        """POST /v1internal:fetchAvailableModels（带各模型配额剩余）。"""
+        """POST /v1internal:fetchAvailableModels（带各模型配额剩余）。
+
+        用一次性 client：本方法经 ``_run_sync`` 在临时事件循环里跑（/ui 线程），
+        复用缓存的 ``self._client`` 会把连接池绑到这个短命 loop 上——loop 关闭
+        后主循环的转发请求复用它就 ``RuntimeError: Event loop is closed``
+        （未捕获 → internal error）。quota 是低频管理操作，新建开销可忽略。
+        """
         from .fingerprint import auth_headers
 
         token = await asyncio.to_thread(_token_or_raise)
-        client = await self._get_client()
-        resp = await self._send_with_fallback(
-            client, "fetchAvailableModels", {}, auth_headers(token), stream=False
-        )
-        try:
-            if resp.status_code >= 400:
-                return {}
-            return resp.json()
-        finally:
-            await resp.aclose()
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await self._send_with_fallback(
+                client, "fetchAvailableModels", {}, auth_headers(token), stream=False
+            )
+            try:
+                if resp.status_code >= 400:
+                    return {}
+                return resp.json()
+            finally:
+                await resp.aclose()
 
 
 # ---------------------------------------------------------------------------
