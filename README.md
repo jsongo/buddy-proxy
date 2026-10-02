@@ -17,7 +17,7 @@
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Multi-account** — isolated session files for work / personal accounts
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login) and **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi) and **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI); all listed by `/v1/models` and routed by model name
 - **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
 ---
@@ -45,7 +45,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini)
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 ./buddy update             # update to the latest code (git pull -> uv sync -> restart)
 
@@ -400,6 +400,34 @@ account really has; packages with `available: false` (expired/invalidated) are s
 
 > `--qoder` is only needed when you want this channel; without it the provider is not registered and `qoder/...` model names fall through to the fallback provider.
 
+## Gemini provider (optional)
+
+Google's **Gemini CLI** free quota (Code Assist for individuals), exposed under the `gemini/` prefix:
+
+```bash
+uv run buddy login gemini   # Google OAuth (PKCE + local callback)
+uv run python -m buddy_proxy --desensitize --gemini
+curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"gemini/gemini-2.5-flash","messages":[...]}'
+```
+
+The gateway talks to the same `v1internal:generateContent` endpoint as the real gemini CLI, with the CLI's own request fingerprint (UA, `x-goog-api-client`, no `safetySettings` — see `src/buddy_proxy/gemini/README.md` for the full alignment table and the risk notes).
+
+**Login is interoperable with the local `gemini` CLI** — both sides use the same OAuth client, so the credentials are mutually recognized:
+
+- After `buddy login gemini` succeeds, the credentials are written back into `~/.gemini` in the CLI's own format (`oauth_creds.json`, `settings.json` auth type, `google_accounts.json`) — the `gemini` command has a login state immediately, without running its own login.
+- When `~/.gemini/oauth_creds.json` already holds a usable login, `buddy login gemini` offers to reuse it (default yes, no browser round-trip); expired access tokens are refreshed with the same OAuth client, and onboarding is completed automatically.
+
+Models (free tier, community-measured: ~250 req/day flash / ~100 req/day 2.5-pro, upstream 429s pass through as-is):
+
+| Model id | Upstream | Notes |
+|---|---|---|
+| `gemini/gemini-2.5-flash` / `-pro` / `-flash-lite` | Gemini 2.5 series | list lives in `src/buddy_proxy/gemini/models.json` (`verified` flags update after a real run) |
+| `gemini/gemini-3-pro-preview` / `gemini-3-flash-preview` | Gemini 3 preview | may 404 until Google enables the channel for the account |
+
+Free-tier prompts may be reviewed by Google for training (the onboarding response says so) — keep sensitive content off this channel.
+
+> `--gemini` is only needed when you want this channel; without it the provider is not registered and `gemini/...` model names fall through to the fallback provider.
+
 ## Connect clients
 
 ### Codex CLI
@@ -526,6 +554,9 @@ providers:
 --zcode                   enable the ZCode provider (Zhipu GLM, Anthropic passthrough)
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
+--qoder                   enable the Qoder provider (COSY-signed, Qwen3.8/GLM/Kimi)
+--gemini                  enable the Gemini provider (Google OAuth, Code Assist free quota;
+                          login state is shared with the local gemini CLI)
 --login                   browser login at startup (opens the browser; prints the login URL)
 --no-browser              don't auto-open a browser. Implicit/background re-auth (e.g. the
                           auto-checkin poll) never opens a browser and never prints a login
@@ -535,7 +566,7 @@ providers:
 --mock-dir DIR            serve recorded fixtures (testing)
 ```
 
-Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` (`1` enables that provider, same as the flags), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `MIMO_API_KEY` / `MIMO_BASE_URL`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
+Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` / `QODER_ENABLED` / `GEMINI_ENABLED` (`1` enables that provider, same as the flags), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `MIMO_API_KEY` / `MIMO_BASE_URL`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
 
 Trae stream tuning: `WB_TRAE_HEARTBEAT_INTERVAL` (heartbeat while waiting for the buffered upstream response, seconds, default 45, `0` disables — keeps clients with per-chunk timeouts like Ethan's 120s from aborting long generations), `WB_TRAE_NATIVE_TOOLS` (native channel for all Trae requests — native function calling for tool requests, preset-free chat for plain ones; default `1`; `0` falls back to the legacy prompt-taught text protocol with leak guards), `WB_TRAE_IDE_VERSION_CODE` (Trae client version header, default `20260906` — the upstream gates per-model capabilities by this header; raise it when a model suddenly 4001s), `WB_TRAE_NONSTREAM_MAX_S` (non-streaming aggregation cap), `WB_TRAE_SEMANTIC_TIMEOUT`, `WB_TRAE_TOKEN_KEEPALIVE_S` (background token refresh interval).
 

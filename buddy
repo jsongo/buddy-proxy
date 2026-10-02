@@ -7,7 +7,7 @@
 #   buddy restart            重启
 #   buddy status             查看状态
 #   buddy logs               跟踪日志
-#   buddy login [provider]   登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder）
+#   buddy login [provider]   登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini）
 #   buddy ui                 仅打开管理页（必要时先启动）
 #   buddy update             更新到最新代码（git pull -> uv sync -> 重启）
 #                            工作树有未提交改动会中止，不会覆盖你的改动

@@ -17,7 +17,7 @@
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）与 **Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）与 **Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通），统一经 `/v1/models` 列出、按模型名路由
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
 ---
@@ -488,6 +488,9 @@ providers:
 --zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
+--qoder                   启用 Qoder provider（COSY 签名，千问3.8 / GLM / Kimi）
+--gemini                  启用 Gemini provider（Google OAuth，Code Assist 免费额度；
+                          登录态与本机 gemini CLI 互通）
 --login                   启动时浏览器登录（会打开浏览器并打印登录链接）
 --no-browser              不自动打开浏览器。隐式/后台补认证（如自动打卡轮询）
                           无论如何都不会弹浏览器、也不会打印登录链接，只留一行
@@ -496,7 +499,7 @@ providers:
 --mock-dir DIR            使用录制的响应（测试用）
 ```
 
-环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED`（置 `1` 等同对应开关）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`MIMO_API_KEY` / `MIMO_BASE_URL`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
+环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` / `QODER_ENABLED` / `GEMINI_ENABLED`（置 `1` 等同对应开关）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`MIMO_API_KEY` / `MIMO_BASE_URL`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
 
 Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期间的心跳秒数，默认 45，`0` 关闭——避免像 Ethan 那种 120s 分块超时的客户端中断长生成）、`WB_TRAE_NATIVE_TOOLS`（全部 Trae 请求是否走原生通道，默认 `1`，`0` 回落到旧的提示词教文本协议）、`WB_TRAE_IDE_VERSION_CODE`（Trae 客户端版本头，默认 `20260906`——上游按此头放开各模型能力，某模型突然 4001 时调高它）、`WB_TRAE_NONSTREAM_MAX_S`（非流式聚合上限）、`WB_TRAE_SEMANTIC_TIMEOUT`、`WB_TRAE_TOKEN_KEEPALIVE_S`（后台 Token 刷新间隔）。
 
@@ -743,6 +746,40 @@ Qoder 通道声明了 `supports_checkin`，因此会和 CodeBuddy 一起出现�
   才代表真发了 Credits。
 - **别信顶层 `claimable`** 来判断能不能领：它把 `VIEW_DETAILS` 类活动也算进来了。
   真正的判据是**逐条**看 `actionType == "CLAIM_BENEFIT" && claimStatus == "CLAIMABLE"`。
+
+### 7. Gemini Provider（`gemini/` 子包）
+
+Google **Gemini CLI** 的免费额度（Code Assist individuals），挂 `gemini/` 前缀：
+
+```bash
+uv run buddy login gemini   # Google OAuth（PKCE + 本地回调）
+uv run python -m buddy_proxy --desensitize --gemini
+```
+
+网关走的是与真实 gemini CLI 相同的 `v1internal:generateContent` 端点，请求指纹
+（UA / `x-goog-api-client` / 不发 safetySettings）逐项对齐本机真 CLI 0.33.1——
+对齐表与防封号注意事项见 `src/buddy_proxy/gemini/README.md`。
+
+**登录与本机 gemini CLI 双向互通**（两边是同一个 OAuth client，凭证互认）：
+
+- `buddy login gemini` 成功后，凭证按 CLI 的格式回写 `~/.gemini/`
+  （`oauth_creds.json` 合并写 0600、`settings.json` 补
+  `security.auth.selectedType=oauth-personal`、`google_accounts.json`
+  记 active 邮箱）——写完 `gemini` 命令直接有登录态，不用再登一次。
+- 反过来，`~/.gemini/oauth_creds.json` 已有可用登录态时，`buddy login gemini`
+  会先问「直接使用它吗？」（默认 yes，跳过浏览器授权）；access token 过期
+  会用同一 client 自动刷新，onboarding 自动补跑。
+
+模型（免费层社区实测：flash 系约 250 请求/天、2.5-pro 约 100 请求/天，超了上游
+429 原样透传）：`gemini/gemini-2.5-flash` / `-pro` / `-flash-lite`、
+`gemini-3-pro-preview` / `gemini-3-flash-preview`。模型表在
+`src/buddy_proxy/gemini/models.json`（`verified` 跑通后手工置 true）。
+
+免费层的 prompt 会被 Google 审查用于训练（onboarding 响应里明说）——敏感内容
+别走这条通道。
+
+> `--gemini` 只在想用这条通道时才需要；不加则 provider 不注册，`gemini/...`
+> 模型名落到兜底通道。
 
 ## 免责声明
 
