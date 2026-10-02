@@ -492,6 +492,7 @@
       <div id="quota-list"><div class="chart-card"><div class="empty">加载中…</div></div></div>
     </div>
     <div id="traepat-panel"></div>
+    <div id="antigravity-panel"></div>
   </section>
 </div>
 
@@ -1094,7 +1095,8 @@ function renderBenefits() {
   syncNextTimeAuto();
 
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
-  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat');
+  // traepat/antigravity 的多账号额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
+  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity');
   document.getElementById('quota-list').innerHTML = qps.length ? qps.map(p => {
     const q = p.quota;
     const items = (q.items || []).map(quotaItemHtml).join('');
@@ -1107,6 +1109,7 @@ function renderBenefits() {
       </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
   renderTraepatPanel();
+  renderAntigravityPanel();
 }
 
 // 单条额度条目 → HTML（周包/日包/积分窗口通用；PAT 面板与额度列表共用）
@@ -1306,6 +1309,74 @@ async function refreshTraepatTokens(btn) {
   } catch (e) { toast('Token 补签失败：' + e.message, true); }
   if (btn) { btn.disabled = false; btn.textContent = old || '补签 Token'; }
 }
+
+// ---- ANTIGRAVITY 面板（trae PAT 同款布局：额度按账号左右两栏 + 账号状态行）----
+// 数据两路：额度走 /ui/api/benefits 里 antigravity 条目（label 带「AG #N · 」前缀），
+// 账号状态走 /ui/api/antigravity/accounts（纯本地不触网）。未登录时整个面板隐藏。
+function renderAntigravityPanel() {
+  const panel = document.getElementById('antigravity-panel');
+  if (!panel) return;
+  const ag = (BENEFITS.providers || []).find(p => p.id === 'antigravity' && p.quota && p.quota.supported);
+  if (!ag) { panel.innerHTML = ''; return; }
+
+  // 按「AG #N」分组（label 形如「AG #1 · Gemini 组（…）」），与 trae 的 PAT #N 同款切法；
+  // 单账号时 label 无前缀，整体落进一个组。query_failed 说明条不进分组，横贯全宽展示。
+  const groups = new Map();
+  const notices = [];
+  for (const it of ag.quota.items || []) {
+    if (it.query_failed) { notices.push(it); continue; }
+    const idx = it.label.indexOf(' · ');
+    const grp = idx >= 0 ? it.label.slice(0, idx) : 'Antigravity';
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => `
+    <div class="pat-pkg">
+      <div class="pat-pkg-name">${esc(grp)}</div>
+      ${its.map(quotaItemHtml).join('')}
+    </div>`).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
+  const noticeHtml = notices.map(quotaItemHtml).join('');
+
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head">
+        <span class="name">Antigravity</span>
+        <span class="tag">多账号 · 自动切换</span>
+        <span class="grow"></span>
+        <span class="muted" style="font-size:11px">429/403 自动冷却换号（按登录顺位）</span>
+      </div>
+      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
+      <div class="pat-quota-grid">${quotaHtml}</div>
+      <div class="pat-col-head" style="margin-top:10px"><span>账号状态</span></div>
+      <div id="antigravity-accounts"><div class="empty" style="padding:8px 0">账号状态加载中…</div></div>
+    </div>`;
+  loadAntigravityAccounts();
+}
+
+async function loadAntigravityAccounts() {
+  const box = document.getElementById('antigravity-accounts');
+  if (!box) return;
+  try {
+    const r = await api('/ui/api/antigravity/accounts');
+    if (!r.enabled) { box.innerHTML = '<div class="empty" style="padding:8px 0">未登录任何账号</div>'; return; }
+    // 每账号一行：#N email（缺 project 警告）token 剩余 + 冷却，与上方 AG #N 分组对照
+    const rows = (r.accounts || []).map((a) => {
+      const cool = (a.cooling || []).map(c => `${c.kind === 'quota' ? '额度' : '账号'} 冷却 ${c.minutes_left}min`).join(' · ');
+      const left = a.hours_left != null ? `剩 ${a.hours_left}h` : '';
+      const proj = a.project_id ? '' : '<span class="tag bad">缺 project</span>';
+      return `<div class="pat-acct">
+        <span class="muted" style="min-width:26px">#${a.index}</span>
+        <span class="mono">${esc(a.email)}</span>
+        ${proj}${left ? `<span class="muted">token ${left}</span>` : ''}
+        ${cool ? `<span class="muted" style="color:var(--warn)">${cool}</span>` : ''}</div>`;
+    }).join('');
+    box.innerHTML = rows || '<div class="empty" style="padding:8px 0">无账号</div>';
+  } catch (e) {
+    box.innerHTML = `<div class="empty" style="padding:8px 0">账号状态加载失败：${esc(e.message)}</div>`;
+  }
+}
+
 
 // force=false：读缓存（GET，不触网），页面默认展示；force=true：强制查询（POST）。
 // silent=true：后台自动刷新用，不清空面板、不占用按钮（避免每轮闪烁）。

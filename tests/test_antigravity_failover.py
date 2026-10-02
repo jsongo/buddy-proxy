@@ -329,3 +329,20 @@ def test_accounts_status_shape():
 
     creds.account_cred_path("u@x.com").unlink()
     assert failover.accounts_status()["enabled"] is False  # 自愈后空列表
+
+
+def test_ui_endpoint_antigravity_accounts():
+    """/ui/api/antigravity/accounts 冒烟：端点直连 failover.accounts_status。"""
+    import asyncio
+    import types
+
+    from buddy_proxy.antigravity import credentials as creds
+    from buddy_proxy.web import ui as web_ui
+
+    creds.save_account_cred({"access_token": "a", "refresh_token": "r",
+                             "expiry": "2099-01-01T00:00:00+00:00",
+                             "email": "u@x.com", "project_id": "p1"})
+    request = types.SimpleNamespace(client=types.SimpleNamespace(host="127.0.0.1"))
+    out = asyncio.run(web_ui.ui_antigravity_accounts(request))
+    assert out["enabled"] is True
+    assert out["accounts"][0]["email"] == "u@x.com"
