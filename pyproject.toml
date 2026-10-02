@@ -29,7 +29,8 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"buddy_proxy.web" = ["models_config.json", "static/*.html"]
+# static/* 整目录带上：UI 拆分后除 index.html 还有 css/js，别只挑 html
+"buddy_proxy.web" = ["models_config.json", "static/*"]
 
 [dependency-groups]
 dev = [
