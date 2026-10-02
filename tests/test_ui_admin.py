@@ -1151,6 +1151,26 @@ def test_sse_error_extractor_cross_chunk_and_first_wins():
     assert ex2.message == "real cause"
 
 
+def test_sse_error_extractor_error_word_split_across_chunks():
+    """"error" 一词被 chunk 边界从中间劈开也不能漏——两半都不含完整单词。
+
+    review 发现：快路径 `b"error" not in chunk` 在这种劈法下两半都直接 return，
+    错误整个丢失（假绿灯复发）。先缓冲、后判断才正确。
+    """
+    from buddy_proxy.core.metrics import SSEErrorExtractor
+
+    ex = SSEErrorExtractor()
+    ex.feed(b'data: {"err')                    # 前半不含完整 "error"
+    ex.feed(b'or":{"message":"boom"}}\n\n')    # 后半同样不含
+    assert ex.message == "boom"
+
+    # 对照：一个不含任何 "error" 字样的正常流，message 保持空
+    ex2 = SSEErrorExtractor()
+    ex2.feed(b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n')
+    ex2.feed(b"data: [DONE]\n\n")
+    assert ex2.message == ""
+
+
 def test_metrics_stream_records_in_band_error_as_500(env):
     """带内错误的流必须记成失败——否则就是「客户端零字节、指标 200」的假绿灯。"""
     from buddy_proxy.codebuddy_provider.observability import _metrics_stream

@@ -155,15 +155,23 @@ class SSEErrorExtractor:
     def feed(self, chunk: bytes | str) -> None:
         if isinstance(chunk, str):
             chunk = chunk.encode("utf-8")
-        # 快路径：绝大多数 chunk 与错误无关
-        if b"error" not in chunk and b"error" not in self._buf:
-            return
+        # 必须先无条件缓冲再判断：「error」一词可能被 chunk 边界从中间劈开
+        # （b'data: {"err' + b'or":...），先判后缓冲会让两半都漏掉。
+        # 缓冲区只留最后一个残行，大小有界（与 SSEUsageExtractor 同一套纪律）。
         self._buf += chunk
+        if b"error" not in self._buf:
+            # 无错误的流残行也留不住太多字节：有换行就清掉已扫过的部分
+            lines = self._buf.rsplit(b"\n", 1)
+            self._buf = lines[-1] if len(lines) == 2 else self._buf
+            return
         lines = self._buf.split(b"\n")
         self._buf = lines.pop()  # 残行留给下一个 chunk
         for line in lines:
             line = line.strip()
-            if not line or b"error" not in line.lower():
+            # 行级过滤与缓冲区判断保持**同样区分大小写**：上游错误键按协议都是
+            # 小写（"error" / event: error），大小写混判只会造成「缓冲区漏过、
+            # 行级才认得」的静默不一致。
+            if not line or b"error" not in line:
                 continue
             if line.startswith(b"data:"):
                 line = line[5:].strip()
@@ -171,7 +179,7 @@ class SSEErrorExtractor:
                 # Anthropic 的 `event: error` 只是**声明**下面 data 行是错误事件，
                 # 真正的原因在 data 里。这里只做兜底标记（data 行解析出消息时会
                 # 覆盖它），让「有 event 行但 data 解析失败」的情况也不至于漏报。
-                if b"error" in line.lower() and not self.message:
+                if b"error" in line and not self.message:
                     self.message = "in-band error event"
                 continue
             try:
