@@ -5,6 +5,7 @@ ANTIGRAVITY_OAUTH_JSON 由 conftest autouse 指到 tmp，不碰真实凭据。
 
 from __future__ import annotations
 
+import io
 import json
 import urllib.error
 
@@ -187,7 +188,10 @@ class _FakeUrlopen:
             raise urllib.error.URLError("exhausted")
         status, payload = item.pop(0)
         if status >= 400:
-            raise urllib.error.HTTPError(url, status, "err", {}, iter([json.dumps(payload).encode()]))
+            # fp 必须是文件对象：HTTPError.read()/close() 都按文件接口走，
+            # 传 iterator 会在 3.12 上 AttributeError
+            raise urllib.error.HTTPError(url, status, "err", {},
+                                         io.BytesIO(json.dumps(payload).encode()))
         return _FakeResp(status, payload)
 
 

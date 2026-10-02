@@ -49,8 +49,15 @@ def _raw_value(payload: dict | str) -> str:
 
 
 def _mock_security(monkeypatch, stdout: str = "", returncode: int = 0, calls=None):
-    """mock subprocess.run：记录命令、返回 canned 输出。"""
+    """mock subprocess.run：记录命令、返回 canned 输出。
+
+    which 也要 mock——CI（Linux）上没有 security/secret-tool 命令，
+    _security_args() 会因 shutil.which 查不到而返回 None，根本走不到
+    subprocess.run。
+    """
     from buddy_proxy.antigravity import cli_bridge
+
+    monkeypatch.setattr(cli_bridge.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def fake_run(argv, capture_output=True, text=True, timeout=10):
         if calls is not None:
@@ -118,7 +125,8 @@ def test_load_cli_creds_reads_keyring(monkeypatch):
     _mock_security(monkeypatch, stdout=_raw_value(_keyring_payload()), calls=calls)
     payload = cli_bridge.load_cli_creds()
     assert payload is not None and payload["auth_method"] == "consumer"
-    assert calls and calls[0][0] == "security"
+    # 命令名随平台（macOS security / Linux secret-tool），坐标必须都在
+    assert calls and calls[0][0] in ("security", "secret-tool")
     assert "gemini" in calls[0] and "antigravity" in calls[0]  # service/account 坐标
 
 
