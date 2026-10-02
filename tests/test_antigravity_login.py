@@ -254,6 +254,23 @@ def test_resume_onboarding(tmp_path, monkeypatch):
     assert cred["project_id"] == "p" and cred["access_token"] == "fresh"
 
 
+def test_resume_onboarding_picks_pending_account(tmp_path, monkeypatch):
+    """多账号下 resume 定位「缺 project」的账号，而不是已完成的主账号。"""
+    from buddy_proxy.antigravity import credentials as creds
+    from buddy_proxy.antigravity import login as ag_login
+
+    creds.save_account_cred(_cred(expiry="2000-01-01T00:00:00+00:00", project_id="done"))
+    creds.save_account_cred(_cred(email="v@y.com", refresh_token="rt2",
+                                  expiry="2000-01-01T00:00:00+00:00"))  # 缺 project
+    monkeypatch.setattr(creds, "_token_request", lambda data, timeout=30.0: {
+        "access_token": "fresh2", "expires_in": 3600})
+    monkeypatch.setattr(ag_login, "setup_code_assist", lambda token, project_id="": {
+        "project_id": "p2", "tier": "free-tier", "tier_name": ""})
+
+    cred = ag_login.resume_onboarding()
+    assert cred["project_id"] == "p2" and cred["email"] == "v@y.com"
+
+
 # ---------------------------------------------------------------------------
 # setup：loadCodeAssist / onboardUser（mock 端点）
 # ---------------------------------------------------------------------------
