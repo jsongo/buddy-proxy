@@ -48,6 +48,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .base import BaseProvider
+from ..core.errors import describe_exception
 from ..core.paths import state_file
 
 log = logging.getLogger(__name__)
@@ -498,7 +499,10 @@ class ZcodeProvider(BaseProvider):
                 "error": {"message": "zcode upstream timeout", "type": "timeout"}}
             ) from exc
         except httpx.HTTPError as exc:
-            log.warning("zcode upstream error: %s", exc)
+            # 用 describe_exception 而非裸 %s：httpcore 会把底层异常映射成
+            # httpx.ReadError() 这类**自身 str() 为空**的对象，直接打日志只剩
+            # 「zcode upstream error: 」一行空话，真因在下层链里看不到。
+            log.warning("zcode upstream error: %s", describe_exception(exc))
             raise HTTPException(status_code=502, detail={
                 "error": {"message": "zcode upstream error", "type": "bad_gateway"}}
             ) from exc

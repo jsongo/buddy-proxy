@@ -31,6 +31,7 @@ from buddy_proxy.core.state import (
 )
 from buddy_proxy.core import settings as settings_mod
 from buddy_proxy.core import cooldown as cooldown_mod
+from buddy_proxy.core.errors import is_local_dns_failure
 
 from .observability import _instrument
 from .provider import _default_codebuddy
@@ -294,9 +295,16 @@ async def _forward_with_order(
                 raise  # 确定性错误（400/401/403/404）：换谁都没用，原样上抛
             last_exc = exc
             last_note = f"HTTP {exc.status_code}"
-            cooldown_mod.mark_failed(provider_id, model, status=exc.status_code)
+            # 本机 DNS 解析失败是**机器级**故障（对所有通道同时生效、通常秒级自愈），
+            # 不是这个上游的毛病。打 5 分钟冷却会把一次抖动放大成整模型不可用，
+            # 且期间连「再探一次」的机会都没有——照常换下一档，但**不标记**。
+            # 各 provider 会把 httpx 异常转成 HTTPException(502)，所以必须沿
+            # __cause__ 链判断（见 core.errors.is_local_dns_failure）。
+            dns_failure = is_local_dns_failure(exc)
+            if not dns_failure:
+                cooldown_mod.mark_failed(provider_id, model, status=exc.status_code)
             diagnostic("model_order_failover", model=key, target=target,
-                       status=exc.status_code)
+                       status=exc.status_code, cooldown_skipped=dns_failure)
             continue
         except _RETRYABLE_EXC as exc:  # httpx 传输层 / OSError：上游不可达
             # 注意：asyncio.CancelledError 是 BaseException 子类，不被这里捕获——
@@ -304,9 +312,14 @@ async def _forward_with_order(
             # 其余 Exception（TypeError/KeyError 等）同样不在这里捕获，原样上抛成 500：
             # 那是代码 bug，不该被换档掩盖（见 _RETRYABLE_EXC 注释）。
             last_note = f"{type(exc).__name__}"
-            cooldown_mod.mark_failed(provider_id, model)
+            # 与上面的 HTTPException 分支同理：本机 DNS 故障是机器级的，不打标记。
+            # 通道没把 httpx 异常包装成 HTTPException 时走的就是这条路（见
+            # core.errors.is_local_dns_failure）。
+            dns_failure = is_local_dns_failure(exc)
+            if not dns_failure:
+                cooldown_mod.mark_failed(provider_id, model)
             diagnostic("model_order_failover", model=key, target=target,
-                       error=type(exc).__name__)
+                       error=type(exc).__name__, cooldown_skipped=dns_failure)
             continue
         status = _retryable_failure(resp)
         if status is None:

@@ -26,6 +26,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
+from ..core.errors import describe_exception
 
 log = logging.getLogger(__name__)
 
@@ -375,9 +376,12 @@ class DoubaoProvider(BaseProvider):
                                 yield f"data: {json.dumps(_chunk({'role': 'assistant', 'content': t}), ensure_ascii=False)}\n\n"
 
         except Exception as exc:
-            log.error("doubao stream error: %s", exc)
+            # describe_exception：异常自身 str() 为空时（httpcore 映射的
+            # httpx.ReadError 一类）仍能给出可读真因，日志与给客户端的文本都用它
+            detail = describe_exception(exc)
+            log.error("doubao stream error: %s", detail)
             self._client.record_failure(0)
-            yield f"data: {json.dumps(_chunk({'content': f'[Error: {exc}]'}), ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps(_chunk({'content': f'[Error: {detail}]'}), ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
             return
 
@@ -654,9 +658,10 @@ class DoubaoProvider(BaseProvider):
                             yield _evt({"type": "reasoning" if in_thinking else "delta",
                                         "text": tb["text"]})
         except Exception as exc:
-            log.error("doubao agent task error: %s", exc)
+            detail = describe_exception(exc)
+            log.error("doubao agent task error: %s", detail)
             self._client.record_failure(0)
-            yield _evt({"type": "error", "message": str(exc)})
+            yield _evt({"type": "error", "message": detail})
             return
 
         self._client.record_success()

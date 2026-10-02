@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import socket
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -107,6 +108,22 @@ class _Provider(BaseProvider):
         if self.behavior == "raise_httpx":
             # 传输层异常：换档应当接住（通道没自己转成 HTTPException 的漏网情形）
             raise httpx.ConnectError("connection refused")
+        if self.behavior == "dns_502":
+            # 复刻 2026-10-02 事故的真实形态：provider 把 DNS 解析失败
+            # （httpx.ConnectError → httpcore.ConnectError → socket.gaierror）
+            # 转成 HTTPException(502) 再抛给换档层。
+            gai = socket.gaierror(8, "nodename nor servname provided, or not known")
+            cause = httpx.ConnectError(str(gai))
+            cause.__cause__ = gai
+            raise HTTPException(status_code=502,
+                                detail={"error": {"message": f"upstream error: {cause}",
+                                                  "type": "upstream_error"}}) from cause
+        if self.behavior == "dns_httpx":
+            # 同一故障未被 provider 包装、直接以 httpx 异常冒到换档层的形态
+            gai = socket.gaierror(8, "nodename nor servname provided, or not known")
+            exc = httpx.ConnectError(str(gai))
+            exc.__cause__ = gai
+            raise exc
         if self.behavior == "raise400":
             raise HTTPException(status_code=400, detail="bad params")
         if self.behavior == "json429":
@@ -288,6 +305,116 @@ def test_all_targets_marked_or_gated_reports_unavailable(tmp_path, monkeypatch):
     assert r.status_code == 502
     assert "候选上游全部不可用" in r.text
     assert a.calls == [] and b.calls == []
+
+
+def test_dns_502_does_not_mark_cooldown(tmp_path, monkeypatch):
+    """本机 DNS 解析失败**不**打冷却标记（2026-10-02 事故回归）。
+
+    事故形态：一次约 1 秒的本机 DNS 抖动让三个候选通道同时被打上 5 分钟冷却，
+    此后客户端每次重试都只命中 ``model_order_skip reason=cooldown``，一个上游
+    请求都没发出去，整个模型锁死 5 分钟。
+
+    这里锁住两点：失败的那档不被打标记；同一次请求里的下一档仍被正常尝试
+    （而不是因为前者的冷却被跳过）。
+    """
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="dns_502")
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] == "from-pb"
+    assert len(a.calls) == 1 and len(b.calls) == 1
+    # 关键断言：DNS 失败不留下冷却标记
+    assert cooldown_mod.is_marked("pa", "m1") is False
+    assert cooldown_mod.remaining("pa", "m1") == 0
+
+
+def test_dns_error_not_marked_even_when_all_candidates_fail(tmp_path, monkeypatch):
+    """所有候选都因 DNS 失败 → 仍返回 502，但**一个标记都不留**。
+
+    全部失败时返回 502 是对的（客户端确实拿不到结果）；要防的是「留下冷却导致
+    接下来的重试连试都不试」。DNS 是机器级故障，几秒后自愈，必须允许立即重试。
+    """
+    client, _, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"],
+                                  a_behavior="dns_502", b_behavior="dns_502")
+    r = _post(client)
+    assert r.status_code == 502
+    assert cooldown_mod.is_marked("pa", "m1") is False
+    assert cooldown_mod.is_marked("pb", "m1") is False
+    assert cooldown_mod.snapshot() == {}
+
+    # 紧接着重试：两个候选都还要被真正调一次（没有被冷却挡掉）
+    a.calls.clear()
+    b.calls.clear()
+    _post(client)
+    assert len(a.calls) == 1 and len(b.calls) == 1
+
+
+def test_dns_httpx_form_also_not_marked(tmp_path, monkeypatch):
+    """同一故障未被 provider 包装（异常直接冒到换档层）时同样不打标记。"""
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="dns_httpx")
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert cooldown_mod.is_marked("pa", "m1") is False
+
+
+def test_non_dns_transport_failure_still_marks_cooldown(tmp_path, monkeypatch):
+    """非 DNS 的传输层失败照常打标记——收窄识别范围，别把冷却功能整个废掉。"""
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="raise_httpx")
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert cooldown_mod.is_marked("pa", "m1") is True
+
+
+def test_is_local_dns_failure_walks_exception_chain():
+    """识别沿 ``__cause__`` 链下钻——provider 边界会把顶层类型换掉。"""
+    from buddy_proxy.core.errors import is_local_dns_failure
+
+    gai = socket.gaierror(8, "nodename nor servname provided, or not known")
+
+    # 真实链：httpx.ConnectError → httpcore.ConnectError → socket.gaierror
+    inner = httpx.ConnectError(str(gai))
+    inner.__cause__ = gai
+    outer = httpx.ConnectError(str(gai))
+    outer.__cause__ = inner
+    assert is_local_dns_failure(outer) is True
+
+    # 被 provider 转成 HTTPException 之后（事故里的真实形态）
+    he = HTTPException(status_code=502, detail="upstream error")
+    he.__cause__ = outer
+    assert is_local_dns_failure(he) is True
+
+    # 非 DNS 的失败一律 False，别把冷却功能废掉
+    assert is_local_dns_failure(httpx.ConnectError("connection refused")) is False
+    assert is_local_dns_failure(httpx.ReadTimeout("read timed out")) is False
+    assert is_local_dns_failure(HTTPException(status_code=502, detail="boom")) is False
+    assert is_local_dns_failure(TypeError("bad arg")) is False
+    assert is_local_dns_failure(None) is False
+
+
+def test_describe_exception_reads_through_empty_message():
+    """空消息异常要能沿链读出真因（zcode「upstream error: 」空日志的回归）。"""
+    from buddy_proxy.core.errors import describe_exception
+
+    # httpcore 映射出的 httpx 异常自身 str() 为空——直接打日志就是一行空话
+    assert str(httpx.ReadError("")) == ""
+    assert describe_exception(httpx.ReadError("")) == "ReadError"
+
+    # 真因在下层：要能读出来
+    gai = socket.gaierror(8, "nodename nor servname provided, or not known")
+    exc = httpx.ReadError("")
+    exc.__cause__ = gai
+    desc = describe_exception(exc)
+    assert "gaierror" in desc and "nodename nor servname" in desc
+
+    # 顶层有内容时只用顶层，不铺开整条链（避免日志噪音）
+    top = ValueError("clear message")
+    top.__cause__ = RuntimeError("inner noise")
+    assert describe_exception(top) == "clear message"
+
+    assert describe_exception(None) == "unknown error"
+    assert len(describe_exception(ValueError("x" * 1000))) == 300
 
 
 # --- 3. 冷却标记语义 ----------------------------------------------------------

@@ -25,7 +25,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 from buddy_proxy.core.credit_estimate import estimate_credit
-from buddy_proxy.core.metrics import ACCOUNT_META, SSEUsageExtractor, normalize_usage
+from buddy_proxy.core.metrics import ACCOUNT_META, SSEErrorExtractor, SSEUsageExtractor, normalize_usage
 from buddy_proxy.core.state import (
     diagnostic,
     get_state,
@@ -205,23 +205,31 @@ async def _instrument(
 async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
                           protocol: str, started: float, client: str = "",
                           account_meta: dict[str, str] | None = None):
-    """流式响应的计数包装：透传所有 chunk，结束时补记（含 TTFT 与流式 usage）。"""
+    """流式响应的计数包装：透传所有 chunk，结束时补记（含 TTFT 与流式 usage）。
+
+    带内错误（provider 用正常 SSE 事件报错、生成器正常结束）也记成失败——
+    否则就是假绿灯：客户端一个字节没收到，指标却是 200。
+    """
     chunk_count = 0
     error = ""
     first_ts: float | None = None
     extractor = SSEUsageExtractor()
+    err_extractor = SSEErrorExtractor()
     try:
         async for chunk in inner:
             if first_ts is None:
                 first_ts = time.time()
             chunk_count += 1
             extractor.feed(chunk)
+            err_extractor.feed(chunk)
             yield chunk
     except Exception as exc:
         error = f"stream error: {exc}"
         raise
     finally:
         u = extractor.usage
+        if not error and err_extractor.message:
+            error = f"in-band error: {err_extractor.message}"
         credit, credit_estimated = _credit_or_estimate(provider_id, model_id, u)
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=500 if error else 200, duration_ms=_elapsed_ms(started),
