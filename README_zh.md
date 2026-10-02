@@ -209,9 +209,9 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 
 ## 模型列表
 
-模型目录由 `src/buddy_proxy/web/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **45 个模型**，分属两个通道；`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
+模型目录由 `src/buddy_proxy/web/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **46 个模型**，分属两个通道；`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
 
-**CodeBuddy 通道**（18 个）——直接用模型名，无前缀：
+**CodeBuddy 通道**（19 个）——直接用模型名，无前缀：
 
 | id | name | credits |
 |---|---|---|
@@ -231,6 +231,7 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 | `kimi-k2.7` | Kimi-K2.7-Code | x0.57 |
 | `kimi-k2.6` | Kimi-K2.6 | x0.52 |
 | `deepseek-v4.1-flash` | Deepseek-V4.1-Flash | x0.11 |
+| `space-bunny` | Space-Bunny | x0.03 |
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
 

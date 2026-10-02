@@ -287,6 +287,47 @@
       "credits": "x0.11 credits"
     },
     {
+      "contextWindow": {
+        "defaultLength": 1000000,
+        "supportedLengths": [
+          300000,
+          600000,
+          1000000
+        ]
+      },
+      "credits": "x0.03 credits",
+      "descriptionEn": "Blazing-fast, anonymous model with strong coding skills and native multimodal input.",
+      "descriptionZh": "推理速度极快，编码能力强劲，并支持原生多模态输入的匿名大模型",
+      "id": "space-bunny",
+      "maxAllowedSize": 1000000,
+      "maxInputTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "name": "Space-Bunny",
+      "onlyReasoning": true,
+      "reasoning": {
+        "canDisableThinking": false,
+        "defaultEffort": "max",
+        "summary": "auto",
+        "supportedEfforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "relatedModels": {
+        "builtin-lite": "wb-lite",
+        "lite": "space-bunny",
+        "reasoning": "space-bunny"
+      },
+      "supportsImages": true,
+      "supportsReasoning": true,
+      "supportsToolCall": true,
+      "temperature": 1,
+      "vendor": "f"
+    },
+    {
       "credits": "x0.17 credits",
       "descriptionEn": "DeepSeek flagship model, supporting 1M context window",
       "descriptionZh": "DeepSeek 旗舰模型,支持 1M 上下文窗口",
