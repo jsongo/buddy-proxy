@@ -115,6 +115,21 @@ def test_sync_settings_rejects_broken_structure(cli_home):
     assert json.loads((cli_home / "settings.json").read_text()) == {"security": "oops"}
 
 
+def test_sync_skips_oauth_creds_when_encrypted(cli_home, monkeypatch):
+    """CLI 开了加密存储：明文 oauth_creds 写了也不被读，跳过并明说。"""
+    from buddy_proxy.gemini import cli_bridge
+
+    monkeypatch.setenv("GEMINI_FORCE_ENCRYPTED_FILE_STORAGE", "true")
+    notes = cli_bridge.sync_to_cli(_our_cred())
+    assert not (cli_home / "oauth_creds.json").exists()
+    assert any("GEMINI_FORCE_ENCRYPTED_FILE_STORAGE" in n for n in notes)
+    # settings / google_accounts 不受影响，照写
+    settings = json.loads((cli_home / "settings.json").read_text())
+    assert settings["security"]["auth"]["selectedType"] == "oauth-personal"
+    accounts = json.loads((cli_home / "google_accounts.json").read_text())
+    assert accounts["active"] == "u@x.com"
+
+
 # ---------------------------------------------------------------------------
 # 读回 + 双向转换
 # ---------------------------------------------------------------------------
@@ -259,6 +274,27 @@ def test_login_gemini_no_declines_browser_flow(cli_home, buddy_cred, monkeypatch
     rc = auth_login._login_gemini(open_browser=False)
     assert rc == 0
     assert "n@x.com" in capsys.readouterr().out
+
+
+def test_login_gemini_shows_buddy_account_when_switching(cli_home, buddy_cred, monkeypatch, capsys):
+    """buddy 已登录另一个账号：CLI 态提示要把当前账号亮出来（知情换号）。"""
+    import buddy_proxy.auth.login as auth_login
+    from buddy_proxy.gemini import cli_bridge, credentials as creds, login as gm_login
+
+    cli_bridge.sync_to_cli(_our_cred())  # CLI 账号 u@x.com
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00",
+                     "email": "a@x.com", "project_id": "p-old"})
+    monkeypatch.setattr(auth_login, "_ask_default_yes", lambda q: False)
+    monkeypatch.setattr(
+        gm_login, "login_interactive",
+        lambda open_browser=True: {"email": "u@x.com", "tier": "t", "project_id": "p"})
+
+    rc = auth_login._login_gemini(open_browser=False)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "当前 buddy 登录的是 a@x.com" in out
+    assert "切换" in out
 
 
 def test_login_gemini_unusable_cli_state_falls_through(cli_home, buddy_cred, monkeypatch, capsys):

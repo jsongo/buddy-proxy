@@ -147,18 +147,26 @@ def sync_to_cli(cred: dict[str, Any]) -> list[str]:
     except OSError as exc:
         return [f"创建 {home} 失败，CLI 互通跳过: {exc}"]
 
+    # CLI 开了加密存储（keychain / 加密文件）时不读明文 oauth_creds.json，
+    # 写了也是摆设还让人误以为同步成功——跳过并明说。
+    encrypted = os.environ.get("GEMINI_FORCE_ENCRYPTED_FILE_STORAGE", "").strip().lower() == "true"
+
     # 1) oauth_creds.json：合并写（保留 CLI 已有字段如 id_token），0600
-    try:
-        existing: dict[str, Any] = {}
-        if cli_creds_path().exists():
-            loaded = json.loads(cli_creds_path().read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                existing = loaded
-        payload = {**existing, **to_cli_format(cred)}
-        _write_json(cli_creds_path(), payload, mode=0o600)
-        notes.append(f"已写入 {cli_creds_path()}（本机 gemini CLI 可直接使用）")
-    except (OSError, json.JSONDecodeError) as exc:
-        notes.append(f"写 {cli_creds_path()} 失败: {exc}")
+    if encrypted:
+        notes.append("CLI 已开启 GEMINI_FORCE_ENCRYPTED_FILE_STORAGE（加密存储），"
+                     "跳过 oauth_creds.json 写入（CLI 不会读明文文件）")
+    else:
+        try:
+            existing: dict[str, Any] = {}
+            if cli_creds_path().exists():
+                loaded = json.loads(cli_creds_path().read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            payload = {**existing, **to_cli_format(cred)}
+            _write_json(cli_creds_path(), payload, mode=0o600)
+            notes.append(f"已写入 {cli_creds_path()}（本机 gemini CLI 可直接使用）")
+        except (OSError, json.JSONDecodeError) as exc:
+            notes.append(f"写 {cli_creds_path()} 失败: {exc}")
 
     # 2) settings.json：security.auth.selectedType（CLI 非交互启动的硬要求）
     try:

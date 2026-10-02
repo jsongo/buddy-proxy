@@ -442,6 +442,8 @@ def _login_gemini(open_browser: bool = True, **_kwargs) -> int:
     from buddy_proxy.gemini.credentials import load_cred
     from buddy_proxy.gemini.login import LoginError, adopt_cli_login, login_interactive, resume_onboarding
 
+    buddy_cred = load_cred()
+
     # 1) 本机 Gemini CLI 已有登录态 → 问一声，默认直接用（省一次浏览器授权）
     cli_creds = cli_bridge.load_cli_creds()
     if cli_creds is not None:
@@ -449,6 +451,12 @@ def _login_gemini(open_browser: bool = True, **_kwargs) -> int:
         if usable:
             who = cli_bridge.cli_cached_email() or "未知账号"
             print(f"[Gemini] 检测到本机 Gemini CLI 已有登录态（{who}，{note}）。")
+            if buddy_cred and buddy_cred.get("project_id") and buddy_cred.get("email") \
+                    and buddy_cred["email"] != who:
+                # 直接采用会覆盖 buddy 已有登录态——把当前账号亮出来，别让人
+                # 回车之后才发现换号了
+                print(f"         （当前 buddy 登录的是 {buddy_cred['email']}，"
+                      f"直接采用会切换到 CLI 的账号）")
             if _ask_default_yes("         直接使用它吗？（跳过浏览器授权，Y/n）"):
                 try:
                     cred = adopt_cli_login()
@@ -460,7 +468,7 @@ def _login_gemini(open_browser: bool = True, **_kwargs) -> int:
         else:
             print(f"[Gemini] 本机 Gemini CLI 登录态不可用（{note}），改走浏览器登录。")
 
-    cred = load_cred()
+    cred = buddy_cred
     if cred:
         if cred.get("project_id"):
             print("[OK] gemini 已有登录态；重新登录会覆盖（换号/刷新授权请继续）。")
