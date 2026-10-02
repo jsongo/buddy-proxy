@@ -352,7 +352,7 @@ def test_ui_endpoint_antigravity_accounts():
     import types
 
     from buddy_proxy.antigravity import credentials as creds
-    from buddy_proxy.web import ui as web_ui
+    from buddy_proxy.web.ui import channels as web_ui  # 2026-10-03 拆包后端点在 channels
 
     creds.save_account_cred({"access_token": "a", "refresh_token": "r",
                              "expiry": "2099-01-01T00:00:00+00:00",

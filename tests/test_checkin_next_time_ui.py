@@ -21,7 +21,10 @@ import subprocess
 
 import pytest
 
-INDEX = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static/index.html"
+STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
+INDEX = STATIC / "index.html"
+BENEFITS_JS = STATIC / "benefits.js"  # 「下次时间」那段 JS 拆到这里（2026-10-03）
+STYLE_CSS = STATIC / "style.css"      # 布局/容器查询断言从这读
 SECTION_RE = re.compile(r'// ---- 打卡「下次时间」----(.*?)\n// ---- 打卡日历', re.S)
 
 pytestmark = pytest.mark.skipif(
@@ -30,9 +33,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def _extract_section() -> str:
-    text = INDEX.read_text(encoding="utf-8")
+    text = BENEFITS_JS.read_text(encoding="utf-8")
     match = SECTION_RE.search(text)
-    assert match, "index.html 里找不到「下次时间」那段 JS（函数被改名/挪走了？）"
+    assert match, "benefits.js 里找不到「下次时间」那段 JS（函数被改名/挪走了？）"
     return match.group(1)
 
 
@@ -248,7 +251,7 @@ def test_narrow_layout_keeps_button_off_the_meta_row():
     「22 小时 18 分后」被压在按钮底下（用户截图报的重叠就是这个）。
     grid 不做重叠检测，重叠了也不报错，所以只能用静态断言盯住行号。
     """
-    text = INDEX.read_text(encoding="utf-8")
+    text = STYLE_CSS.read_text(encoding="utf-8")
     block = re.search(r"@container \(max-width: 640px\)\s*\{(.*?)\n  \}", text, re.S)
     assert block, "找不到窄卡片那段容器查询（改过选择器？）"
     # 必须剥掉注释再匹配：那段块的注释里为了说明来龙去脉，恰好写了
@@ -312,8 +315,9 @@ def test_rows_card_declares_a_container():
 
     （不声明的话窄栏仍走三列布局，按钮又会被挤走——即最初那个 bug 复发。）
     """
-    text = INDEX.read_text(encoding="utf-8")
-    assert re.search(r"\.rows-card\s*\{[^}]*container-type:\s*inline-size", text), \
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    assert re.search(r"\.rows-card\s*\{[^}]*container-type:\s*inline-size", css), \
         ".rows-card 没声明 container-type: inline-size，容器查询不会生效"
-    # 卡片上真的挂了这个类，否则声明了也没用
-    assert 'class="chart-card rows-card"' in text, "打卡行卡片没挂 .rows-card"
+    # 卡片上真的挂了这个类，否则声明了也没用（DOM 在 index.html）
+    html = INDEX.read_text(encoding="utf-8")
+    assert 'class="chart-card rows-card"' in html, "打卡行卡片没挂 .rows-card"

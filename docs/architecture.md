@@ -61,9 +61,11 @@ src/buddy_proxy/
 - **`trae/`** is split by responsibility (credentials, transport, SSE,
   native tools, text fallback, and PAT). `trae_provider.py` remains the
   published `trae-cli` entrypoint and trae façade (not a shim to remove).
-- **`web/ui.py`** provides localhost-only administration endpoints and the
-  bundled UI. It may update runtime settings but must use `core/settings.py`
-  for persistence.
+- **`web/ui/`** provides localhost-only administration endpoints (split by
+  responsibility: channels, models, settings, queries, page) and the bundled
+  UI under `web/static/` (an `index.html` skeleton plus `style.css` and three
+  JS files, served from `/ui/{name}`). It may update runtime settings but must
+  use `core/settings.py` for persistence.
 
 ## Runtime composition
 
