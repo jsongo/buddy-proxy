@@ -265,7 +265,7 @@ def adopt_cli_login() -> dict:
     浏览器授权。access token 过期时用同一 client 直接刷新。
     """
     from .cli_bridge import cli_cached_email, cli_creds_path, cli_creds_usable, load_cli_creds, to_buddy_format
-    from .credentials import access_token_valid, load_cred, refresh_cred
+    from .credentials import access_token_valid, refresh_cred
 
     cli = load_cli_creds()
     if cli is None:
