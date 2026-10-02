@@ -43,6 +43,30 @@ def test_quota_without_cred(provider, tmp_path, monkeypatch):
     assert provider.quota() is None
 
 
+def test_quota_epoch_tracks_account_list(provider):
+    """缓存代随账号列表变化——benefits 的 quota 缓存键带上它，加/删号后旧快照立刻失效。
+
+    实测过的问题（2026-10-03）：缓存键原来只有 provider id（TTL 300s），加了
+    账号 #2 后界面还顶着单账号旧快照，看起来就像多账号额度被合并成一份。
+    """
+    from buddy_proxy.antigravity import credentials as creds
+
+    assert provider.quota_epoch() == "empty"
+
+    creds.save_account_cred({"access_token": "a", "refresh_token": "r",
+                             "expiry": "2099-01-01T00:00:00+00:00",
+                             "email": "u@x.com", "project_id": "p1"})
+    one = provider.quota_epoch()
+    assert one == "u@x.com#0", one  # priority 从 0 起算（前端 index 才是 +1）
+
+    creds.save_account_cred({"access_token": "b", "refresh_token": "r2",
+                             "expiry": "2099-01-01T00:00:00+00:00",
+                             "email": "v@y.com", "project_id": "p2"})
+    two = provider.quota_epoch()
+    assert two != one, "加了账号缓存代必须变，否则旧快照继续顶满 TTL"
+    assert "u@x.com#0" in two and "v@y.com#1" in two, two
+
+
 def test_quota_falls_back_to_note_on_fetch_failure(provider, tmp_path, monkeypatch):
     """fetchAvailableModels 失败 → 退化为静态说明，不画假进度条。"""
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))

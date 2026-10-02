@@ -266,7 +266,11 @@ class BenefitsManager:
                     "done_today": done_today,
                     **(status or {}),
                 })
-            quota = await self._cached(f"quota:{pid}", p.quota)
+            # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
+            # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
+            epoch_fn = getattr(p, "quota_epoch", None)
+            qkey = f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
+            quota = await self._cached(qkey, p.quota)
             if quota is not None:
                 entry["quota"] = {"supported": True, **quota}
             provider_entries.append(entry)
