@@ -18,9 +18,11 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import secrets
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +37,13 @@ from ..core.metrics import ACCOUNT_META
 from ..gemini.convert import gemini_response_to_chat
 from . import failover
 from .convert import apply_effort_suffix, chat_to_antigravity_request
-from .credentials import AuthError, ensure_account_token, has_cred, list_accounts, load_cred
+from .credentials import (
+    AuthError,
+    ensure_account_token,
+    has_cred,
+    list_accounts,
+    load_account_cred,
+)
 
 log = logging.getLogger(__name__)
 
@@ -66,11 +74,39 @@ _MODEL_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
 
 _QUOTA_NOTE = "两组模型各自共享 weekly + 5h 双池（Gemini 组 / Claude+GPT 组），按 token 成本比例消耗"
 
+#: 多账号额度并发查询：整轮 deadline + 常驻线程池。
+#: 常驻（不是每轮新建）的理由见 trae/pat/quota.py：每轮新建 + shutdown(wait=False)
+#: 会让慢轮线程留在后台累积；常驻池上限封顶，慢轮占名额、后续轮次自然排队。
+_QUOTA_ROUND_DEADLINE_S = 8.0
+_QUOTA_WORKERS = 4
+_quota_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
+_quota_pool_lock = threading.Lock()
+
+
+def _quota_executor() -> "concurrent.futures.ThreadPoolExecutor":
+    global _quota_pool
+    with _quota_pool_lock:
+        if _quota_pool is None:
+            _quota_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_QUOTA_WORKERS, thread_name_prefix="ag-quota")
+        return _quota_pool
+
+
+def _quota_failure_notice(failed: int, total: int) -> dict[str, Any]:
+    """部分账号额度查询失败时的说明条（UI 警告色展示；benefits 认 query_failed 走短缓存）。"""
+    return {
+        "label": "Antigravity 额度查询失败",
+        "used": None,
+        "total": None,
+        "remaining": f"{failed}/{total} 个账号查询失败（网络或凭据问题；其余账号数据照常展示）",
+        "percent": None,
+        "reset_ts": None,
+        "query_failed": True,
+    }
+
 
 def _run_sync(factory):
     """协程工厂 → 独立事件循环执行（/ui 线程安全，见 mimo/provider._run_sync）。"""
-    import concurrent.futures
-
     def _runner():
         return asyncio.run(factory())
 
@@ -396,15 +432,26 @@ class AntigravityProvider(BaseProvider):
         return self._client
 
     def health(self) -> dict[str, Any]:
-        cred = load_cred() or {}
+        """健康概览（纯本地不触网）：顶层字段保持主账号（#1）语义兼容旧前端，
+        多账号概览放 ``accounts``（不含 token 等秘密）。"""
+        accounts = list_accounts()
+        cred = (load_account_cred(accounts[0].id) if accounts else None) or {}
         return {
             "id": self.id,
             "name": self.name,
-            "configured": has_cred(),
-            "email": cred.get("email") or "",
-            "project_id": cred.get("project_id") or "",
-            "tier": cred.get("tier") or "",
+            "configured": bool(accounts),
+            "email": str(cred.get("email") or ""),
+            "project_id": str(cred.get("project_id") or ""),
+            "tier": str(cred.get("tier") or ""),
             "models": list(DEFAULT_MODELS),
+            "accounts": [
+                {
+                    "id": a.id,
+                    "email": a.email or a.id,
+                    "project_id": str((load_account_cred(a.id) or {}).get("project_id") or ""),
+                }
+                for a in accounts
+            ],
         }
 
     def quota(self) -> dict[str, Any] | None:
@@ -416,65 +463,101 @@ class AntigravityProvider(BaseProvider):
         前缀归模型、按组聚合，组内取最小值代表该组水位。展示约定与前端
         ``quotaItemHtml`` 对齐：``percent`` 是**已用**百分比（进度条语义）、
         ``remaining/total`` 用千分制（0.9987 → 998.7/1000，小数看着直观）。
-        拿不到（未登录/接口失败）退化为静态说明，不画假进度条。
+
+        多账号：并发查（常驻线程池 min(4,n) + 整轮 deadline 兜底），每账号
+        两条（Gemini 组 / Claude+GPT 组），label 带 ``AG #N · `` 前缀供前端
+        分组；个别账号失败不拖垮整页，插 ``query_failed`` 说明条（benefits
+        层认这个标记走短缓存，网络恢复后尽快自愈）。拿不到退化为静态说明，
+        不画假进度条。
         """
-        if not has_cred():
+        accounts = list_accounts()
+        if not accounts:
             return None
+        multi = len(accounts) > 1
 
-        def _fetch() -> dict[str, Any] | None:
-            try:
-                return _run_sync(self._fetch_available_models)  # 传工厂，不是 coroutine
-            except Exception:  # noqa: BLE001 - quota 展示失败不影响主链路
-                return None
-
-        data = _fetch()
-        items: list[dict[str, Any]] = []
-        if isinstance(data, dict) and isinstance(data.get("models"), dict):
-            upstream = data["models"]
-            by_group: dict[str, list[tuple[float, float]]] = {}  # group -> [(frac, reset_epoch)]
-            for m in MODELS:
-                base = str(m.get("upstream") or m["id"])
-                fracs: list[tuple[float, float]] = []
-                for key, q in upstream.items():
-                    if key != base and not key.startswith(f"{base}-"):
-                        continue  # 变体名（-low/-medium/-high/-tiered）也算这个模型的
-                    if not isinstance(q, dict):
-                        continue
-                    info = q.get("quotaInfo") or {}
-                    frac = info.get("remainingFraction")
-                    if not isinstance(frac, (int, float)):
-                        continue
-                    fracs.append((float(frac), _iso_to_epoch(info.get("resetTime"))))
-                if fracs:
-                    by_group.setdefault(str(m.get("group") or "gemini"), []).extend(fracs)
-            for group, fracs in by_group.items():
-                label = "Gemini 组" if group == "gemini" else "Claude/GPT 组"
-                worst = min(f for f, _ in fracs)
-                reset = min((t for _, t in fracs if t > 0), default=0)
-                items.append({
-                    "label": f"{label}（组内共享 weekly + 5h 双池，取组内最紧水位）",
-                    "used": None,
-                    "total": 1000,
-                    "remaining": round(worst * 1000, 1),
-                    "percent": round((1 - worst) * 100, 2),  # 前端 percent=已用
-                    "reset_ts": reset or None,
-                })
-        if not items:
-            items.append({
+        if multi:
+            pool = _quota_executor()
+            futures = [pool.submit(self._quota_one, a, i + 1, multi=True)
+                       for i, a in enumerate(accounts)]
+            deadline = time.monotonic() + _QUOTA_ROUND_DEADLINE_S
+            items: list[dict[str, Any]] = []
+            failures = 0
+            for fut in futures:  # 按 failover 顺位收集，UI 顺序稳定
+                try:
+                    its, ok = fut.result(timeout=max(deadline - time.monotonic(), 0.05))
+                except Exception:  # noqa: BLE001 - 超时/异常账号都算失败
+                    its, ok = [], False
+                if ok:
+                    items.extend(its)
+                else:
+                    failures += 1
+            if failures:
+                items.insert(0, _quota_failure_notice(failures, len(accounts)))
+        else:
+            its, ok = self._quota_one(accounts[0], 1, multi=False)
+            items = its if (ok and its) else [{
                 "label": _QUOTA_NOTE,
                 "used": None,
                 "total": None,
                 "remaining": None,
                 "percent": None,
                 "reset_ts": None,
-            })
-        cred = load_cred() or {}
+            }]
+        cred = (load_account_cred(accounts[0].id) if accounts else None) or {}
         return {
             "items": items,
             "level": str(cred.get("tier_name") or cred.get("tier") or "free-tier"),
         }
 
-    async def _fetch_available_models(self) -> dict[str, Any]:
+    def _quota_one(
+        self, acct: Any, index: int, *, multi: bool
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """单账号额度查询：成功返回 (items, True)，失败 ([], False)。"""
+        try:
+            data = _run_sync(lambda: self._fetch_available_models(acct.id))
+        except Exception:  # noqa: BLE001 - quota 展示失败不影响主链路
+            return [], False
+        if not (isinstance(data, dict) and isinstance(data.get("models"), dict)):
+            return [], False
+        prefix = f"AG #{index} · " if multi else ""
+        return self._quota_items_from(data, prefix), bool(data["models"])
+
+    @staticmethod
+    def _quota_items_from(data: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
+        """fetchAvailableModels 响应 → 按组聚合的额度条目（prefix 拼在 label 前）。"""
+        upstream = data["models"]
+        by_group: dict[str, list[tuple[float, float]]] = {}  # group -> [(frac, reset_epoch)]
+        for m in MODELS:
+            base = str(m.get("upstream") or m["id"])
+            fracs: list[tuple[float, float]] = []
+            for key, q in upstream.items():
+                if key != base and not key.startswith(f"{base}-"):
+                    continue  # 变体名（-low/-medium/-high/-tiered）也算这个模型的
+                if not isinstance(q, dict):
+                    continue
+                info = q.get("quotaInfo") or {}
+                frac = info.get("remainingFraction")
+                if not isinstance(frac, (int, float)):
+                    continue
+                fracs.append((float(frac), _iso_to_epoch(info.get("resetTime"))))
+            if fracs:
+                by_group.setdefault(str(m.get("group") or "gemini"), []).extend(fracs)
+        items: list[dict[str, Any]] = []
+        for group, fracs in by_group.items():
+            label = "Gemini 组" if group == "gemini" else "Claude/GPT 组"
+            worst = min(f for f, _ in fracs)
+            reset = min((t for _, t in fracs if t > 0), default=0)
+            items.append({
+                "label": f"{prefix}{label}（组内共享 weekly + 5h 双池，取组内最紧水位）",
+                "used": None,
+                "total": 1000,
+                "remaining": round(worst * 1000, 1),
+                "percent": round((1 - worst) * 100, 2),  # 前端 percent=已用
+                "reset_ts": reset or None,
+            })
+        return items
+
+    async def _fetch_available_models(self, account_id: str) -> dict[str, Any]:
         """POST /v1internal:fetchAvailableModels（带各模型配额剩余）。
 
         用一次性 client：本方法经 ``_run_sync`` 在临时事件循环里跑（/ui 线程），
@@ -484,7 +567,7 @@ class AntigravityProvider(BaseProvider):
         """
         from .fingerprint import auth_headers
 
-        token = await asyncio.to_thread(_primary_token)
+        token, _cred = await asyncio.to_thread(ensure_account_token, account_id)
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await self._send_with_fallback(
                 client, "fetchAvailableModels", {}, auth_headers(token), stream=False
