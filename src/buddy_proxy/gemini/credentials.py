@@ -27,6 +27,7 @@ import logging
 import os
 import time
 import urllib.parse
+import pathlib
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -52,8 +53,6 @@ _EXPIRY_SKEW = timedelta(minutes=2)
 
 def cred_path() -> "pathlib.Path":
     """凭证文件路径（``GEMINI_OAUTH_JSON`` 可覆盖）。"""
-    import pathlib
-
     env = os.environ.get("GEMINI_OAUTH_JSON", "").strip()
     if env:
         return pathlib.Path(env).expanduser()
