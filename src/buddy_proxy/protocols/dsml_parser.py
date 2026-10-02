@@ -14,10 +14,10 @@
 - ✅ 函数体缺失（consume_dsml_prefix）
 - ✅ 参数解析失败（match_tool_markup_name）
 """
-import re
 import json
 import uuid
 import html
+from dataclasses import dataclass
 from typing import Dict, List, Any, Optional, Tuple
 
 # 拆分（2026-10）后从 dsml_scanner 引回：本文件解析层在用 + 旧路径 re-export 兼容
@@ -45,7 +45,6 @@ from .dsml_scanner import (  # noqa: F401
     scan_tool_markup_tag_at,
     skip_xml_ignored_section,
 )
-from dataclasses import dataclass
 
 
 # ============================================================================

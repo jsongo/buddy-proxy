@@ -28,13 +28,9 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
-import os
 import pathlib
-import socket
-import struct
 import subprocess
 import threading
 import time
