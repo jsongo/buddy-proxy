@@ -1746,7 +1746,6 @@ def test_failure_result_uses_short_ttl(monkeypatch):
     """失败结果只用 FAILURE_TTL_S；成功结果仍用 SNAPSHOT_TTL_S。"""
     import asyncio
 
-    from buddy_proxy import benefits as benefits_mod
     from buddy_proxy.benefits import (
         SNAPSHOT_TTL_S, FAILURE_TTL_S, BenefitsManager, _is_failure,
     )

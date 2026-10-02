@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import re
@@ -23,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 
 from buddy_proxy.core.state import app, get_state, _get_state_or_none
 from buddy_proxy.web.model_list import load_models_from_local_config

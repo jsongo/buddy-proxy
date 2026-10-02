@@ -343,7 +343,7 @@ def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
     """
     import asyncio
 
-    from buddy_proxy.qoder.config import REGIONS, default_region_key, resolve_region
+    from buddy_proxy.qoder.config import REGIONS, resolve_region
     from buddy_proxy.qoder.credentials import (
         AuthError,
         auth_state_path,

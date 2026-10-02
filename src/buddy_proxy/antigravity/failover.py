@@ -22,7 +22,6 @@ from typing import Any
 from .credentials import (
     AccountRef,
     _expiry_dt,
-    access_token_valid,
     list_accounts,
     load_account_cred,
 )

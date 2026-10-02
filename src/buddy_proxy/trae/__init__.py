@@ -25,8 +25,8 @@ from .benefits_api import (
     fetch_checkin_status,
     fetch_ent_usage,
 )
-from .cli import _cli
-from .config import (
+from .cli import _cli  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
+from .config import (  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
     BASE_URL_CN,
     BASE_URL_SG,
     ENDPOINTS,
@@ -36,9 +36,9 @@ from .config import (
     X_APP_ID,
     _map_model,
 )
-from .credentials import _auth, _build_headers, _load_work_cred, _work_headers
-from .leak_guard import _AGENT_GUARD, _StreamLeakCleaner, _sanitize_agent_leak
-from .native_tools import (
+from .credentials import _auth, _build_headers, _load_work_cred, _work_headers  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
+from .leak_guard import _AGENT_GUARD, _StreamLeakCleaner, _sanitize_agent_leak  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
+from .native_tools import (  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
     _NativeToolAccumulator,
     _native_messages,
     _native_rejected,
@@ -46,22 +46,22 @@ from .native_tools import (
     _send_native_chat,
 )
 from .provider import TraeProvider
-from .sse import _parse_sse, _trae_error_text, _wrap_anthropic_stream
-from .text_protocol import (
+from .sse import _parse_sse, _trae_error_text, _wrap_anthropic_stream  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
+from .text_protocol import (  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
     _build_chat_body,
     _build_tools_system,
     _extract_prompt,
     _looks_like_agent_request,
     _serialize_tool_calls,
 )
-from .text_toolcall import (
+from .text_toolcall import (  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
     _TC_CLOSE,
     _TC_OPEN,
     _StreamToolCallSplitter,
     _parse_tool_calls,
     _tool_names,
 )
-from .transport import _WORK_CHAT_MAX_ATTEMPTS, _send_trae_work_chat, send_trae_chat
+from .transport import _WORK_CHAT_MAX_ATTEMPTS, _send_trae_work_chat, send_trae_chat  # noqa: F401 - 兼容再导出（历史 from buddy_proxy.trae import _x）
 
 __all__ = [
     "TraeProvider",

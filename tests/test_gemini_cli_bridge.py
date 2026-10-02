@@ -300,7 +300,7 @@ def test_login_gemini_shows_buddy_account_when_switching(cli_home, buddy_cred, m
 def test_login_gemini_unusable_cli_state_falls_through(cli_home, buddy_cred, monkeypatch, capsys):
     """CLI 态不可用：提示后直接走浏览器流程，不问、不采用。"""
     import buddy_proxy.auth.login as auth_login
-    from buddy_proxy.gemini import cli_bridge, login as gm_login
+    from buddy_proxy.gemini import login as gm_login
 
     cli_home.mkdir(parents=True)
     (cli_home / "oauth_creds.json").write_text(json.dumps(

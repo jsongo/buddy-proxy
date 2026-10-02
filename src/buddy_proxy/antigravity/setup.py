@@ -22,7 +22,6 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .credentials import AuthError
 
 log = logging.getLogger(__name__)
 

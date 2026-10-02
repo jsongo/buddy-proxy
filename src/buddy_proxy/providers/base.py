@@ -19,7 +19,6 @@ from __future__ import annotations
 import abc
 from typing import Any, Sequence
 
-from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 

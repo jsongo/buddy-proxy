@@ -204,7 +204,6 @@ class CodeBuddyClient:
 
     def _get_machine_id(self) -> str:
         """获取或生成机器ID（模拟VSCode的machineId）"""
-        import hashlib
         import platform
         import uuid
         
