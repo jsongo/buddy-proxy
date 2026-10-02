@@ -275,3 +275,35 @@ def test_login_entry_unusable_agy_state_falls_through(tmp_path, monkeypatch, cap
     assert rc == 0
     out = capsys.readouterr().out
     assert "不可用" in out and "f@x.com" in out
+
+
+def test_login_entry_adopt_failure_falls_through_to_resume(tmp_path, monkeypatch, capsys):
+    """采用 agy 失败（onboarding 被拒等）→ 落回续跑/浏览器，不直接退出。
+
+    adopt 在 onboarding 阶段失败时 token 已落盘，fallthrough 后应走 resume
+    分支免浏览器续跑（与 gemini 通道「失败可改走浏览器授权」同款兜底）。
+    """
+    import buddy_proxy.auth.login as auth_login
+    from buddy_proxy.antigravity import cli_bridge, login as ag_login
+
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    monkeypatch.setattr(cli_bridge, "load_cli_creds", lambda: _keyring_payload())
+    monkeypatch.setattr(auth_login, "_ask_default_yes", lambda q: True)
+
+    def boom():
+        raise ag_login.LoginError("Antigravity onboarding 失败: INELIGIBLE")
+
+    monkeypatch.setattr(ag_login, "adopt_cli_login", boom)
+    # token 已落盘（boom 模拟 onboarding 失败的中间态）
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "agy@x.com"})
+    monkeypatch.setattr(
+        ag_login, "resume_onboarding",
+        lambda: {"email": "agy@x.com", "tier": "t", "project_id": "p"})
+
+    rc = auth_login._login_antigravity(open_browser=False)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "落回浏览器授权流程" in out and "agy@x.com" in out

@@ -270,8 +270,8 @@ def test_setup_fallback_to_prod_endpoint(monkeypatch):
     info = setup.setup_code_assist("tok")
     assert info["project_id"] == "proj-2"
     urls = [u for u, _ in fake.calls]
-    assert "daily-cloudcode-pa" in urls[0] and "cloudcode-pa" in urls[1]
-    assert "daily" not in urls[1].split("/v1internal")[0].replace("daily-", "", 0) or True
+    assert "daily-cloudcode-pa" in urls[0]
+    assert urls[1].startswith("https://cloudcode-pa")  # 第二发打到的是 prod 端点
 
 
 def test_setup_ineligible_diag(monkeypatch):

@@ -528,11 +528,14 @@ def _login_antigravity(open_browser: bool = True, **_kwargs) -> int:
             if _ask_default_yes("             直接使用它吗？（跳过浏览器授权，Y/n）"):
                 try:
                     cred = adopt_cli_login()
+                    _print_antigravity_ready(cred)
+                    return 0
                 except LoginError as exc:
                     print(f"\n[X] 采用 agy 登录态失败: {exc}")
-                    return 1
-                _print_antigravity_ready(cred)
-                return 0
+                    print("             落回浏览器授权流程（与 gemini 通道同款兜底）。\n")
+                    # adopt 可能已把 token 落盘（onboarding 阶段失败），刷新
+                    # 后让下面的 resume 分支先试免浏览器续跑
+                    buddy_cred = load_cred()
         else:
             print(f"[Antigravity] 本机 agy 登录态不可用（{note}），改走浏览器登录。")
 
