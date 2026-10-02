@@ -172,11 +172,13 @@ class _FakeUrlopen:
     def __init__(self, responses: dict[str, list]):
         self.responses = responses
         self.calls: list[tuple[str, dict]] = []
+        self.headers: list[dict] = []
 
     def __call__(self, req, timeout=30.0):
         url = req.full_url
         body = json.loads(req.data.decode()) if req.data else {}
         self.calls.append((url, body))
+        self.headers.append({k.lower(): v for k, v in req.header_items()})
         key = next((k for k in self.responses if k in url), None)
         if key is None:
             raise urllib.error.URLError("no canned response")
@@ -212,6 +214,23 @@ def test_setup_already_onboarded(monkeypatch):
     url, body = fake.calls[0]
     assert "daily-cloudcode-pa" in url  # daily 优先
     assert body["metadata"]["ideType"] == 9  # 数字枚举不是字符串
+
+
+def test_post_sends_real_bearer_token(monkeypatch):
+    """Authorization 必须是真 token——占位指纹头展开顺序反了会覆盖成
+    "Bearer "（空），上游 401 CREDENTIALS_MISSING（真实链路踩过）。"""
+    from buddy_proxy.antigravity import setup
+
+    fake = _FakeUrlopen({"loadCodeAssist": [(200, {
+        "currentTier": {"id": "free-tier"},
+        "cloudaicompanionProject": "proj-x"})]})
+    monkeypatch.setattr(setup.urllib.request, "urlopen", fake)
+
+    setup.setup_code_assist("tok-real")
+    assert fake.headers, "没有请求被发出"
+    for headers in fake.headers:
+        assert headers.get("authorization") == "Bearer tok-real"
+        assert headers.get("x-client-name") == "antigravity"  # 指纹头仍在
 
 
 def test_setup_onboard_free_tier_lro(monkeypatch):

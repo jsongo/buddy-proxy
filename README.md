@@ -432,7 +432,7 @@ Free-tier prompts may be reviewed by Google for training (the onboarding respons
 
 ## Antigravity provider (optional)
 
-Google's **Antigravity** free quota (the official successor to the Gemini CLI free tier), exposed under the `antigravity/` prefix. One OAuth login unlocks **Gemini 3.x, Claude Sonnet/Opus and GPT-OSS** models; quota is two independent pools (a Gemini group and a Claude/GPT group), each with a weekly + 5-hour rolling limit shared by the models inside the group:
+Google's **Antigravity** quota (the official successor to the Gemini CLI free tier; both personal free and Google AI Pro tiers land here), exposed under the `antigravity/` prefix. One OAuth login unlocks **Gemini 3.x, Claude Sonnet/Opus and GPT-OSS** models; quota is two independent pools (a Gemini group and a Claude/GPT group), each with a weekly + 5-hour rolling limit shared by the models inside the group:
 
 ```bash
 uv run buddy login antigravity   # Google OAuth (PKCE + local callback); reuses the local agy CLI login if present
@@ -442,18 +442,19 @@ curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"antigravity/claude-
 
 **Login imports from the local `agy` CLI (official Antigravity CLI)** — agy keeps its OAuth token in the system keychain (`security find-generic-password -s gemini -a antigravity`), and `buddy login antigravity` offers to adopt it directly (default yes, no browser round-trip; expired access tokens are refreshed with the same OAuth client, onboarding completed automatically). The import is read-only — agy has no plaintext config files to write back.
 
-The gateway talks to `cloudcode-pa.googleapis.com/v1internal:streamGenerateContent` (daily endpoint first, prod fallback) with the Antigravity client fingerprint (`X-Client-Name`, identity system-instruction and request envelope per the community-verified shape — see `src/buddy_proxy/antigravity/README.md`). `reasoning_effort` maps to the `-low/-medium/-high` model-name suffix on Gemini 3.x models automatically.
+The gateway talks to `cloudcode-pa.googleapis.com/v1internal:streamGenerateContent` (daily endpoint first, prod fallback) with the Antigravity client fingerprint (`X-Client-Name`, identity system-instruction and request envelope per the community-verified shape — see `src/buddy_proxy/antigravity/README.md`). Upstream only accepts the variant names from its `fetchAvailableModels` list (bare `gemini-3.x` names get a fake 429), so `reasoning_effort` maps to the `-low/-medium/-high` suffix per the model table (`efforts`/`default_effort` in `models.json` — e.g. `gemini-3.1-pro` defaults to `-low`, `gemini-3.8-flash` sends as `gemini-3.8-flash-tiered`, `gpt-oss-120b` as `gpt-oss-120b-medium`).
 
-Models (free tier; list lives in `src/buddy_proxy/antigravity/models.json`, `verified` flags update after a real run):
+Models (verified against a real account; list lives in `src/buddy_proxy/antigravity/models.json`):
 
-| Model id | Upstream | Notes |
+| Model id | Upstream name | Notes |
 |---|---|---|
-| `antigravity/gemini-3.1-pro` (+ `-low/-high`) | Gemini 3.1 Pro | Gemini group quota |
-| `antigravity/gemini-3.8-flash` / `gemini-3.6-flash` (+ effort suffixes) | Gemini 3.8/3.6 Flash | Gemini group quota |
-| `antigravity/claude-sonnet-4-6` / `claude-opus-4-6-thinking` | Claude via Google | Claude/GPT group quota |
-| `antigravity/gpt-oss-120b` | GPT-OSS 120B | Claude/GPT group quota |
+| `antigravity/gemini-3.1-pro` | `gemini-3.1-pro-low` (default) / `-high` | Gemini group quota |
+| `antigravity/gemini-3.6-flash` | `gemini-3.6-flash-medium` (default) / `-low` / `-high` | Gemini group quota |
+| `antigravity/gemini-3.8-flash` | `gemini-3.8-flash-tiered` (auto tier) | Gemini group quota |
+| `antigravity/claude-sonnet-4-6` / `claude-opus-4-6-thinking` | bare names | Claude/GPT group quota |
+| `antigravity/gpt-oss-120b` | `gpt-oss-120b-medium` | Claude/GPT group quota |
 
-`/usage`-style quota (remaining fraction per group) shows up in the admin panel when `fetchAvailableModels` is reachable.
+Quota shows up in the admin panel when `fetchAvailableModels` is reachable: one bar per group (the tightest model's watermark inside the group), remaining on a 0–1000 scale (e.g. `989.9 / 1000`) with the next reset time. Not reachable (or not logged in) it degrades to a static note.
 
 > `--antigravity` is only needed when you want this channel; without it the provider is not registered and `antigravity/...` model names fall through to the fallback provider.
 

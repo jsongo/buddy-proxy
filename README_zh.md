@@ -795,10 +795,10 @@ uv run python -m buddy_proxy --desensitize --gemini
 
 ### 8. Antigravity Provider（`antigravity/` 子包）
 
-Google **Antigravity** 的免费额度（Gemini CLI 免费层的官方继任者），挂
-`antigravity/` 前缀。一次 OAuth 登录同时解锁 **Gemini 3.x、Claude Sonnet/Opus
-和 GPT-OSS**；配额是两个独立池（Gemini 组 / Claude+GPT 组），组内各模型共享
-weekly + 5h 双池：
+Google **Antigravity** 的额度（Gemini CLI 免费层的官方继任者；个人免费层与
+Google AI Pro 订阅层都走这里），挂 `antigravity/` 前缀。一次 OAuth 登录同时
+解锁 **Gemini 3.x、Claude Sonnet/Opus 和 GPT-OSS**；配额是两个独立池
+（Gemini 组 / Claude+GPT 组），组内各模型共享 weekly + 5h 双池：
 
 ```bash
 uv run buddy login antigravity   # Google OAuth（PKCE + 本地回调）；检测到本机 agy 登录态可直接导入
@@ -815,16 +815,22 @@ uv run python -m buddy_proxy --desensitize --antigravity
 网关走 `cloudcode-pa.googleapis.com` 的 `/v1internal:streamGenerateContent`
 端点（daily 端点优先、prod 兜底），请求指纹按 Antigravity 客户端逐项对齐
 （`X-Client-Name`、身份 systemInstruction、envelope 形态——社区验证过的形态，
-详见 `src/buddy_proxy/antigravity/README.md`）。`reasoning_effort` 参数会自动
-映射成 Gemini 3 系模型名的 `-low/-medium/-high` 后缀。
+详见 `src/buddy_proxy/antigravity/README.md`）。上游只认
+`fetchAvailableModels` 列表里的变体名（gemini 3 系裸名会被 429 伪装拒绝），
+所以 `reasoning_effort` 按模型表声明的档位映射后缀（`models.json` 的
+`efforts`/`default_effort`——如 `gemini-3.1-pro` 默认 `-low`、
+`gemini-3.8-flash` 实发 `gemini-3.8-flash-tiered`、`gpt-oss-120b` 实发
+`gpt-oss-120b-medium`）。
 
-模型（免费层；表在 `src/buddy_proxy/antigravity/models.json`，`verified`
-跑通后手工置 true）：`antigravity/gemini-3.1-pro`、`gemini-3.8-flash` /
-`gemini-3.6-flash`（Gemini 组）、`claude-sonnet-4-6`、`claude-opus-4-6-thinking`、
-`gpt-oss-120b`（Claude/GPT 组）。
+模型（真实账号实测通过；表在 `src/buddy_proxy/antigravity/models.json`）：
+`antigravity/gemini-3.1-pro`（默认 `-low`，可显式 `-high`）、
+`gemini-3.6-flash`（默认 `-medium`，可 `-low`/`-high`）、`gemini-3.8-flash`
+（tiered 自动档）、`claude-sonnet-4-6`、`claude-opus-4-6-thinking`、
+`gpt-oss-120b`。
 
-管理面板配额区会在 `fetchAvailableModels` 可达时按组显示真实剩余比例
-（weekly + 5h 双池）。
+管理面板配额区在 `fetchAvailableModels` 可达时按组显示真进度条（组内取最紧
+水位）：剩余量用千分制展示（如 `989.9 / 1000`，小数看着直观）并带下次重置
+时间；拿不到（未登录/接口失败）退化为静态说明。
 
 > `--antigravity` 只在想用这条通道时才需要；不加则 provider 不注册，
 > `antigravity/...` 模型名落到兜底通道。

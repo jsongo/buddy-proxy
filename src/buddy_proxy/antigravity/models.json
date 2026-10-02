@@ -1,29 +1,44 @@
 {
-  "_comment": "Antigravity 免费通道模型表。id 为上游模型名（裸名，透传给 /v1internal:streamGenerateContent）。gemini 3 系可用 -low/-medium/-high 后缀控制推理力度（reasoning_effort 参数会自动加后缀）。group 对应 /usage 的两组独立限额（组内共享 weekly + 5h 双池）。实测不可用的挪出 models 并注明。",
+  "_comment": [
+    "Antigravity 免费通道模型表。id 是对外的模型名（/v1/models 展示），upstream 是上游真名（缺省同 id）。",
+    "上游只认 fetchAvailableModels 列表里的名字（2026-10-02 实测）：gemini 3 系裸名会被 429 RESOURCE_EXHAUSTED 伪装拒绝，",
+    "必须带 effort 后缀；gemini-3.8-flash 只有 -tiered 变体；gpt-oss-120b 只有 -medium；claude 系裸名可用。",
+    "efforts 声明该模型可加的档位（reasoning_effort 参数映射，不在表内的档位回落 default_effort）；缺省 = 名字固定不加后缀。",
+    "gemini-3.1-pro-high 在列表里但实测 400 INVALID_ARGUMENT，故 default_effort=low（显式指定 high 仍会尝试，便于上游放开后直接可用）。",
+    "group 对应 /usage 的两组独立限额（组内共享 weekly + 5h 双池）。",
+    "上游还有但未暴露：gemini-2.5-pro/-flash(-lite)、gemini-3.5-flash(-lite/-low/-extra-low)、gemini-3.1-flash(-lite/-image)、gemini-3-flash(-agent)、gemini-pro-agent、gemini-3.x-flash-tiered 变体；chat_*/tab_* 是内部条目不暴露。"
+  ],
   "models": [
     {
       "id": "gemini-3.1-pro",
+      "upstream": "gemini-3.1-pro",
+      "efforts": ["low", "high"],
+      "default_effort": "low",
       "group": "gemini",
       "description": "Gemini 3.1 Pro",
       "context": 1048576,
       "max_output": 65536,
-      "verified": false
-    },
-    {
-      "id": "gemini-3.8-flash",
-      "group": "gemini",
-      "description": "Gemini 3.8 Flash",
-      "context": 1048576,
-      "max_output": 65536,
-      "verified": false
+      "verified": true
     },
     {
       "id": "gemini-3.6-flash",
+      "upstream": "gemini-3.6-flash",
+      "efforts": ["low", "medium", "high"],
+      "default_effort": "medium",
       "group": "gemini",
       "description": "Gemini 3.6 Flash",
       "context": 1048576,
       "max_output": 65536,
-      "verified": false
+      "verified": true
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "upstream": "gemini-3.8-flash-tiered",
+      "group": "gemini",
+      "description": "Gemini 3.8 Flash（tiered 自动档）",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": true
     },
     {
       "id": "claude-opus-4-6-thinking",
@@ -31,7 +46,7 @@
       "description": "Claude Opus 4.6 (Thinking) via Google",
       "context": 200000,
       "max_output": 64000,
-      "verified": false
+      "verified": true
     },
     {
       "id": "claude-sonnet-4-6",
@@ -39,15 +54,16 @@
       "description": "Claude Sonnet 4.6 via Google",
       "context": 200000,
       "max_output": 64000,
-      "verified": false
+      "verified": true
     },
     {
       "id": "gpt-oss-120b",
+      "upstream": "gpt-oss-120b-medium",
       "group": "claude-gpt",
       "description": "GPT-OSS 120B via Google",
       "context": 131072,
       "max_output": 32768,
-      "verified": false
+      "verified": true
     }
   ]
 }

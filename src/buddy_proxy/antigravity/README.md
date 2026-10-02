@@ -117,22 +117,44 @@ yes）：access token 过期自动用同一 OAuth client 刷新、onboarding 自
 | CLIENT_METADATA | 数字枚举 `{ideType: 9, platform: 1-5, pluginType: 2}` | agy 是数字枚举（与 gemini 通道的字符串枚举不同） |
 | redirect path | `/oauth-callback`（PKCE S256 + state） | agy strings |
 
-## 配额结构（/usage 实测）
+## 配额结构（/usage 与 fetchAvailableModels 实测）
 
-两组**独立**限额，组内各模型共享 weekly + 5h 滚动双池，按 token 成本比例
-消耗：
+agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h 滚动双池，
+按 token 成本比例消耗：
 
 - **GEMINI MODELS**：gemini-3.x 系（`group: "gemini"`）
 - **CLAUDE AND GPT MODELS**：claude-sonnet/opus、gpt-oss（`group: "claude-gpt"`）
 
-`fetchAvailableModels` 返回各模型 `remainingFraction`，管理面板按组聚合
-（组内取最小值代表该组水位）画真进度条；接口失败退化为静态说明。
+但上游 API 只给单值：`fetchAvailableModels` 每个模型变体带
+`quotaInfo.remainingFraction`（0~1）+ `resetTime`（下一个刷新点，实测对应
+5h 池），**没有 weekly/5h 分池字段**（`fetchUserStatus`/`quotaStatus` 均
+404，/usage 的双池分解是 CLI 本地推算的）。管理面板按 upstream 名前缀归
+模型、按组聚合（组内取最小剩余代表水位），展示用千分制
+（0.9987 → `989.9 / 1000`），前端 `percent` 给的是已用比例（进度条约定）。
+
+## 模型名与 effort 后缀（实测坑）
+
+上游**只认 `fetchAvailableModels` 列表里的名字**，2026-10-02 实测：
+
+- gemini 3 系**裸名直接 429 `RESOURCE_EXHAUSTED`**（伪装成配额错误的
+  「模型不存在」），必须带 `-low/-medium/-high` 后缀；各模型可用档位不同
+  （3.1-pro 只有 low/high，3.6-flash 有 low/medium/high），且
+  `gemini-3.1-pro-high` 实测 400 `INVALID_ARGUMENT`。
+- `gemini-3.8-flash` 只有 `-tiered` 变体（自动档），`gpt-oss-120b` 只有
+  `-medium`；claude 系裸名可用。
+- 上游列表还有 2.5 系、3.5 系、`*-agent`、`*-image` 等变体和 `chat_*`/
+  `tab_*` 内部条目，模型表只暴露了实测可用的主力模型，其余见
+  `models.json` 的 `_comment`。
+
+所以 effort 后缀由模型表逐模型声明（`efforts` / `default_effort` /
+`upstream`），`convert.apply_effort_suffix` 解析成上游真名，不按名字前缀猜。
 
 ## 模型更新怎么做
 
-同 gemini 通道：改 `models.json` → 重启代理。effort 后缀（`-low/-medium/
--high`）只对 gemini-3 系生效，`convert.apply_effort_suffix` 自动追加，模型
-表里不用写后缀版本。下线的模型挪进 `_comment` 记一笔。
+同 gemini 通道：改 `models.json` → 重启代理。新模型先看
+`fetchAvailableModels` 列表确认上游名（带对后缀），加条目（`upstream` +
+`efforts`/`default_effort`），实测一发再置 `verified: true`。下线的模型挪进
+`_comment` 记一笔。
 
 ## 封号风险与已知边界
 

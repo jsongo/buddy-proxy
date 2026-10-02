@@ -49,8 +49,6 @@ _DEFAULT_SCRUB_RULES: list[tuple[str, str]] = [
     ("You are GPT", "You are the assistant"),
 ]
 
-_GEMINI3_EFFORT_RE = re.compile(r"^gemini-[3-9](\.\d+)?")
-
 
 def _parse_env_rules(raw: str) -> list[tuple[str, str]]:
     rules: list[tuple[str, str]] = []
@@ -75,20 +73,24 @@ def scrub_identity(text: str) -> str:
     return text
 
 
-def apply_effort_suffix(model: str, reasoning_effort: Any) -> str:
-    """reasoning_effort → gemini 3 系模型的 effort 后缀（antigravity 的用法）。
+def apply_effort_suffix(entry: dict[str, Any], reasoning_effort: Any) -> str:
+    """模型表条目 → 上游真名：upstream 覆盖 + effort 后缀解析。
 
-    ``gemini-3.1-pro`` + ``high`` → ``gemini-3.1-pro-high``；Claude/GPT 模型名
-    不加（它们的后缀体系不同，透传）；已有后缀不重复加。
+    antigravity 上游只认 fetchAvailableModels 列表里的名字（2026-10-02 实测：
+    gemini 3 系裸名 429、claude 裸名可用、3.8 只有 -tiered、gpt-oss 只有
+    -medium），所以后缀策略由模型表逐模型声明（``efforts`` / ``default_effort``），
+    不按名字前缀猜。显式 effort 不在 ``efforts`` 里时回落 ``default_effort``
+    （用户拿到一个能用的档位总比 400 好）。名字固定的模型（无 ``efforts``）
+    只做 upstream 映射。
     """
+    base = str(entry.get("upstream") or entry["id"])
+    efforts = [str(e).strip().lower() for e in entry.get("efforts") or [] if str(e).strip()]
+    if not efforts:
+        return base
     effort = str(reasoning_effort or "").strip().lower()
-    if effort not in ("low", "medium", "high"):
-        return model
-    if not _GEMINI3_EFFORT_RE.match(model):
-        return model
-    if re.search(r"-(low|medium|high)$", model):
-        return model
-    return f"{model}-{effort}"
+    if effort not in efforts:
+        effort = str(entry.get("default_effort") or efforts[0]).strip().lower()
+    return f"{base}-{effort}"
 
 
 def chat_to_antigravity_request(

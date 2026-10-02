@@ -84,7 +84,9 @@ def _post(access_token: str, method: str, body: dict[str, Any], timeout: float =
             url,
             data=json.dumps(body).encode(),
             method="POST",
-            headers={"Authorization": f"Bearer {access_token}", **metadata_headers()},
+            # 真 token 放后面：metadata_headers() 带的是占位空 Authorization，
+            # 顺序反了会被 "Bearer "（空）覆盖 → 上游 401 CREDENTIALS_MISSING
+            headers={**metadata_headers(), "Authorization": f"Bearer {access_token}"},
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -111,7 +113,7 @@ def _get_operation(access_token: str, name: str, timeout: float = 30.0) -> dict[
     req = urllib.request.Request(
         url,
         method="GET",
-        headers={"Authorization": f"Bearer {access_token}", **metadata_headers()},
+        headers={**metadata_headers(), "Authorization": f"Bearer {access_token}"},
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

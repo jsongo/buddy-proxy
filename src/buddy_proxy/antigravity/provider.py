@@ -57,6 +57,7 @@ def _load_models() -> list[dict[str, Any]]:
 
 MODELS: list[dict[str, Any]] = _load_models()
 DEFAULT_MODELS: dict[str, str] = {m["id"]: str(m.get("description") or m["id"]) for m in MODELS}
+_MODEL_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
 
 _QUOTA_NOTE = "两组模型各自共享 weekly + 5h 双池（Gemini 组 / Claude+GPT 组），按 token 成本比例消耗"
 
@@ -82,6 +83,19 @@ def _upstream_error_response(resp: httpx.Response) -> JSONResponse:
     except Exception:
         payload = {"error": {"message": resp.text[:500], "type": "upstream_error"}}
     return JSONResponse(status_code=resp.status_code, content=payload)
+
+
+def _iso_to_epoch(value: Any) -> float:
+    """上游 ISO 时间（``2026-10-02T20:28:46Z``）→ epoch 秒；解析失败返回 0。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        from datetime import datetime, timezone
+
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 class AntigravityProvider(BaseProvider):
@@ -127,8 +141,10 @@ class AntigravityProvider(BaseProvider):
         self.ensure_auth()
         stream = bool(body.get("stream", False))
         model = str(body.get("model") or MODELS[0]["id"]).removeprefix(f"{self.id}/")
-        upstream_model = model if model in DEFAULT_MODELS else MODELS[0]["id"]
-        upstream_model = apply_effort_suffix(upstream_model, body.get("reasoning_effort"))
+        # 模型表条目驱动：upstream 真名 + effort 后缀（上游只认列表变体名，
+        # gemini 3 系裸名会被 429 RESOURCE_EXHAUSTED 伪装拒绝）
+        entry = _MODEL_BY_ID.get(model) or MODELS[0]
+        upstream_model = apply_effort_suffix(entry, body.get("reasoning_effort"))
 
         # token 刷新是同步 urllib；丢线程池避免卡事件循环
         access_token = await asyncio.to_thread(_token_or_raise)
@@ -270,8 +286,12 @@ class AntigravityProvider(BaseProvider):
     def quota(self) -> dict[str, Any] | None:
         """免费额度：fetchAvailableModels 带各模型剩余比例（可画真进度条）。
 
-        同一组（gemini / claude-gpt）内模型共享 weekly + 5h 双池，服务端把
-        剩余量记在模型上；这里按组聚合展示（组内取最小剩余，代表该组水位）。
+        同一组（gemini / claude-gpt）内模型共享 weekly + 5h 双池；上游把
+        ``quotaInfo.remainingFraction``（0~1，两池取当前的合成水位）记在
+        每个模型变体上（gemini 系按 effort 后缀分条）。这里按 upstream 名
+        前缀归模型、按组聚合，组内取最小值代表该组水位。展示约定与前端
+        ``quotaItemHtml`` 对齐：``percent`` 是**已用**百分比（进度条语义）、
+        ``remaining/total`` 用千分制（0.9987 → 998.7/1000，小数看着直观）。
         拿不到（未登录/接口失败）退化为静态说明，不画假进度条。
         """
         if not has_cred():
@@ -286,24 +306,34 @@ class AntigravityProvider(BaseProvider):
         data = _fetch()
         items: list[dict[str, Any]] = []
         if isinstance(data, dict) and isinstance(data.get("models"), dict):
-            by_group: dict[str, list[dict[str, Any]]] = {}
+            upstream = data["models"]
+            by_group: dict[str, list[tuple[float, float]]] = {}  # group -> [(frac, reset_epoch)]
             for m in MODELS:
-                quota = data["models"].get(m["id"])
-                if not isinstance(quota, dict):
-                    continue
-                frac = quota.get("remainingFraction")
-                if frac is None:
-                    continue
-                by_group.setdefault(str(m.get("group") or "gemini"), []).append(quota)
-            for group, quotas in by_group.items():
+                base = str(m.get("upstream") or m["id"])
+                fracs: list[tuple[float, float]] = []
+                for key, q in upstream.items():
+                    if key != base and not key.startswith(f"{base}-"):
+                        continue  # 变体名（-low/-medium/-high/-tiered）也算这个模型的
+                    if not isinstance(q, dict):
+                        continue
+                    info = q.get("quotaInfo") or {}
+                    frac = info.get("remainingFraction")
+                    if not isinstance(frac, (int, float)):
+                        continue
+                    fracs.append((float(frac), _iso_to_epoch(info.get("resetTime"))))
+                if fracs:
+                    by_group.setdefault(str(m.get("group") or "gemini"), []).extend(fracs)
+            for group, fracs in by_group.items():
                 label = "Gemini 组" if group == "gemini" else "Claude/GPT 组"
+                worst = min(f for f, _ in fracs)
+                reset = min((t for _, t in fracs if t > 0), default=0)
                 items.append({
-                    "label": f"{label}（组内共享 weekly + 5h 双池）",
+                    "label": f"{label}（组内共享 weekly + 5h 双池，取组内最紧水位）",
                     "used": None,
-                    "total": None,
-                    "remaining": None,
-                    "percent": round(min(float(q.get("remainingFraction") or 0) for q in quotas) * 100, 2),
-                    "reset_ts": None,
+                    "total": 1000,
+                    "remaining": round(worst * 1000, 1),
+                    "percent": round((1 - worst) * 100, 2),  # 前端 percent=已用
+                    "reset_ts": reset or None,
                 })
         if not items:
             items.append({
@@ -329,10 +359,12 @@ class AntigravityProvider(BaseProvider):
         resp = await self._send_with_fallback(
             client, "fetchAvailableModels", {}, auth_headers(token), stream=False
         )
-        async with resp:
+        try:
             if resp.status_code >= 400:
                 return {}
             return resp.json()
+        finally:
+            await resp.aclose()
 
 
 # ---------------------------------------------------------------------------
