@@ -1,0 +1,169 @@
+# Antigravity 通道（Google Antigravity 免费额度）
+
+把 Antigravity 的免费额度代理成 OpenAI / Anthropic 兼容接口。Antigravity 是
+Gemini CLI 免费个人层的官方继任者（2026-06-18 起 Gemini CLI 免费层
+onboarding 直接 `UNSUPPORTED_CLIENT`），一次 OAuth 登录同时解锁 Gemini 3.x、
+Claude Sonnet/Opus 和 GPT-OSS。
+
+协议与指纹**以社区逆向的 Antigravity 客户端形态为准**（antigravity-claude-proxy，
+大量用户验证过的 JSON REST 形态），并用本机官方 `agy` CLI 二进制的 strings
+交叉佐证（OAuth client/secret、双端点、模型名、keyring 机制均能对上）。
+注意 agy 本体是 Go gRPC 黑盒，没有可读源码——如果哪天官方放出可对照的
+客户端实现，以它为准重新对齐。
+
+## 文件结构
+
+| 文件 | 职责 |
+|---|---|
+| `models.json` | 模型表（id/描述/配额组）。**加删模型改这里，不改代码** |
+| `fingerprint.py` | UA / X-Client-* / x-goog-api-client 请求头指纹（版本自动探测） |
+| `credentials.py` | OAuth 凭证存取与刷新（`~/.buddy-proxy/antigravity_oauth.json`） |
+| `setup.py` | loadCodeAssist / onboardUser onboarding（项目 ID 获取；daily→prod 端点 fallback） |
+| `login.py` | `buddy login antigravity`（PKCE + 本地回调；含 agy 登录态采用） |
+| `cli_bridge.py` | 与本机 agy CLI 凭证互通（**只读** keyring 导入） |
+| `convert.py` | OpenAI chat ↔ Antigravity envelope 双向转换（内层复用 gemini convert） |
+| `provider.py` | BaseProvider 实现（转发、SSE、协议转换、配额展示） |
+
+## 使用
+
+```bash
+buddy login antigravity     # Google OAuth 登录（检测到本机 agy 登录态可直接导入）
+# 启动代理加 --antigravity（或 ANTIGRAVITY_ENABLED=1）
+curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"antigravity/claude-sonnet-4-6","messages":[...]}'
+```
+
+凭证文件 `~/.buddy-proxy/antigravity_oauth.json`（0600）：access_token 过期
+自动刷新；refresh_token 长期有效（Google 安装型应用不轮换）。删掉该文件 =
+退出登录。
+
+## 与本机 agy CLI 互通（只读导入）
+
+agy（官方 Antigravity CLI，Go）把 OAuth token 存系统 keyring，**没有明文
+配置文件可回写**——所以互通方向与 gemini 通道相反：只读导入，不回写。
+
+- **macOS**：login keychain 的 generic password，
+  `security find-generic-password -s gemini -a antigravity -w`（service 归在
+  gemini 产品线下，就叫 `gemini`；二进制 strings + 本机 keychain 实测确认）。
+  读取不需要授权弹窗（login keychain 自己的条目）。
+- **Linux**：go-keyring 走 Secret Service，`secret-tool lookup service gemini
+  username antigravity`（实验性支持）。Windows 无对应 CLI 工具，提示手动。
+
+keyring 值格式（`go-keyring-base64:` 前缀 + base64 JSON）：
+
+```json
+{
+  "token": {
+    "access_token": "...", "token_type": "Bearer",
+    "refresh_token": "...",
+    "expiry": "2026-10-02T23:55:02.382106+08:00"
+  },
+  "auth_method": "consumer",
+  "id_token": "<JWT，payload 带 email claim>"
+}
+```
+
+`expiry` 是 ISO 带时区，与 buddy cred 的 `expiry` 同格式，原样透传。
+`buddy login antigravity` 检测到可用登录态会先问「直接使用它吗？」（默认
+yes）：access token 过期自动用同一 OAuth client 刷新、onboarding 自动补跑、
+落盘我们自己的凭据文件。两边共享同一个 refresh_token，各自刷新互不冲突
+（Google 安装型 client 不轮换 refresh_token）。
+
+## 请求形态（envelope）
+
+`POST {base}/v1internal:streamGenerateContent?alt=sse`（流式）/
+`v1internal:generateContent`（非流式），body 是 Antigravity 包装：
+
+```json
+{
+  "project": "<cloudaicompanionProject>",
+  "model": "gemini-3.8-flash",
+  "request": { "contents": [...], "generationConfig": {...} },
+  "userAgent": "antigravity",
+  "requestType": "agent",
+  "requestId": "agent-<uuid>"
+}
+```
+
+与 gemini 通道的差异：`model` 是裸名（不带 `models/` 前缀）、内层 request
+不带 `session_id`、systemInstruction 走身份断言注入（见下）。
+
+## 身份断言与 scrub（已知风控点）
+
+免费层上游会检查 systemInstruction 里的身份自认。社区共识（issue #76）：
+不带 Antigravity 身份断言、或带着「You are Claude/Codex/ChatGPT」等竞品
+断言硬调，会触发 429 `RESOURCE_EXHAUSTED`。处理：
+
+1. 注入两个 user-role part 的身份断言（正文 + `[ignore]` 包裹版各一）；
+2. 用户自己的 system prompt 先 scrub 竞品身份断言
+   （"You are Claude Code" → "You are the assistant" 这类，规则见
+   `convert.py` 的 `_DEFAULT_SCRUB_RULES`，可用 `ANTIGRAVITY_SCRUB_IDENTITY`
+   环境变量追加 `term=>replacement` 规则）。
+
+## 指纹对齐表
+
+版本探测顺序：env（`ANTIGRAVITY_UA_VERSION` / `ANTIGRAVITY_CLIENT_VERSION`）
+> 本机 `/Applications/Antigravity.app/.../product.json` > 内置 fallback。
+跟随客户端升级时优先确认这几个值。
+
+| 项 | 值（fallback） | 来源 |
+|---|---|---|
+| client_id | `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com` | agy strings + 参考实现一致 |
+| scopes | cloud-platform, userinfo.email, userinfo.profile, cclog, experimentsandconfigs | 同上 |
+| 端点 | `daily-cloudcode-pa.googleapis.com` → `cloudcode-pa.googleapis.com` | 参考实现同序；`CLOUD_CODE_URL` env 可覆盖（agy 内置） |
+| `X-Client-Name` | `antigravity` | 参考实现 |
+| `X-Client-Version` | 本机 product.json `version`（fallback `1.110.0`） | version-detector 同策略 |
+| UA | `antigravity/<ideVersion> <os>/<arch>[ <model>]`（ideVersion fallback `2.0.3`） | 参考实现 |
+| `x-goog-api-client` | `gl-node/18.18.2 fire/0.8.6 grpc/1.10.x` | 参考实现（Electron 内嵌 Node） |
+| CLIENT_METADATA | 数字枚举 `{ideType: 9, platform: 1-5, pluginType: 2}` | agy 是数字枚举（与 gemini 通道的字符串枚举不同） |
+| redirect path | `/oauth-callback`（PKCE S256 + state） | agy strings |
+
+## 配额结构（/usage 与 fetchAvailableModels 实测）
+
+agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h 滚动双池，
+按 token 成本比例消耗：
+
+- **GEMINI MODELS**：gemini-3.x 系（`group: "gemini"`）
+- **CLAUDE AND GPT MODELS**：claude-sonnet/opus、gpt-oss（`group: "claude-gpt"`）
+
+但上游 API 只给单值：`fetchAvailableModels` 每个模型变体带
+`quotaInfo.remainingFraction`（0~1）+ `resetTime`（下一个刷新点，实测对应
+5h 池），**没有 weekly/5h 分池字段**（`fetchUserStatus`/`quotaStatus` 均
+404，/usage 的双池分解是 CLI 本地推算的）。管理面板按 upstream 名前缀归
+模型、按组聚合（组内取最小剩余代表水位），展示用千分制
+（0.9987 → `989.9 / 1000`），前端 `percent` 给的是已用比例（进度条约定）。
+
+## 模型名与 effort 后缀（实测坑）
+
+上游**只认 `fetchAvailableModels` 列表里的名字**，2026-10-02 实测：
+
+- gemini 3 系**裸名直接 429 `RESOURCE_EXHAUSTED`**（伪装成配额错误的
+  「模型不存在」），必须带 `-low/-medium/-high` 后缀；各模型可用档位不同
+  （3.1-pro 只有 low/high，3.6-flash 有 low/medium/high），且
+  `gemini-3.1-pro-high` 实测 400 `INVALID_ARGUMENT`。
+- `gemini-3.8-flash` 只有 `-tiered` 变体（自动档），`gpt-oss-120b` 只有
+  `-medium`；claude 系裸名可用。
+- 上游列表还有 2.5 系、3.5 系、`*-agent`、`*-image` 等变体和 `chat_*`/
+  `tab_*` 内部条目，模型表只暴露了实测可用的主力模型，其余见
+  `models.json` 的 `_comment`。
+
+所以 effort 后缀由模型表逐模型声明（`efforts` / `default_effort` /
+`upstream`），`convert.apply_effort_suffix` 解析成上游真名，不按名字前缀猜。
+
+## 模型更新怎么做
+
+同 gemini 通道：改 `models.json` → 重启代理。新模型先看
+`fetchAvailableModels` 列表确认上游名（带对后缀），加条目（`upstream` +
+`efforts`/`default_effort`），实测一发再置 `verified: true`。下线的模型挪进
+`_comment` 记一笔。
+
+## 封号风险与已知边界
+
+- **指纹来源是社区逆向**（不是官方客户端源码——agy 是 gRPC 黑盒），形态
+  被大量用户验证过，但官方改协议时我们只能跟着社区更新，滞后是常态。
+- **身份断言是硬要求**：绕过 scrub 直接发竞品身份会 429；429 原样透传，
+  代理不做重试（避免风暴）。
+- **数据隐私**：免费层 prompt 大概率同样被 Google 用于训练（Antigravity
+  条款同 Code Assist 精神），敏感内容别走这条通道。
+- token 只落本机 `~/.buddy-proxy/`（0700 目录 + 0600 文件），别进备份/仓库。
+- agy 升级可能换 OAuth client 或端点——`strings ~/.local/bin/agy | grep
+  GOCSPX` 可快速复核 secret 是否还匹配。

@@ -9,6 +9,7 @@
     python -m buddy_proxy.auth.login doubao              # 打印豆包（CDP）说明
     python -m buddy_proxy.auth.login mimo                # 小米账号浏览器登录（同 qoder 的 device flow）
     python -m buddy_proxy.auth.login gemini              # Google OAuth（Gemini 免费通道，与 ~/.gemini 登录态互通）
+    python -m buddy_proxy.auth.login antigravity         # Google OAuth（Antigravity 免费通道，Gemini/Claude/GPT 多模型；检测到本机 agy 登录态可直接导入）
 
 可选参数：
     --no-browser    codebuddy 登录不自动打开浏览器，只打印授权链接
@@ -39,7 +40,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "gemini-cli": "gemini",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder", "gemini")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder", "gemini", "antigravity")
 
 
 def _login_codebuddy(open_browser: bool = True) -> int:
@@ -499,6 +500,83 @@ def _login_gemini(open_browser: bool = True, **_kwargs) -> int:
     return 0
 
 
+def _login_antigravity(open_browser: bool = True, **_kwargs) -> int:
+    """antigravity 登录：Google OAuth（PKCE + 本地回调），Antigravity 免费通道。
+
+    流程与 gemini 登录同构，client/scopes 用 Antigravity 自己的。与本机
+    agy（Antigravity CLI）互通是单向读取：agy 的登录态在系统 keyring，检测
+    到就问用户是否直接采用（默认 yes，省一次浏览器授权）；keyring 只读，
+    登录结果不回写（agy 没有明文文件可写）。
+    """
+    from buddy_proxy.antigravity import cli_bridge
+    from buddy_proxy.antigravity.credentials import load_cred
+    from buddy_proxy.antigravity.login import LoginError, adopt_cli_login, login_interactive, resume_onboarding
+
+    buddy_cred = load_cred()
+
+    # 1) 本机 agy 已有登录态（keyring）→ 问一声，默认直接用
+    payload = cli_bridge.load_cli_creds()
+    if payload is not None:
+        usable, note = cli_bridge.cli_creds_usable(payload)
+        if usable:
+            who = cli_bridge.cli_cached_email(payload) or "未知账号"
+            print(f"[Antigravity] 检测到本机 Antigravity CLI（agy）已有登录态（{who}，{note}）。")
+            if buddy_cred and buddy_cred.get("project_id") and buddy_cred.get("email") \
+                    and buddy_cred["email"] != who:
+                print(f"             （当前 buddy 登录的是 {buddy_cred['email']}，"
+                      f"直接采用会切换到 agy 的账号）")
+            if _ask_default_yes("             直接使用它吗？（跳过浏览器授权，Y/n）"):
+                try:
+                    cred = adopt_cli_login()
+                    _print_antigravity_ready(cred)
+                    return 0
+                except LoginError as exc:
+                    print(f"\n[X] 采用 agy 登录态失败: {exc}")
+                    print("             落回浏览器授权流程（与 gemini 通道同款兜底）。\n")
+                    # adopt 可能已把 token 落盘（onboarding 阶段失败），刷新
+                    # 后让下面的 resume 分支先试免浏览器续跑
+                    buddy_cred = load_cred()
+        else:
+            print(f"[Antigravity] 本机 agy 登录态不可用（{note}），改走浏览器登录。")
+
+    cred = buddy_cred
+    if cred:
+        if cred.get("project_id"):
+            print("[OK] antigravity 已有登录态；重新登录会覆盖（换号/刷新授权请继续）。")
+            print(f"     当前账号: {cred.get('email') or '(未知)'}  project: {cred.get('project_id')}")
+        else:
+            # 上次 OAuth 成功但 onboarding 没走完：token 还在，先试免浏览器续跑
+            print("[Antigravity] 检测到已保存的 token 但缺 project（上次 onboarding 未完成），")
+            print("             先尝试直接续跑 onboarding（不需要再点浏览器授权）…")
+            try:
+                cred = resume_onboarding()
+            except LoginError as exc:
+                print(f"[Antigravity] 续跑失败: {exc}")
+                print("             如已修好账号问题仍失败，可删掉凭据文件后重新走完整登录：")
+                print("             rm ~/.buddy-proxy/antigravity_oauth.json && buddy login antigravity")
+                return 1
+            _print_antigravity_ready(cred)
+            return 0
+
+    try:
+        cred = login_interactive(open_browser=open_browser)
+    except KeyboardInterrupt:
+        print("\n[Antigravity] 已取消。")
+        return 1
+    except LoginError as exc:
+        print(f"\n[X] antigravity 登录失败: {exc}")
+        return 1
+    _print_antigravity_ready(cred)
+    return 0
+
+
+def _print_antigravity_ready(cred: dict) -> None:
+    print(f"[OK] antigravity 登录成功: {cred.get('email') or '(未知邮箱)'}")
+    print(f"     tier: {cred.get('tier')}  project: {cred.get('project_id')}")
+    print("     启动代理时加 --antigravity（或 ANTIGRAVITY_ENABLED=1）即可启用该通道。")
+    print("     若网关正在运行，需 `buddy restart` 才会加载新凭据。")
+
+
 _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
@@ -507,6 +585,7 @@ _DISPATCH = {
     "mimo": _login_mimo,
     "qoder": _login_qoder,
     "gemini": _login_gemini,
+    "antigravity": _login_antigravity,
 }
 
 
@@ -516,9 +595,9 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder) / gemini，默认 codebuddy")
+                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder) / gemini / antigravity，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
-                        help="codebuddy/trae/mimo/qoder/gemini 登录不自动打开浏览器，只打印链接")
+                        help="codebuddy/trae/mimo/qoder/gemini/antigravity 登录不自动打开浏览器，只打印链接")
     args = parser.parse_args()
 
     provider = PROVIDER_ALIASES.get(args.provider.strip().lower(), args.provider.strip().lower())

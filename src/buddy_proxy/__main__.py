@@ -198,6 +198,9 @@ def main():
     parser.add_argument("--gemini", action="store_true", default=os.getenv("GEMINI_ENABLED", "") == "1",
                         help="启用 Gemini provider（Google Code Assist 免费通道，OAuth 登录；"
                              "凭据跑 `buddy login gemini`）")
+    parser.add_argument("--antigravity", action="store_true", default=os.getenv("ANTIGRAVITY_ENABLED", "") == "1",
+                        help="启用 Antigravity provider（Google Antigravity 免费通道，Gemini 3.x / Claude / GPT-OSS；"
+                             "凭据跑 `buddy login antigravity`）")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
                              "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
@@ -280,6 +283,22 @@ def main():
         print(f"[Gemini] Enabled ({_gh.get('email') or '未登录'} / {_gh.get('tier') or '?'})")
     else:
         print("[Gemini] Disabled (pass --gemini or GEMINI_ENABLED=1 to enable)")
+
+    if args.antigravity:
+        from buddy_proxy.antigravity.provider import AntigravityProvider
+
+        antigravity = AntigravityProvider()
+        try:
+            antigravity.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("antigravity provider 认证未就绪: %s", exc.detail)
+        providers[antigravity.id] = antigravity
+        _ah = antigravity.health()
+        logger.info("Antigravity provider enabled (%s / %s)",
+                    _ah.get("email"), _ah.get("project_id"))
+        print(f"[Antigravity] Enabled ({_ah.get('email') or '未登录'} / {_ah.get('tier') or '?'})")
+    else:
+        print("[Antigravity] Disabled (pass --antigravity or ANTIGRAVITY_ENABLED=1 to enable)")
 
     if args.doubao:
         doubao = DoubaoProvider()
