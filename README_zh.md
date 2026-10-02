@@ -17,7 +17,7 @@
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）与 **Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
 ---
@@ -52,7 +52,7 @@ uv run python -m buddy_proxy --login --desensitize
 ```bash
 ./buddy start              # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # 登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder）
+./buddy login [provider]   # 登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity）
 ./buddy ui                 # 仅打开管理页（必要时先启动）
 ./buddy update             # 更新到最新代码（git pull -> uv sync -> 重启）
 
@@ -494,6 +494,8 @@ providers:
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
 --qoder                   启用 Qoder provider（COSY 签名，千问3.8 / GLM / Kimi）
+--antigravity             启用 Antigravity provider（Google Antigravity 免费额度，一个
+                          登录通吃 Gemini 3.x / Claude / GPT-OSS；可导入本机 agy 登录态）
 --gemini                  启用 Gemini provider（Google OAuth，Code Assist 免费额度；
                           登录态与本机 gemini CLI 互通）
 --login                   启动时浏览器登录（会打开浏览器并打印登录链接）
@@ -783,8 +785,49 @@ uv run python -m buddy_proxy --desensitize --gemini
 免费层的 prompt 会被 Google 审查用于训练（onboarding 响应里明说）——敏感内容
 别走这条通道。
 
+> **注意（2026-10）：** Google 已于 2026-06-18 产品性下线 Gemini CLI 免费个人层
+> （onboarding 直接 `UNSUPPORTED_CLIENT`；官方 CLI 0.33.1/0.62.0 实测同样）。
+> 免费个人账号请改用下面的 Antigravity 通道；本 gemini 通道继续适用于
+> standard-tier（付费 / 绑了 `GOOGLE_CLOUD_PROJECT`）的场景。
+
 > `--gemini` 只在想用这条通道时才需要；不加则 provider 不注册，`gemini/...`
 > 模型名落到兜底通道。
+
+### 8. Antigravity Provider（`antigravity/` 子包）
+
+Google **Antigravity** 的免费额度（Gemini CLI 免费层的官方继任者），挂
+`antigravity/` 前缀。一次 OAuth 登录同时解锁 **Gemini 3.x、Claude Sonnet/Opus
+和 GPT-OSS**；配额是两个独立池（Gemini 组 / Claude+GPT 组），组内各模型共享
+weekly + 5h 双池：
+
+```bash
+uv run buddy login antigravity   # Google OAuth（PKCE + 本地回调）；检测到本机 agy 登录态可直接导入
+uv run python -m buddy_proxy --desensitize --antigravity
+```
+
+**登录支持从本机 `agy`（官方 Antigravity CLI）导入**——agy 把 OAuth token 存
+系统 keyring（macOS `security find-generic-password -s gemini -a antigravity`），
+`buddy login antigravity` 检测到会先问「直接使用它吗？」（默认 yes，跳过浏览器
+授权；access token 过期自动用同一 OAuth client 刷新，onboarding 自动补跑）。
+导入是**只读**的——agy 没有明文配置文件可回写，刷新后的新 token 只存我们自己的
+`~/.buddy-proxy/antigravity_oauth.json`。
+
+网关走 `cloudcode-pa.googleapis.com` 的 `/v1internal:streamGenerateContent`
+端点（daily 端点优先、prod 兜底），请求指纹按 Antigravity 客户端逐项对齐
+（`X-Client-Name`、身份 systemInstruction、envelope 形态——社区验证过的形态，
+详见 `src/buddy_proxy/antigravity/README.md`）。`reasoning_effort` 参数会自动
+映射成 Gemini 3 系模型名的 `-low/-medium/-high` 后缀。
+
+模型（免费层；表在 `src/buddy_proxy/antigravity/models.json`，`verified`
+跑通后手工置 true）：`antigravity/gemini-3.1-pro`、`gemini-3.8-flash` /
+`gemini-3.6-flash`（Gemini 组）、`claude-sonnet-4-6`、`claude-opus-4-6-thinking`、
+`gpt-oss-120b`（Claude/GPT 组）。
+
+管理面板配额区会在 `fetchAvailableModels` 可达时按组显示真实剩余比例
+（weekly + 5h 双池）。
+
+> `--antigravity` 只在想用这条通道时才需要；不加则 provider 不注册，
+> `antigravity/...` 模型名落到兜底通道。
 
 ## 免责声明
 

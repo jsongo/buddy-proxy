@@ -17,7 +17,7 @@
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Multi-account** — isolated session files for work / personal accounts
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi) and **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app) **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state); all listed by `/v1/models` and routed by model name
 - **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
 ---
@@ -45,7 +45,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity)
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 ./buddy update             # update to the latest code (git pull -> uv sync -> restart)
 
@@ -427,6 +427,35 @@ Models (free tier, community-measured: ~250 req/day flash / ~100 req/day 2.5-pro
 Free-tier prompts may be reviewed by Google for training (the onboarding response says so) — keep sensitive content off this channel.
 
 > `--gemini` is only needed when you want this channel; without it the provider is not registered and `gemini/...` model names fall through to the fallback provider.
+
+> **Note (Oct 2026):** Google product-retired the Gemini CLI free tier on 2026-06-18 (`UNSUPPORTED_CLIENT` at onboarding; confirmed with the official CLI 0.33.1/0.62.0 as well). Personal/free accounts should use the Antigravity channel below; this gemini channel keeps working for standard-tier (paid/`GOOGLE_CLOUD_PROJECT`) setups.
+
+## Antigravity provider (optional)
+
+Google's **Antigravity** free quota (the official successor to the Gemini CLI free tier), exposed under the `antigravity/` prefix. One OAuth login unlocks **Gemini 3.x, Claude Sonnet/Opus and GPT-OSS** models; quota is two independent pools (a Gemini group and a Claude/GPT group), each with a weekly + 5-hour rolling limit shared by the models inside the group:
+
+```bash
+uv run buddy login antigravity   # Google OAuth (PKCE + local callback); reuses the local agy CLI login if present
+uv run python -m buddy_proxy --desensitize --antigravity
+curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"antigravity/claude-sonnet-4-6","messages":[...]}'
+```
+
+**Login imports from the local `agy` CLI (official Antigravity CLI)** — agy keeps its OAuth token in the system keychain (`security find-generic-password -s gemini -a antigravity`), and `buddy login antigravity` offers to adopt it directly (default yes, no browser round-trip; expired access tokens are refreshed with the same OAuth client, onboarding completed automatically). The import is read-only — agy has no plaintext config files to write back.
+
+The gateway talks to `cloudcode-pa.googleapis.com/v1internal:streamGenerateContent` (daily endpoint first, prod fallback) with the Antigravity client fingerprint (`X-Client-Name`, identity system-instruction and request envelope per the community-verified shape — see `src/buddy_proxy/antigravity/README.md`). `reasoning_effort` maps to the `-low/-medium/-high` model-name suffix on Gemini 3.x models automatically.
+
+Models (free tier; list lives in `src/buddy_proxy/antigravity/models.json`, `verified` flags update after a real run):
+
+| Model id | Upstream | Notes |
+|---|---|---|
+| `antigravity/gemini-3.1-pro` (+ `-low/-high`) | Gemini 3.1 Pro | Gemini group quota |
+| `antigravity/gemini-3.8-flash` / `gemini-3.6-flash` (+ effort suffixes) | Gemini 3.8/3.6 Flash | Gemini group quota |
+| `antigravity/claude-sonnet-4-6` / `claude-opus-4-6-thinking` | Claude via Google | Claude/GPT group quota |
+| `antigravity/gpt-oss-120b` | GPT-OSS 120B | Claude/GPT group quota |
+
+`/usage`-style quota (remaining fraction per group) shows up in the admin panel when `fetchAvailableModels` is reachable.
+
+> `--antigravity` is only needed when you want this channel; without it the provider is not registered and `antigravity/...` model names fall through to the fallback provider.
 
 ## Connect clients
 

@@ -1,0 +1,53 @@
+{
+  "_comment": "Antigravity 免费通道模型表。id 为上游模型名（裸名，透传给 /v1internal:streamGenerateContent）。gemini 3 系可用 -low/-medium/-high 后缀控制推理力度（reasoning_effort 参数会自动加后缀）。group 对应 /usage 的两组独立限额（组内共享 weekly + 5h 双池）。实测不可用的挪出 models 并注明。",
+  "models": [
+    {
+      "id": "gemini-3.1-pro",
+      "group": "gemini",
+      "description": "Gemini 3.1 Pro",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": false
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "group": "gemini",
+      "description": "Gemini 3.8 Flash",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": false
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "group": "gemini",
+      "description": "Gemini 3.6 Flash",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": false
+    },
+    {
+      "id": "claude-opus-4-6-thinking",
+      "group": "claude-gpt",
+      "description": "Claude Opus 4.6 (Thinking) via Google",
+      "context": 200000,
+      "max_output": 64000,
+      "verified": false
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "group": "claude-gpt",
+      "description": "Claude Sonnet 4.6 via Google",
+      "context": 200000,
+      "max_output": 64000,
+      "verified": false
+    },
+    {
+      "id": "gpt-oss-120b",
+      "group": "claude-gpt",
+      "description": "GPT-OSS 120B via Google",
+      "context": 131072,
+      "max_output": 32768,
+      "verified": false
+    }
+  ]
+}
