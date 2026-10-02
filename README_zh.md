@@ -845,7 +845,8 @@ uv run python -m buddy_proxy --desensitize --antigravity
 JSON，上限 8 个）。旧的单账号文件 `~/.buddy-proxy/antigravity_oauth.json`
 首次访问自动迁移为账号 #1（旧文件保留作备份）。删掉某账号的 JSON 文件即退出
 该账号（索引自愈）。管理页有独立的 Antigravity 面板（Trae PAT 同款布局）：
-各账号额度左右分栏 + 账号状态行（email / 冷却 / 缺 project 警告）。
+各账号额度左右分栏（分组名即账号邮箱）+ 账号状态一行简报（#序号 / token 剩余 /
+冷却 / 缺 project 警告）。
 
 > `--antigravity` 只在想用这条通道时才需要；不加则 provider 不注册，
 > `antigravity/...` 模型名落到兜底通道。
