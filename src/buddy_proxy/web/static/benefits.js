@@ -534,7 +534,17 @@ async function loadAntigravityAccounts() {
     const accts = r.accounts || [];
     // 数据没变就不动 DOM——renderAntigravityPanel 已用同一份快照渲染过
     if (JSON.stringify(accts) === JSON.stringify(AG_ACCTS)) return;
+    const snapshotMissing = !AG_ACCTS || !AG_ACCTS.length;
     AG_ACCTS = accts;
+    if (!accts.length) return;
+    if (snapshotMissing) {
+      // 首份快照到位（首屏刚开/刚登录）：带着快照整卡重渲——邮箱直出、
+      // ▲▼/✕ 按钮带上账号 id。只靠就地回填不够：回填补不了按钮（✕ 要
+      // id 才能渲），会干等下一轮 30s 重渲才出现。重渲尾部的再拉取数据
+      // 已同、走上面的早退，不会循环。
+      renderAntigravityPanel();
+      return;
+    }
     // 就地回填：组名换成邮箱、组名后插副标题。多账号按 data-ag-idx 对应；
     // 单账号组名没有前缀（后端 label 不加），唯一 .pat-pkg-name 直接替换。
     for (const a of accts) {

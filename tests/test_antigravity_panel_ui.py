@@ -87,6 +87,11 @@ globalThis.__RESPONSE = {enabled: true, accounts: [
   {index: 2, email: 'b@x.com', project_id: '', hours_left: null,
    cooling: [{kind: 'quota', minutes_left: 4}]},
 ]};
+// 快照已有旧值（回填路径；null 会走「首份快照整卡重渲」分支）
+AG_ACCTS = [
+  {index: 1, email: 'old@x.com', project_id: 'p', hours_left: 9, cooling: []},
+  {index: 2, email: 'old2@x.com', project_id: '', hours_left: null, cooling: []},
+];
 QS['#antigravity-panel [data-ag-idx="1"]'] = el('AG #1');
 QS['#antigravity-panel [data-ag-idx="2"]'] = el('AG #2');
 await loadAntigravityAccounts();
@@ -111,6 +116,7 @@ def test_single_account_name_and_subtitle_without_index():
 globalThis.__RESPONSE = {enabled: true, accounts: [
   {index: 1, email: 'solo@x.com', project_id: 'p', hours_left: 0.7, cooling: []},
 ]};
+AG_ACCTS = [{index: 1, email: 'stale@x.com', project_id: '', hours_left: null, cooling: []}];
 QS['#antigravity-panel .pat-pkg-name'] = el('Antigravity');
 await loadAntigravityAccounts();
 console.log(JSON.stringify({
@@ -128,6 +134,7 @@ def test_changed_data_rewrites_subtitle_without_duplicating():
 globalThis.__RESPONSE = {enabled: true, accounts: [
   {index: 1, email: 'a@x.com', project_id: 'p', hours_left: 2, cooling: []},
 ]};
+AG_ACCTS = [{index: 1, email: 'a@x.com', project_id: 'p', hours_left: 9, cooling: []}];
 const nameEl = el('AG #1');
 nameEl.nextElementSibling = {
   hasAttribute: t => t === 'data-ag-sub',
@@ -469,6 +476,25 @@ console.log(JSON.stringify({
     assert any("a@x.com" in t for t in data["toasts"])
 
 
+def test_first_snapshot_rerenders_panel_with_buttons():
+    """首份快照到位（首屏 AG_ACCTS=null）：整卡重渲，✕ 不干等 30s 才出现。"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'AG #1 · Gemini 组', remaining: 900, total: 1000, percent: 10, used: null, reset_ts: null},
+]}}]};
+AG_ACCTS = null;
+globalThis.__RESPONSE = {enabled: true, accounts: [
+  {index: 1, id: 'a@x.com', email: 'a@x.com', project_id: 'p', hours_left: 1, cooling: []},
+]};
+renderAntigravityPanel();   // 首渲（无快照占位）尾部拉账号 → 快照到位触发重渲
+await new Promise(r => setTimeout(r, 10));   // render 内部 load 是 fire-and-forget，等它落地
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    html = json.loads(out.strip().splitlines()[-1])["html"]
+    assert "agDeleteAccount('a@x.com')" in html, "首份快照就该带出 ✕，不等下一轮 30s"
+    assert "a@x.com" in html and ">AG #1<" not in html, "重渲走快照直出，不闪内部代号"
+
+
 def test_delete_account_cancelled_sends_nothing():
     """confirm 取消：不发请求、快照不动。"""
     out = _run_js("""
@@ -522,6 +548,11 @@ globalThis.__RESPONSE = {enabled: true, accounts: [
 ]};
 QS['#antigravity-panel [data-ag-idx="1"]'] = el('AG #1');
 QS['#antigravity-panel [data-ag-idx="2"]'] = el('AG #2');
+// 快照已有旧值，走就地回填分支（null 会触发整卡重渲、不经过回填）
+AG_ACCTS = [
+  {index: 1, email: 'a@x.com', project_id: 'p', hours_left: 1, cooling: []},
+  {index: 2, email: 'b@x.com', project_id: 'p', hours_left: 1, cooling: []},
+];
 await loadAntigravityAccounts();
 console.log(JSON.stringify({sub: QS['#antigravity-panel [data-ag-idx="1"]'].inserted.join('')}));
 """)
