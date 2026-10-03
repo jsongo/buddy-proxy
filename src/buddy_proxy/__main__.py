@@ -201,6 +201,9 @@ def main():
     parser.add_argument("--antigravity", action="store_true", default=os.getenv("ANTIGRAVITY_ENABLED", "") == "1",
                         help="启用 Antigravity provider（Google Antigravity 免费通道，Gemini 3.x / Claude / GPT-OSS；"
                              "凭据跑 `buddy login antigravity`）")
+    parser.add_argument("--kimi", action="store_true", default=os.getenv("KIMI_ENABLED", "") == "1",
+                        help="启用 Kimi provider（Kimi Code 订阅通道，kimi cli 同款 OAuth；"
+                             "凭据跑 `buddy login kimi` 或在管理面板导入 token JSON）")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
                              "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
@@ -299,6 +302,22 @@ def main():
         print(f"[Antigravity] Enabled ({_ah.get('email') or '未登录'} / {_ah.get('tier') or '?'})")
     else:
         print("[Antigravity] Disabled (pass --antigravity or ANTIGRAVITY_ENABLED=1 to enable)")
+
+    if args.kimi:
+        from buddy_proxy.kimi.provider import KimiProvider
+
+        kimi = KimiProvider()
+        try:
+            kimi.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("kimi provider 认证未就绪: %s", exc.detail)
+        providers[kimi.id] = kimi
+        _kh = kimi.health()
+        logger.info("Kimi provider enabled (%s / %s)",
+                    _kh.get("nickname") or _kh.get("user_id"), _kh.get("base_url"))
+        print(f"[Kimi] Enabled ({_kh.get('nickname') or '未登录'} / {len(_kh.get('accounts') or [])} 个账号)")
+    else:
+        print("[Kimi] Disabled (pass --kimi or KIMI_ENABLED=1 to enable)")
 
     if args.doubao:
         doubao = DoubaoProvider()

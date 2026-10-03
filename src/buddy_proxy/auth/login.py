@@ -10,6 +10,7 @@
     python -m buddy_proxy.auth.login mimo                # 小米账号浏览器登录（同 qoder 的 device flow）
     python -m buddy_proxy.auth.login gemini              # Google OAuth（Gemini 免费通道，与 ~/.gemini 登录态互通）
     python -m buddy_proxy.auth.login antigravity         # Google OAuth（Antigravity 免费通道，Gemini/Claude/GPT 多模型；检测到本机 agy 登录态可直接导入）
+    python -m buddy_proxy.auth.login kimi                # Kimi Code device flow（浏览器授权；kimi cli 导出的 token JSON 可在管理面板导入）
 
 可选参数：
     --no-browser    codebuddy 登录不自动打开浏览器，只打印授权链接
@@ -40,7 +41,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "gemini-cli": "gemini",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder", "gemini", "antigravity")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder", "gemini", "antigravity", "kimi")
 
 
 def _login_codebuddy(open_browser: bool = True) -> int:
@@ -589,6 +590,27 @@ def _print_antigravity_ready(cred: dict) -> None:
     print("     若网关正在运行，需 `buddy restart` 才会加载新凭据。")
 
 
+def _login_kimi(open_browser: bool = True, **_kwargs) -> int:
+    """Kimi Code 登录：官方 device flow（浏览器打开授权链接，CLI 轮询换 token）。
+
+    流程：device_authorization 拿 user_code + 完整验证链接 → 自动开浏览器
+    （打不开就手动复制）→ 轮询换 token → 尽力补 /v1/me 的昵称 → 多账号
+    落盘 ``~/.buddy-proxy/kimi/``。已有 kimi cli 导出的 token JSON 也可以
+    在管理面板直接导入，不必重走授权。
+    """
+    from buddy_proxy.kimi.login import LoginError, login_interactive
+
+    try:
+        login_interactive(open_browser=open_browser)
+    except LoginError as exc:
+        print(f"\n[X] Kimi 登录失败: {exc}")
+        return 1
+    except KeyboardInterrupt:
+        print("\n[Kimi] 已取消。")
+        return 1
+    return 0
+
+
 _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
@@ -598,6 +620,7 @@ _DISPATCH = {
     "qoder": _login_qoder,
     "gemini": _login_gemini,
     "antigravity": _login_antigravity,
+    "kimi": _login_kimi,
 }
 
 
@@ -607,9 +630,9 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder) / gemini / antigravity，默认 codebuddy")
+                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder) / gemini / antigravity / kimi，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
-                        help="codebuddy/trae/mimo/qoder/gemini/antigravity 登录不自动打开浏览器，只打印链接")
+                        help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi 登录不自动打开浏览器，只打印链接")
     args = parser.parse_args()
 
     provider = PROVIDER_ALIASES.get(args.provider.strip().lower(), args.provider.strip().lower())

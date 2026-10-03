@@ -246,7 +246,7 @@ cmd_login() {
     local extra=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|trae|zcode|doubao|mimo|qoder|gemini|gemini-cli|antigravity)
+            codebuddy|trae|zcode|doubao|mimo|qoder|gemini|gemini-cli|antigravity|kimi)
                 provider="$1" ;;
             workbuddy)
                 # workbuddy 是 codebuddy 的别名（登录模块内同样会归一）

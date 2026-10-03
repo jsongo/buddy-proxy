@@ -693,6 +693,8 @@ def chat_completion_to_anthropic_message(
     """将聚合的 OpenAI chat.completion 转换为 Anthropic Messages 响应。
 
     - 文本 → text 块；开头内联的 <think>...</think> → thinking 块
+    - ``message.reasoning_content``（DeepSeek 风格思考字段，kimi/qoder 等
+      上游在非流式响应里带）→ thinking 块，排在 text 前
     - tool_calls → tool_use 块（arguments 反序列化为 input 对象）
     - finish_reason 映射 stop_reason；usage 映射 token 字段
     """
@@ -701,6 +703,11 @@ def chat_completion_to_anthropic_message(
     content = message.get("content") or ""
 
     thinking, text = _split_leading_think(content)
+    reasoning = str(message.get("reasoning_content") or "").strip()
+    if reasoning:
+        # 显式思考字段优先于内联 <think> 拆解（上游既然单独给了字段，
+        # 正文里一般不会再内联；两者都有时拼在一起也不丢内容）
+        thinking = f"{reasoning}\n{thinking}".strip() if thinking else reasoning
 
     content_blocks = []
     if thinking:

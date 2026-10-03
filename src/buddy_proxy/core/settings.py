@@ -163,7 +163,7 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 #:
 #: ``workbuddy`` 是 ``codebuddy`` 的旧称，不单列：归一在 ``model_key`` 里做。
 KNOWN_PROVIDER_IDS = frozenset(
-    {"codebuddy", "zcode", "mimo", "qoder", "doubao", "trae", "traepat"}
+    {"codebuddy", "zcode", "mimo", "qoder", "doubao", "trae", "traepat", "kimi"}
 )
 
 #: 通道没启用时，告诉用户**怎么启用**。值是要打印给用户看的短句。
@@ -181,6 +181,7 @@ PROVIDER_ENABLE_HINTS: dict[str, str] = {
     "trae": "加 --trae（或设 TRAE_ENABLED=1）",
     # traepat 没独立开关：先配 TRAE_PAT_BEARER(_PROFILES)，再开 --trae
     "traepat": "配置 TRAE_PAT_BEARER（或 TRAE_PAT_BEARER_PROFILES）后加 --trae",
+    "kimi": "加 --kimi（或设 KIMI_ENABLED=1）",
     # codebuddy 是默认通道，进到这里只可能是「认得但没注册」的异常态
     "codebuddy": "检查启动参数（codebuddy 是默认通道，不应缺失）",
 }

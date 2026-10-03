@@ -11,6 +11,7 @@
 - antigravity 多账号状态（`ANTIGRAVITY_STATE_DIR`，index.json + 每账号
   cred 文件都在里面）与历史单账号文件（`ANTIGRAVITY_OAUTH_JSON`，迁移源）
   同理：登录/onboarding/quota 测试都会落盘。
+- kimi 多账号状态（`KIMI_STATE_DIR`）同理：登录/导入/quota 测试都会落盘。
 
 个别测试想自定路径时在测试体内再 setenv 覆盖即可（autouse fixture 先跑，
 测试体里的 monkeypatch.setenv 后生效）。
@@ -27,3 +28,4 @@ def _isolate_gemini_state_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path / "gemini-cli-home"))
     monkeypatch.setenv("ANTIGRAVITY_STATE_DIR", str(tmp_path / "antigravity"))
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "antigravity_oauth.json"))
+    monkeypatch.setenv("KIMI_STATE_DIR", str(tmp_path / "kimi"))
