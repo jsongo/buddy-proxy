@@ -184,11 +184,13 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
         items.append({"label": label, "used": used, "total": limit,
                       "remaining": remaining,
                       "percent": percent,
-                      # PAT 包的 ``end_time`` 是**到期**（包作废），不是周期
-                      # 重置——先送 reset_ts 是历史误投，界面会显示成
-                      # 「… 重置」；现按到期走 expire_ts，前端渲染「· 到期」。
-                      "reset_ts": None,
-                      "expire_ts": int(end_time) if end_time else None,
+                      # PAT 的 weekly / daily 包是**周期重置的池**，``end_time``
+                      # 是本周期结束、到点额度回满（cooldown.py 实测：「日包按
+                      # 00:00 重置」、4031 的 extra 分 daily/weekly 两池）。
+                      # 所以走 reset_ts 不走 expire_ts——后者会让到期横幅每天
+                      # 喊一次「PAT 日包要到期了」（其实只是又要刷新了）。
+                      "reset_ts": int(end_time) if end_time else None,
+                      "expire_ts": None,
                       "unit": "credit"})
     return items
 

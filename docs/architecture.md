@@ -228,10 +228,13 @@ silent:
   quota item carries `expire_ts` (the allowance is voided — plans, packs,
   check-in credits) and `reset_ts` (it refills on a cycle — ZCode's 5-hour
   window, antigravity's weekly pool). Upstreams rarely label which one they
-  mean: Qoder's `expiresAt` is an expiry, MiMo's `nextResetTime` a reset, and
-  Trae's `end_time` an expiry — all three were once fed into `reset_ts` and
-  rendered as "· 重置", which is how Qoder's "expires 10-30" displayed as
-  "10-30 resets". Guessing wrong is not cosmetic: `benefits._expiring` only
+  mean, and the *same field name* means different things in different
+  channels: Qoder's `expiresAt` is an expiry, MiMo's `nextResetTime` a reset,
+  Trae's `entitlement_base_info.end_time` an expiry — but Trae **PAT's**
+  `end_time` is a reset (weekly/daily pools refill at midnight). All of them
+  were once fed into `reset_ts` and rendered as "· 重置", which is how Qoder's
+  "expires 10-30" displayed as "10-30 resets". Guessing wrong is not
+  cosmetic: `benefits._expiring` only
   reads `expire_ts`, so a reset misfiled as an expiry would put "your 5-hour
   window expires in 2 hours" on the warning banner every single round. Items
   also carry `unit` (`credit` / `day` / `count` / `permille`), which gates the
