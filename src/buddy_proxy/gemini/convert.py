@@ -430,6 +430,24 @@ def _finish_reason(candidate: dict[str, Any]) -> str:
     }.get(raw, "tool_calls" if raw == "STOP" else "stop") or "stop"
 
 
+def usage_from_metadata(usage: dict[str, Any]) -> dict[str, Any]:
+    """Gemini usageMetadata → OpenAI usage（流式/非流式共用一份映射）。
+
+    缓存命中（cachedContentTokenCount）进 prompt_tokens_details.cached_tokens：
+    OpenAI 口径 prompt_tokens 已含缓存命中，这里不扣减；Anthropic 出口
+    （protocols/anthropic_adapter）会读这个字段转成 cache_read_input_tokens
+    并从 input_tokens 里扣除。
+    """
+    return {
+        "prompt_tokens": int(usage.get("promptTokenCount") or 0),
+        "completion_tokens": int(usage.get("candidatesTokenCount") or 0),
+        "total_tokens": int(usage.get("totalTokenCount") or 0),
+        "prompt_tokens_details": {
+            "cached_tokens": int(usage.get("cachedContentTokenCount") or 0),
+        },
+    }
+
+
 def gemini_response_to_chat(
     payload: dict[str, Any],
     *,
@@ -462,11 +480,7 @@ def gemini_response_to_chat(
                 "finish_reason": _finish_reason(cand),
             }
         ],
-        "usage": {
-            "prompt_tokens": int(usage.get("promptTokenCount") or 0),
-            "completion_tokens": int(usage.get("candidatesTokenCount") or 0),
-            "total_tokens": int(usage.get("totalTokenCount") or 0),
-        },
+        "usage": usage_from_metadata(usage),
     }
 
 

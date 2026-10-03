@@ -32,6 +32,7 @@ from .convert import (
     chat_to_gemini_request,
     gemini_response_to_chat,
     new_tool_call,
+    usage_from_metadata,
 )
 from .credentials import AuthError, ensure_access_token, has_cred, load_cred
 
@@ -413,11 +414,7 @@ async def _to_openai_stream(response: httpx.Response, model: str) -> AsyncIterat
         async for inner in _iter_upstream_events(response):
             usage_node = inner.get("usageMetadata")
             if isinstance(usage_node, dict):
-                usage = {
-                    "prompt_tokens": int(usage_node.get("promptTokenCount") or 0),
-                    "completion_tokens": int(usage_node.get("candidatesTokenCount") or 0),
-                    "total_tokens": int(usage_node.get("totalTokenCount") or 0),
-                }
+                usage = usage_from_metadata(usage_node)
             candidates = inner.get("candidates") or []
             cand = candidates[0] if candidates else {}
             parts = (cand.get("content") or {}).get("parts") or []

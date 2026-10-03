@@ -154,7 +154,77 @@ def test_response_text():
     assert choice["message"]["content"] == "pong"
     assert choice["finish_reason"] == "stop"
     assert chat["usage"] == {"prompt_tokens": 3, "completion_tokens": 1,
-                             "total_tokens": 4}
+                             "total_tokens": 4,
+                             "prompt_tokens_details": {"cached_tokens": 0}}
+
+
+def test_usage_from_metadata_carries_cache():
+    from buddy_proxy.gemini.convert import usage_from_metadata
+
+    # promptTokenCount 已含缓存命中（OpenAI 口径），cached 只进 details 不扣减
+    usage = usage_from_metadata({"promptTokenCount": 100,
+                                 "candidatesTokenCount": 7,
+                                 "totalTokenCount": 107,
+                                 "cachedContentTokenCount": 96})
+    assert usage == {"prompt_tokens": 100, "completion_tokens": 7,
+                     "total_tokens": 107,
+                     "prompt_tokens_details": {"cached_tokens": 96}}
+    # 缺缓存字段时补 0（与 OpenAI 真实响应形状一致）
+    assert usage_from_metadata({})["prompt_tokens_details"] == {"cached_tokens": 0}
+
+
+def test_response_cache_reaches_anthropic_exit():
+    # 非流式 Anthropic 出口：prompt_tokens_details.cached_tokens →
+    # cache_read_input_tokens + input_tokens 扣减（口径对齐，防双计）
+    from buddy_proxy.protocols.anthropic_adapter import (
+        chat_completion_to_anthropic_message,
+    )
+
+    payload = {"response": {"candidates": [{
+        "content": {"parts": [{"text": "pong"}]},
+        "finishReason": "STOP",
+    }], "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 7,
+                          "totalTokenCount": 107,
+                          "cachedContentTokenCount": 96}}}
+    chat = gemini_response_to_chat(payload, model="m")
+    msg = chat_completion_to_anthropic_message(chat)
+    assert msg["usage"] == {"input_tokens": 4, "output_tokens": 7,
+                            "cache_read_input_tokens": 96}
+
+
+def test_stream_final_chunk_carries_cache():
+    import asyncio
+
+    import httpx
+
+    from buddy_proxy.gemini.provider import _to_openai_stream
+
+    inner = {"candidates": [{
+        "content": {"parts": [{"text": "pong"}]},
+        "finishReason": "STOP",
+    }], "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 7,
+                          "totalTokenCount": 107,
+                          "cachedContentTokenCount": 96}}
+    line = "data: " + json.dumps({"response": inner}) + "\n\n"
+    resp = httpx.Response(
+        200, content=line.encode(),
+        headers={"content-type": "text/event-stream"},
+        request=httpx.Request("POST", "https://x/"),
+    )
+
+    async def _go():
+        out = []
+        async for piece in _to_openai_stream(resp, "m"):
+            out.append(piece)
+        return "".join(out)
+
+    text = asyncio.run(_go())
+    usage_lines = [l for l in text.splitlines()
+                   if l.startswith("data:") and '"usage"' in l]
+    assert usage_lines, text
+    usage = json.loads(usage_lines[-1][5:])["usage"]
+    assert usage["prompt_tokens"] == 100
+    assert usage["prompt_tokens_details"] == {"cached_tokens": 96}
 
 
 def test_response_tool_call_with_signature():
