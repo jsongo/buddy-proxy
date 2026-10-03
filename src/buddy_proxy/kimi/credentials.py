@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -107,6 +108,39 @@ def account_cred_path(account_id: str) -> pathlib.Path:
 _index_lock = threading.Lock()
 
 
+class _FileLock:
+    """跨进程文件锁（fcntl.flock，包在 .lock 文件上）。
+
+    ``_index_lock`` 只挡进程内——网关进程和 CLI（``buddy login kimi`` /
+    面板导入是另一个进程入口）会同时读-改-写同一个 index.json，各自拿旧
+    快照写回就会丢更新（面板显示幽灵账号、顺位错乱）。flock 让读-改-写整体
+    成为一个跨进程临界区；flock 与进程内锁可组合（同一进程重复 flock 同一
+    文件会被内核拒绝，故必须先拿进程内锁再拿文件锁）。
+    """
+
+    def __init__(self, path: pathlib.Path):
+        self._path = path
+        self._fh = None
+
+    def __enter__(self) -> "_FileLock":
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "a+")  # noqa: SIM115 - 句柄在 __exit__ 关
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        if self._fh is not None:
+            try:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._fh.close()
+        return False
+
+
+def _index_file_lock() -> _FileLock:
+    return _FileLock(kimi_state_dir() / "index.lock")
+
+
 def _atomic_write_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
     """0600 原子写（临时文件 + rename，与 antigravity/gemini 同款）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,7 +207,7 @@ def list_accounts() -> list[AccountRef]:
     唯一的账号枚举入口：索引自愈（cred 文件被删/损坏的条目剔除——删文件即
     退出该账号）挂在这里，login/forward/quota/UI 走同一个口。
     """
-    with _index_lock:
+    with _index_lock, _index_file_lock():
         entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
         kept: list[AccountRef] = []
         changed = False
@@ -221,33 +255,47 @@ def save_account_cred(cred: dict[str, Any]) -> AccountRef:
     不改变 failover 顺位），全不命中追加为新账号（priority 排到最后）。
     cred 缺 account_id 时现场生成并写回原 dict（调用方拿到即可用）。
     """
-    with _index_lock:
+    with _index_lock, _index_file_lock():
         return _save_account_cred_unlocked(cred)
 
 
 def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
-    if not _ID_RE.fullmatch(str(cred.get("account_id") or "")):
-        cred["account_id"] = derive_account_id(cred)  # 就地写回，调用方可见
     entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
-    aid = str(cred["account_id"])
-    target = next((e for e in entries if str(e.get("id") or "") == aid), None)
-    if target is None:
-        refresh_token = str(cred.get("refresh_token") or "")
-        if refresh_token:
-            target = next(
-                (e for e in entries
-                 if (load_account_cred(str(e.get("id") or "")) or {}).get("refresh_token")
-                 == refresh_token),
-                None)
+    aid = str(cred.get("account_id") or "")
+
+    def _find_existing() -> dict[str, Any] | None:
+        """按「账号身份」找回索引里的既有条目。
+
+        kimi 没有天然唯一键，靠两个近似键依次找回：
+        ``refresh_token``（同一次授权的凭据，最强信号）与 ``user_id``
+        （/v1/me 给的稳定账号 id——重登时 RT 已滚动、device_id 也换了，只有
+        它跨登录不变）。少了后一个，「重新登录」这条最常见的路径会落成新
+        id → 同一账号占两个顺位：旧那个（死 RT）每轮 failover 白打一次上
+        游，真正能用的还排在末尾。
+        """
+        by_id = next((e for e in entries if str(e.get("id") or "") == aid), None)
+        if by_id is not None:
+            return by_id
+        rt = str(cred.get("refresh_token") or "")
+        uid = str(cred.get("user_id") or "").strip()
+        if not rt and not uid:
+            return None
+        for e in entries:
+            other = load_account_cred(str(e.get("id") or "")) or {}
+            if rt and other.get("refresh_token") == rt:
+                return e
+            if uid and str(other.get("user_id") or "").strip() == uid:
+                return e
+        return None
+
+    target = _find_existing()
     if target is not None:
-        # 命中已有账号：文件名跟索引里的 id 走，cred 里的 account_id 对齐
         aid = str(target["id"])
         cred["account_id"] = aid
-        target["name"] = str(cred.get("nickname") or target.get("name") or "")
-        ref = AccountRef(id=aid, name=target["name"],
-                         priority=int(target.get("priority") or 0),
-                         added_at=int(target.get("added_at") or 0))
     else:
+        if not _ID_RE.fullmatch(aid):
+            cred["account_id"] = derive_account_id(cred)  # 就地写回，调用方可见
+            aid = str(cred["account_id"])
         if len(entries) >= _MAX_ACCOUNTS:
             raise AuthError(
                 f"kimi 账号数已达上限 {_MAX_ACCOUNTS}，"
@@ -259,6 +307,11 @@ def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
             added_at=int(time.time()),
         )
         entries.append(asdict(ref))
+        target = asdict(ref)
+    target["name"] = str(cred.get("nickname") or target.get("name") or "")
+    ref = AccountRef(id=aid, name=target["name"],
+                     priority=int(target.get("priority") or 0),
+                     added_at=int(target.get("added_at") or 0))
     _atomic_write_json(account_cred_path(ref.id), dict(cred))
     _atomic_write_json(index_path(), _index_payload(entries))
     return ref
@@ -266,7 +319,7 @@ def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
 
 def delete_account(account_id: str) -> bool:
     """移除一个账号（索引条目 + cred 文件）；返回是否真的删了。"""
-    with _index_lock:
+    with _index_lock, _index_file_lock():
         entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
         kept = [e for e in entries if str(e.get("id") or "") != account_id]
         if len(kept) == len(entries):
@@ -286,7 +339,7 @@ def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
     priority 重写为 0..n-1，added_at 原样保留。返回重排后的 list_accounts()。
     """
     list_accounts()  # 先走唯一的枚举入口：自愈完再重排，别在残缺索引上动刀
-    with _index_lock:
+    with _index_lock, _index_file_lock():
         entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
         current = [str(e.get("id") or "") for e in entries]
         if sorted(ordered_ids) != sorted(current) or len(set(ordered_ids)) != len(ordered_ids):
@@ -341,6 +394,19 @@ def refresh_account_cred(cred: dict[str, Any], timeout: float = 30.0) -> dict[st
             device_id=str(cred.get("device_id") or ""), timeout=timeout)
     except oauth.OAuthError as exc:
         raise AuthError(str(exc)) from exc
+    # 刷新是网络往返（最长 timeout 秒），期间用户可能在面板删了这个号或
+    # 导入了新凭据。先重读盘：账号已被删就别把它"复活"（save_account_cred
+    # 会当成新账号追加），发现 RT 已被换掉（刚导入的新凭据）就整份放弃回写，
+    # 免得拿旧快照把 base_url/oauth_host/device_id 全退回旧值。
+    with _index_lock, _index_file_lock():
+        current = load_account_cred(str(cred.get("account_id") or ""))
+        if current is None or current.get("refresh_token") != cred.get("refresh_token"):
+            log.debug("kimi: 刷新期间账号已被删除或凭据已变更，放弃回写: %s",
+                      cred.get("account_id"))
+            cred["access_token"] = payload["access_token"]
+            cred["expired"] = _expiry_iso(payload.get("expires_in"))
+            cred["last_refresh"] = int(time.time())
+            return cred
     cred["access_token"] = payload["access_token"]
     cred["expired"] = _expiry_iso(payload.get("expires_in"))
     cred["last_refresh"] = int(time.time())

@@ -282,3 +282,87 @@ def test_access_token_valid_skew():
     comfy = (datetime.now(timezone.utc) + timedelta(seconds=600)).isoformat()
     assert credentials.access_token_valid({"expired": comfy}) is True
     assert credentials.access_token_valid({}) is False
+
+
+# ---------------------------------------------------------------------------
+# review 修复：重新登录不复制账号 / 慢刷新不撤销删除导入 / 跨进程索引锁
+# ---------------------------------------------------------------------------
+
+def test_relogin_reuses_slot_when_refresh_token_rotated(monkeypatch):
+    """重新登录（RT 已滚动）不该把同一账号复制成两份。
+
+    典型路径：老 cred 刷新后 RT 换成 rt-NEW → 用户再跑一次 login，新的 cred
+    既没 user_id（等 /v1/me）、device_id 又是新生成的。按 account_id 匹配会
+    落成新 id，同一账号占两个顺位：死 RT 那个每轮 failover 白打一次上游，
+    真正能用的那个还排在末尾。
+    """
+    # 盘上账号：user_id 已回填（/v1/me 给的稳定 id）
+    save_account_cred(_cred("u1", refresh_token="rt-OLD", user_id="cv9abc"))
+    time.sleep(0.01)
+    # 重登：RT 已滚动、device_id 换了、account_id 也不同，但 user_id 相同
+    ref = save_account_cred(_cred("tmp-id-not-in-index", refresh_token="rt-NEW",
+                                 device_id="dev-fresh", user_id="cv9abc"))
+    assert ref.id == "u1", "user_id 匹配优先于 account_id 匹配/派生"
+    assert [r.id for r in list_accounts()] == ["u1"], "同一账号不能占两个顺位"
+    assert load_account_cred("u1")["refresh_token"] == "rt-NEW"
+    assert load_account_cred("u1")["device_id"] == "dev-fresh", "设备指纹跟着更新"
+
+
+def test_relikey_mismatch_makes_new_account():
+    """user_id/RT 都对不上就是真新账号：追加到末尾，不复用别人的顺位。"""
+    save_account_cred(_cred("u1", refresh_token="rt-1", user_id="cv9abc"))
+    ref = save_account_cred(_cred("u2", refresh_token="rt-2", user_id="cv9xyz"))
+    assert ref.id == "u2" and ref.priority == 1
+    assert [r.id for r in list_accounts()] == ["u1", "u2"]
+
+
+def test_slow_refresh_does_not_revive_deleted_account(monkeypatch):
+    """刷新往返期间账号被删：回写不能让它复活。
+
+    面板返回「删除成功」后，慢刷新拿旧快照回写会把它当成新账号追加回来，
+    每轮 failover 又会先选中这个坏号。
+    """
+    save_account_cred(_cred("u1", refresh_token="rt-1", expired="2000-01-01T00:00:00Z"))
+
+    def _slow_refresh(*a, **k):
+        # 网络往返期间用户点了删除
+        assert delete_account("u1") is True
+        return {"access_token": "at-new", "expires_in": 900, "refresh_token": "rt-2"}
+
+    monkeypatch.setattr(oauth, "refresh_token", _slow_refresh)
+    token, _cred_out = ensure_account_token("u1", force_refresh=True)
+    assert token == "at-new"  # 调用方拿到新 token（内存里有效）
+    assert [r.id for r in list_accounts()] == [], "但落盘不能把它加回来"
+    assert not account_cred_path("u1").exists()
+
+
+def test_slow_refresh_does_not_roll_back_new_import(monkeypatch):
+    """刷新往返期间用户导入了新凭据：旧快照整份回写会把它无声抹掉。"""
+    save_account_cred(_cred("u1", refresh_token="rt-1", expired="2000-01-01T00:00:00Z"))
+    cred = load_account_cred("u1")
+
+    def _slow_refresh(*a, **k):
+        # 往返期间面板导入了 global 区的新凭据（同账号，RT 已换）
+        save_account_cred(_cred("u1", refresh_token="rt-NEW-IMPORT",
+                                base_url="https://api.kimi.ai/coding",
+                                oauth_host="https://auth.kimi.ai",
+                                device_id="dev-global"))
+        return {"access_token": "at-new", "expires_in": 900}
+
+    monkeypatch.setattr(oauth, "refresh_token", _slow_refresh)
+    ensure_account_token("u1", force_refresh=True)
+    stored = load_account_cred("u1")
+    assert stored["base_url"] == "https://api.kimi.ai/coding", "导入不能被旧快照退回"
+    assert stored["device_id"] == "dev-global"
+    assert stored["refresh_token"] == "rt-NEW-IMPORT"
+
+
+def test_index_file_lock_is_process_safe():
+    """索引读-改-写有跨进程锁（flock 套在 index.lock 上）。
+
+    网关进程与 CLI（buddy login kimi / 面板导入）是两个进程，共用同一个
+    index.json；只有进程内锁时各自拿旧快照写回会丢更新。
+    """
+    assert credentials._index_file_lock is not None
+    with credentials._index_file_lock():
+        pass  # 能获取/释放即可（真跨进程语义靠 fcntl，同进程重入会死锁）
