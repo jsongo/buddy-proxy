@@ -369,13 +369,18 @@
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .pat-head .name { font-weight: 600; }
   .pat-head .grow { flex: 1; }
-  .pat-quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px; }
+  .pat-quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 22px; }
   @media (max-width: 720px) { .pat-quota-grid { grid-template-columns: 1fr; } }
-  .pat-pkg { position: relative; padding: 8px 0; border-bottom: 1px solid rgba(38,47,60,.4); }
+  /* 账号块 = 卡中卡：背景亮一档 + 描边 + 圆角。原先只有一条 rgba(.4) 的
+     底线，两栏并排时两个账号的额度内容直接糊成一片（用户截图：分隔看不
+     出来）。trae PAT / antigravity / kimi 三个面板共用这个类，一起变样。 */
+  .pat-pkg { position: relative; padding: 10px 12px 12px;
+             background: var(--card2); border: 1px solid var(--line);
+             border-radius: 8px; }
   .pat-pkg-name { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
   /* antigravity 账号操作（顺位 ▲▼ + 删除 ✕）：块尾渲染、绝对定位到右上角
      （不干扰就地回填的「名字→副标题」锚点）；平时低调、悬停才亮，不抢额度条的视觉 */
-  .ag-move { position: absolute; top: 6px; right: 0; display: inline-flex; gap: 2px;
+  .ag-move { position: absolute; top: 8px; right: 10px; display: inline-flex; gap: 2px;
              opacity: .35; transition: opacity .12s; }
   .pat-pkg:hover .ag-move { opacity: 1; }
   .ag-move button { padding: 1px 5px; line-height: 1.2; font-size: 10px; color: var(--muted); }
