@@ -46,6 +46,11 @@ globalThis.esc = s => String(s)
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 globalThis.api = async () => globalThis.__RESPONSE;
 globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) + '</div>';
+// 面板现在走 quotaItemsHtml（分组 + 折叠，见 test_quota_fold.py）；这里只关心
+// 面板自身的布局与按钮，折叠那层照样打桩——不桩的话 syncQuotaFold 还要 DOM
+globalThis.quotaItemsHtml = (items, key) =>
+  '<div class="qbody" data-qfold="' + esc(key) + '">' +
+  items.map(globalThis.quotaItemHtml).join('') + '</div>';
 globalThis.BENEFITS = {};
 globalThis.document = {
   querySelector: sel => (Object.prototype.hasOwnProperty.call(QS, sel) ? QS[sel] : null),

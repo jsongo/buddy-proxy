@@ -202,7 +202,7 @@ function renderBenefits() {
   const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity');
   document.getElementById('quota-list').innerHTML = qps.length ? qps.map(p => {
     const q = p.quota;
-    const items = (q.items || []).map(quotaItemHtml).join('');
+    const items = quotaItemsHtml(q.items || [], p.id);
     const headSum = quotaHeadSum(q);
     return `<div class="chart-card" style="margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
@@ -213,6 +213,7 @@ function renderBenefits() {
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
   renderTraepatPanel();
   renderAntigravityPanel();
+  syncQuotaFold();  // 样式与布局就位后按实际高度校准（三个面板都已重建完）
 }
 
 // 单条额度条目 → HTML（周包/日包/积分窗口通用；PAT 面板与额度列表共用）
@@ -310,6 +311,91 @@ function quotaItemHtml(it) {
   return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${expire}${reset}</span>${nums}</div>${bar}</div>`;
 }
 
+// ---- 额度条目分组：只铺没消耗完的 + 限高折叠 ----
+//
+// 为什么必须收：Trae 一次返回 28 条，其中 12 条签到奖励各自独立、且大多已
+// 花光，全铺出来一屏都是「200/200 · 已用 0%」的重复行，真正还有余额的几条
+// 反而被淹掉。所以默认只显示还有剩余的，已用完的收进底部那一块；条数再多，
+// 整块超过最大高度就裁一刀（点按钮展开）。三处渲染（主列表 / PAT / antigravity）
+// 共用这一套，免得只有 trae 变好看、别的通道还是老样子。
+//
+// 展开状态存在 QUOTA_FOLD 而不是 DOM 上：整页每 30s 重建一次 innerHTML，
+// 状态挂 DOM 里会被下一轮刷掉——用户刚点开，30 秒后自己收回去。
+const QUOTA_FOLD = { open: {} };
+
+// 条目是否「已用完」。只认余量明确 ≤0 的（含 "0" 这类数字字符串，上游发字符串
+// 是常事）。拿不到余量的一律不算：null / 说明条文案（"2/9 个账号查询失败"）/
+// reset_pending 的「用量待确认」都是**未知**，不是「没花」——按用完收起来，
+// 正好会把最该看见的那条藏掉。
+function quotaSpent(it) {
+  let r = it.remaining;
+  // 与 quotaItemHtml 同一条回填规则：只见 total/used 时也能算出余量
+  if (r == null && it.used != null && it.total != null) r = Number(it.total) - Number(it.used);
+  if (r == null || r === '' || typeof r === 'boolean') return false;
+  const n = Number(r);
+  return Number.isFinite(n) && n <= 0;
+}
+
+// 一组额度条目 → HTML。key 是这组的稳定标识（通道 id / PAT #N / AG #N），
+// 用来记住展开状态；同 key 在两次渲染之间保持展开。
+function quotaItemsHtml(items, key) {
+  if (!items.length) return '';
+  const act = [], spent = [];
+  for (const it of items) (quotaSpent(it) ? spent : act).push(it);
+  const open = !!QUOTA_FOLD.open[key];
+  const spentHtml = spent.length
+    ? `<div class="qspent"${open ? '' : ' hidden'}>` +
+      `<div class="qspent-head">已用完 ${spent.length} 项</div>` +
+      spent.map(quotaItemHtml).join('') + '</div>'
+    : '';
+  // 一条都没剩时给个占位：否则收起状态下这组整个是空的，看着像加载失败
+  const empty = !act.length && spent.length
+    ? '<div class="empty" style="padding:10px 0">权益已全部用完</div>' : '';
+  return `<div class="qbody${open ? ' open' : ''}" data-qfold="${esc(key)}">` +
+      act.map(quotaItemHtml).join('') + empty + spentHtml + '</div>' +
+    `<button class="qmore" data-qfold="${esc(key)}" data-act="${act.length}" ` +
+      `data-spent="${spent.length}" data-total="${items.length}" ` +
+      `onclick="quotaFoldToggle(this)" hidden></button>`;
+}
+
+// 渲染后校准：按**实际高度**决定裁不裁、按钮露不露。
+// 为什么不用「超过 N 条就收」：同一屏里窄卡片（两栏）和整宽卡片的可用高度
+// 不同，按条数定界在窄卡片上会裁错。CSS 只管裁剪，判断在这儿做。
+//
+// 高度上限只写在 CSS 变量 --qfold-max 一处，这里读它——两边各写一个 208，
+// 改了 CSS 忘了 JS 就会出现「已经裁了但按钮不出现」的死角。
+function syncQuotaFold() {
+  document.querySelectorAll('.qbody[data-qfold]').forEach(box => {
+    const open = !!QUOTA_FOLD.open[box.dataset.qfold];
+    // 先定已用完区块的显隐，再量高度：收起时量的正是「没消耗完的那部分」
+    const spent = box.querySelector('.qspent');
+    if (spent) spent.hidden = !open;
+    // scrollHeight 报的是内容自然高度，不被 max-height 夹住（headless Chrome
+    // 实测：12 条时 465，而 clientHeight 被夹到 208），所以不必先摘掉 clipped
+    // 类再量。加不加类量到的**不完全相等**（实测差 18px：overflow:hidden 让
+    // 盒子自成 BFC，首尾两条 .qitem 的 9px 外边距不再塌陷出去），所以这里
+    // 只拿它跟上限比大小、不拿它当精确像素用。
+    const limit = parseFloat(getComputedStyle(box).getPropertyValue('--qfold-max')) || 208;
+    const clipped = !open && box.scrollHeight > limit + 1;
+    box.classList.toggle('open', open);
+    box.classList.toggle('clipped', clipped);
+    const btn = box.nextElementSibling;
+    if (!btn || !btn.classList || !btn.classList.contains('qmore')) return;
+    // 展开后总是留个「收起」入口；收起时只有真被裁了、或底下还压着已用完的
+    // 条目，才值得给按钮——否则是个点了没有任何变化的假按钮
+    btn.hidden = !open && !clipped && !spent;
+    btn.textContent = open ? '收起 ▴'
+      : (!Number(btn.dataset.act) ? `展开 ${btn.dataset.spent} 项已用完 ▾`
+        : `展开全部 ${btn.dataset.total} 项 ▾`);
+  });
+}
+
+function quotaFoldToggle(btn) {
+  const key = btn.dataset.qfold;
+  QUOTA_FOLD.open[key] = !QUOTA_FOLD.open[key];
+  syncQuotaFold();
+}
+
 // ---- TRAE PAT 面板（底部整宽卡片）----
 // 结构：上方 日包/周包 按 PAT 单双数左右两栏；下方 账号状态（左）/ 模型负载（右）左右两栏。
 // 模型负载默认读缓存（GET，不触网），点「更新」再强制查询（POST）。
@@ -331,7 +417,7 @@ function renderTraepatPanel() {
   const quotaHtml = [...groups.entries()].map(([grp, its]) => `
     <div class="pat-pkg">
       <div class="pat-pkg-name">${esc(grp)}</div>
-      ${its.map(quotaItemHtml).join('')}
+      ${quotaItemsHtml(its, 'pat:' + grp)}
     </div>`).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
 
   panel.innerHTML = `
@@ -573,7 +659,7 @@ function renderAntigravityPanel() {
     <div class="pat-pkg">
       <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</span>
       ${_ag_sub_html(acct)}
-      ${its.map(quotaItemHtml).join('')}
+      ${quotaItemsHtml(its, 'ag:' + grp)}
       ${moveBtns}${delBtn}
     </div>`;
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
@@ -626,6 +712,9 @@ async function loadAntigravityAccounts() {
       const sub = _ag_sub_html(a);
       if (sub) el.insertAdjacentHTML('afterend', sub);
     }
+    // 就地回填会插入/移除副标题行（高度变了），重新校准一次折叠：
+    // 不补这一步，卡在阈值附近的分组会出现「已经裁掉了但按钮不露」。
+    syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
   }
