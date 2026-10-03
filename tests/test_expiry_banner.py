@@ -173,17 +173,54 @@ def test_expiring_skips_unsupported_and_notice_items():
     assert out == []
 
 
-def test_expiring_bad_expire_ts_does_not_crash():
-    """上游给了怪值（布尔 / 字符串 / 0 / 负数）不能炸，跳过即可。"""
+def test_expiring_bad_expire_ts_is_skipped_not_crashed():
+    """布尔 / 零 / 负数不吃；数字字符串照收（上游偶发给 ``"1793289600"``）。"""
+    items = [
+        _item("布尔", expire_days=1) | {"expire_ts": True},
+        _item("零", expire_days=None) | {"expire_ts": 0},
+        _item("负数", expire_days=None) | {"expire_ts": -1},
+        _item("非数字串", expire_days=1) | {"expire_ts": "不是时间"},
+        _item("空串", expire_days=1) | {"expire_ts": ""},
+        # 数字字符串要收：上游给 zcode 的 unit/number 就发过字符串
+        _item("数字串", expire_days=1) | {"expire_ts": str(int(NOW + DAY))},
+    ]
+    out = _expiring([_entry("weird", items)], now=NOW)
+    assert [e["label"] for e in out] == ["数字串"]
+
+
+def test_expiring_garbage_input_does_not_crash():
+    """形状完全不对的输入不能炸（函数是纯的、又长在聚合出口上）。
+
+    正常路径由 snapshot() 保证 entry 是 dict，但这里宽松取数是几行代码的事，
+    而崩在聚合出口会连带整页 500——代价不对等。
+    """
     out = _expiring([
-        _entry("weird", [
-            _item("布尔", expire_days=1) | {"expire_ts": True},
-            _item("字符串", expire_days=1) | {"expire_ts": "1793289600"},
-            _item("零", expire_days=None) | {"expire_ts": 0},
-            _item("负数", expire_days=None) | {"expire_ts": -1},
-        ]),
+        None, "x", 42,
+        {"id": "a"},                       # 没有 quota
+        {"id": "b", "quota": None},
+        {"id": "c", "quota": "怪值"},
+        {"id": "d", "quota": {"supported": True, "items": None}},
+        {"id": "e", "quota": {"supported": True, "items": [None, "x", 7]}},
     ], now=NOW)
     assert out == []
+
+
+def test_expiring_rejects_bool_remaining():
+    """``remaining`` 是布尔时不算数：``True`` 是 1 会变成「只剩 1 分」的假数据。"""
+    out = _expiring([
+        _entry("x", [_item("真", expire_days=1, remaining=True, unit="credit")]),
+    ], now=NOW)
+    assert out == []
+
+
+def test_expiring_accepts_numeric_string_remaining():
+    """数字字符串的余量照收——上游偶发把数额发成字符串。"""
+    assert len(_expiring([
+        _entry("x", [_item("够多", expire_days=1, remaining="500", unit="credit")]),
+    ], now=NOW)) == 1
+    assert _expiring([
+        _entry("x", [_item("太少", expire_days=1, remaining="200", unit="credit")]),
+    ], now=NOW) == []
 
 
 # ---------------------------------------------------------------------------
