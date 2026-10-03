@@ -337,18 +337,20 @@ def test_render_benefits_calls_the_banner():
 # ---------------------------------------------------------------------------
 
 def test_banner_renders_low_quota_rows_alongside_expiry():
-    """两种告警齐发：head 用「 · 」拼两段，低余额行铺通道/剩余/占比，
-    日期列用 — 占位（余额告急没有日期概念），占比转红。"""
+    """两种告警齐发：head 用「 · 」拼两段；credits 通道铺绝对值（剩余 credits
+    是它们的告警依据），其余量纲铺占比 + 窗口名；日期列用 — 占位，转红。"""
     out = _render_banner("""{
       expiry_warn_days: 7,
       expiring: [{provider: 'trae', provider_name: 'trae', label: '签到奖励',
                   expire_ts: 1792692336, days_left: 2.0, remaining: 500, unit: 'credit'}],
       low_quota: [{provider: 'qoder', provider_name: 'Qoder',
-                   remaining_credits: 280, percent_left: 6.4}],
+                   label: null, unit: 'credit', remaining: 280, percent_left: 6.4},
+                  {provider: 'zcode', provider_name: 'ZCode',
+                   label: '5 小时窗口', unit: 'count', remaining: 5, percent_left: 5.0}],
     }""")
-    assert '有 1 项权益将在 7 天内到期 · 1 个通道余额告急' in out, out
+    assert '有 1 项权益将在 7 天内到期 · 2 个通道余额告急' in out, out
     assert '余额告急 · 剩 280 credits' in out, out
-    assert '剩 6.4%' in out, out
+    assert '余额告急 · 5 小时窗口 · 剩 5%' in out, out
     assert '<span class="eb-days over">' in out, f"占比该转红: {out}"
     # 到期行照旧渲染，两种明细同列
     assert '签到奖励' in out, out
@@ -358,7 +360,7 @@ def test_banner_low_quota_only_has_no_expiry_segment():
     """只有余额告急时：head 只有低余额段，「最近一项」提示（到期专属）不出现。"""
     out = _render_banner("""{
       low_quota: [{provider: 'codebuddy', provider_name: 'CodeBuddy',
-                   remaining_credits: 120, percent_left: 2.0}],
+                   label: null, unit: 'credit', remaining: 120, percent_left: 2.0}],
     }""")
     assert '1 个通道余额告急' in out, out
     assert '项权益' not in out, f"不该出现到期段文案: {out}"
@@ -368,10 +370,13 @@ def test_banner_low_quota_only_has_no_expiry_segment():
 
 
 def test_banner_low_quota_without_percent_says_insufficient():
-    """占比拿不到（total 全缺）时别渲染成「剩 —%」，直接说「余额不足」。"""
+    """credits 通道占比拿不到（total 全缺）也不能渲染成「剩 —%」：绝对值是
+    它的告警依据，铺「剩 0 credits」，右列兜底「告急」。（非 credits 通道
+    percent 为 null 后端就不报，前端的「余额不足」分支只是防御。）"""
     out = _render_banner("""{
       low_quota: [{provider: 'weird', provider_name: 'weird',
-                   remaining_credits: 0, percent_left: null}],
+                   label: null, unit: 'credit', remaining: 0, percent_left: null}],
     }""")
-    assert '余额不足' in out, out
+    assert '余额告急 · 剩 0 credits' in out, out
     assert '剩 —' not in out, f"不能渲染成「剩 —%」: {out}"
+    assert '告急<' in out, f"右列该有兜底文案: {out}"

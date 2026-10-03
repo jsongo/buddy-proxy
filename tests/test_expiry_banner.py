@@ -374,13 +374,19 @@ def test_qoder_quota_items_carry_expire_ts_and_credit_unit():
 
 
 # ---------------------------------------------------------------------------
-# _quota_low：余额告急（2026-10-03 用户需求「不足 300 credits（或不足 8%）」）
+# _quota_low：余额告急（2026-10-03 用户需求，同日澄清口径）
+#
+# 「不足 300 credits（或不足 8%）」按量纲分流：credits 渠道（CodeBuddy/Qoder/
+# Trae）只看绝对值剩多少；不按 credits 计费的渠道（ZCode/MiMo/antigravity）
+# 没有 credits 概念，才用 8% 占比。早先把「或 8%」对 credits 渠道同时生效，
+# CodeBuddy 剩 950（占比 7.2%）被报了警，用户指正——绝对值还多，告的什么急。
 # ---------------------------------------------------------------------------
 
-def _sum_entry(pid: str, rows: list[tuple[float, float]], name: str | None = None) -> dict:
+def _sum_entry(pid: str, rows: list[tuple[float, float]], name: str | None = None,
+               unit: str = "credit") -> dict:
     """sum_items 通道（如 Qoder）：若干 (remaining, total) 的并存额度。"""
     items = [
-        _item(f"份{i}", expire_days=None, remaining=rem, unit="credit") | {"total": tot}
+        _item(f"份{i}", expire_days=None, remaining=rem, unit=unit) | {"total": tot}
         for i, (rem, tot) in enumerate(rows)
     ]
     return {"id": pid, "name": name or pid, "checkin": {"supported": False},
@@ -388,17 +394,17 @@ def _sum_entry(pid: str, rows: list[tuple[float, float]], name: str | None = Non
 
 
 def test_quota_low_sum_items_aggregates_before_judging():
-    """sum_items 通道先加总再判定：三份各剩 150/100/30，单看哪份都够不着
-    300 的判定语境——加总 280 < 300 才是该报的口径。"""
+    """sum_items 通道先加总再判定：三份各剩 150/100/30，加总 280 < 300 才是
+    该报的口径（Qoder 的并存额度，单看哪份都不是账号总量）。"""
     out = _quota_low([_sum_entry("qoder", [(150, 2000), (100, 400), (30, 2000)])])
     assert len(out) == 1
     assert out[0]["provider"] == "qoder"
-    assert out[0]["remaining_credits"] == 280.0
-    assert out[0]["percent_left"] == pytest.approx(280 / 4400 * 100, abs=0.1)
+    assert out[0]["remaining"] == 280.0
+    assert out[0]["unit"] == "credit"
 
 
-def test_quota_low_healthy_provider_not_reported():
-    """余量充足（绝对值和占比都过线）不报。"""
+def test_quota_low_healthy_credit_not_reported():
+    """credits 渠道余量充足（绝对值过线）不报。"""
     out = _quota_low([
         _sum_entry("qoder", [(1900, 2000), (300, 400), (1800, 2000)]),
         _entry("codebuddy", [_item("合计", expire_days=None,
@@ -407,15 +413,18 @@ def test_quota_low_healthy_provider_not_reported():
     assert out == []
 
 
-def test_quota_low_percent_branch():
-    """大包剩 700/10000：绝对值不触发 300，占比 7% < 8% 该报——这正是用户
-    「（或不足 8%）」要兜住的情况。"""
-    out = _quota_low([_entry("codebuddy", [
-        _item("合计", expire_days=None, remaining=700, unit="credit") | {"total": 10000},
-    ])])
-    assert len(out) == 1
-    assert out[0]["remaining_credits"] == 700.0
-    assert out[0]["percent_left"] == 7.0
+def test_quota_low_credit_ignores_percent():
+    """credits 渠道不做占比判定——防回归锚点：剩 950/13200（7.2%）占比很低
+    但绝对值还多，报「余额告急」就是误报（2026-10-03 用户指正的原始场景）。"""
+    out = _quota_low([
+        _entry("codebuddy", [
+            _item("合计", expire_days=None, remaining=950, unit="credit")
+            | {"total": 13200},
+        ]),
+        _entry("x", [_item("大包", expire_days=None, remaining=700,
+                           unit="credit") | {"total": 10000}]),
+    ])
+    assert out == []
 
 
 def test_quota_low_without_sum_items_takes_first_item_only():
@@ -428,34 +437,40 @@ def test_quota_low_without_sum_items_takes_first_item_only():
     ])
     out = _quota_low([entry])
     assert len(out) == 1, "总额度 200/1000 该报"
-    assert out[0]["remaining_credits"] == 200.0, "不能把明细包加进来双算"
-    assert out[0]["percent_left"] == 20.0
+    assert out[0]["remaining"] == 200.0, "不能把明细包加进来双算"
 
 
-def test_quota_low_non_credit_units_are_skipped():
-    """非积分类不参与：day（剩几天）/ permille（千分制）/ count（次数）跟
-    300 credits 比大小毫无意义。ZCode 的 5 小时窗口剩 5% 是「快回满了」，
-    报「余额告急」就是天天误报。"""
+def test_quota_low_non_credit_uses_percent():
+    """非 credits 渠道按占比判定（它们没有 credits 概念）：antigravity 千分制
+    剩 3.05%、ZCode 窗口剩 5% 都该报；MiMo 剩 15% 不报。"""
     out = _quota_low([
-        _entry("mimo", [_item("本周额度", expire_days=None,
-                              remaining=15, unit="percent") | {"total": 100}]),
         _entry("antigravity", [_item("Gemini 组", expire_days=None,
-                                     remaining=30.5, unit="permille") | {"total": 1000}]),
+                                     remaining=30.5, unit="permille")
+                               | {"total": 1000}]),
         _entry("zcode", [_item("5 小时窗口", expire_days=None,
                                remaining=5, unit="count") | {"total": 100}]),
+        _entry("mimo", [_item("本周额度", expire_days=None,
+                              remaining=15, unit="percent") | {"total": 100}]),
     ])
-    assert out == []
+    assert {e["provider"] for e in out} == {"antigravity", "zcode"}, \
+        f"MiMo 15% 不该报: {out}"
+    zc = next(e for e in out if e["provider"] == "zcode")
+    assert zc["label"] == "5 小时窗口", "非 credits 条目要带 label（哪个窗口告急）"
+    assert zc["percent_left"] == 5.0
 
 
-def test_quota_low_thresholds_are_exclusive():
-    """恰好卡线不算「不足」：=300 / =8% 不报，差一点才报（与 _expiring 的
-    「大于 300」同一边界风格）。占比分支用大 total，绝对值不触发、纯看占比。"""
-    at_both = _sum_entry("x", [(QUOTA_LOW_MIN_CREDITS, 3750)])        # =300 且恰 8%
-    at_credits = _sum_entry("y", [(QUOTA_LOW_MIN_CREDITS, 1000)])     # =300，30%
-    below_percent = _sum_entry("z", [(999, 12500)])                   # 7.99%
-    assert _quota_low([at_both]) == []
-    assert _quota_low([at_credits]) == []
-    assert len(_quota_low([below_percent])) == 1
+def test_quota_low_credit_boundary_is_exclusive():
+    """credits 恰好 300 不算「不足」不报，差一点才报。"""
+    assert _quota_low([_sum_entry("x", [(QUOTA_LOW_MIN_CREDITS, 1000)])]) == []
+    assert len(_quota_low([_sum_entry("y", [(QUOTA_LOW_MIN_CREDITS - 1, 1000)])])) == 1
+
+
+def test_quota_low_percent_boundary_is_exclusive():
+    """非 credits 恰好 8% 不报（占比分支用 permille 大 total，纯看占比）。"""
+    assert _quota_low([_entry("x", [_item("恰 8%", expire_days=None, remaining=80,
+                                          unit="permille") | {"total": 1000}])]) == []
+    assert len(_quota_low([_entry("y", [_item("7.9%", expire_days=None, remaining=79,
+                                              unit="permille") | {"total": 1000}])])) == 1
 
 
 def test_quota_low_items_without_numbers_are_skipped():
@@ -494,22 +509,25 @@ def test_quota_low_skips_unsupported_and_garbage_input():
 
 
 def test_quota_low_sorted_tightest_first():
-    """剩得最少的排最前，横幅第一行就是最烧干的通道。"""
+    """剩得最少的排最前，横幅第一行就是最烧干的通道（credits 按占比、
+    非 credits 按占比，统一占比升序）。"""
     out = _quota_low([
-        _sum_entry("wide", [(700, 10000)]),    # 7%，靠 <8% 触发
-        _sum_entry("dry", [(50, 1000)]),       # 5%，两条线都触发
-        _sum_entry("mid", [(250, 2000)]),      # 12.5%，靠 <300 触发
+        _sum_entry("wide", [(250, 10000)]),    # 2.5%，靠 <300 触发
+        _sum_entry("dry", [(50, 1000)]),       # 5% credits，触发 <300
+        _entry("ag", [_item("Gemini 组", expire_days=None, remaining=30,
+                            unit="permille") | {"total": 1000}]),  # 3%
     ])
-    assert [e["provider"] for e in out] == ["dry", "wide", "mid"]
+    assert [e["provider"] for e in out] == ["wide", "ag", "dry"]
 
 
-def test_quota_low_total_zero_reports_without_percent():
-    """total=0（上游没给总量）只剩绝对值判定：剩 0 就是告急，占比拿不到就
-    置 None，前端渲染「余额不足」。"""
+def test_quota_low_total_zero():
+    """total=0：credits 通道剩 0 仍是告急（绝对值判定成立），占比拿不到置
+    None；非 credits 通道占比是唯一依据，拿不到就不报——不能拿 0/0 报警。"""
     out = _quota_low([_sum_entry("weird", [(0, 0)])])
     assert len(out) == 1
-    assert out[0]["remaining_credits"] == 0.0
+    assert out[0]["remaining"] == 0.0
     assert out[0]["percent_left"] is None
+    assert _quota_low([_sum_entry("weird2", [(0, 0)], unit="permille")]) == []
 
 
 def test_quota_low_bool_remaining_rejected_numeric_string_accepted():
@@ -520,4 +538,4 @@ def test_quota_low_bool_remaining_rejected_numeric_string_accepted():
         _sum_entry("strs", [("250", "1000")]),
     ])
     assert [e["provider"] for e in out] == ["strs"]
-    assert out[0]["remaining_credits"] == 250.0
+    assert out[0]["remaining"] == 250.0

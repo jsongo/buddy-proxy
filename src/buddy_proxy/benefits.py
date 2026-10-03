@@ -160,23 +160,22 @@ def _quota_low(provider_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """挑出「余额告急」的通道，供管理页顶部横幅展示（2026-10-03）。
 
     与 :func:`_expiring` 互补：那边管「权益什么时候到期」，这边管「还剩多少」
-    ——用户要求「某个 provider 剩余的总 token 不足 300 credits（或不足 8%）
-    就上横幅」。
+    ——用户要求「某个 provider 剩余不足 300 credits（或不足 8%）就上横幅」。
 
-    判定口径与面板标题行（``quotaHeadSum``）一致——用户在面板上看到的
-    「剩 X / Y」就是这里判定的输入，两边不说两套话：
+    **两套阈值按量纲分流**（用户同日澄清：8% 是说给不按 Credits 计费的渠道
+    的——它们没有「credits」概念，只能按占比；Credits 渠道只看绝对值）：
 
-    1. **量纲**：只对 ``unit == "credit"`` 的条目判定。day（剩几天）、
-       permille（千分制）、count（次数）跟 300 credits 比大小毫无意义；这些
-       通道要么余量按周期回满（低余额告警会天天误报），要么本来就该按自己
-       的量纲预警。
-    2. **加总**：``sum_items`` 置真的通道把各条相加（Qoder 的并存额度、
-       CodeBuddy 的多个包）；没置的只取第一条有数的——Trae 的明细包是
-       「总额度」的拆解，相加会把同一份额度算两遍。这套取舍与 quotaHeadSum
-       完全一致。
-    3. **阈值**：合计剩余 ``< QUOTA_LOW_MIN_CREDITS``，或剩余占比
-       ``< QUOTA_LOW_MIN_PERCENT``——10000 分的包剩 700，绝对值不触发、占比
-       该报。恰好卡线（=300 / =8%）不算「不足」，不报。
+    1. **credit 通道只看绝对值**：合计剩余 ``< QUOTA_LOW_MIN_CREDITS`` 才报。
+       大包剩 950 绝对值还多，占比再低也不该报——早先把「或 8%」对 credit
+       通道同时生效，CodeBuddy 剩 950/13200（7.2%）被报了警，用户指正。
+    2. **非 credit 通道只看占比**：day（剩几天）/ count（次数）/ permille
+       （千分制）跟 300 比大小毫无意义，改用剩余占比 ``<
+       QUOTA_LOW_MIN_PERCENT``。
+
+    加总口径与面板标题行（``quotaHeadSum``）一致——用户在面板上看到的
+    「剩 X / Y」就是这里判定的输入：``sum_items`` 置真的通道把各条相加
+    （Qoder 的并存额度），没置的只取第一条有数的——Trae 的明细包是「总额度」
+    的拆解，相加会把同一份额度算两遍。恰好卡线（=300 / =8%）不算「不足」。
 
     ``remaining``/``total`` 拿不到数的条目跳过；通道内一条有数的都没有就不报
     ——无法判断的余额不告警。纯函数，不触网、不改状态。
@@ -188,37 +187,43 @@ def _quota_low(provider_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         quota = entry.get("quota") or {}
         if not isinstance(quota, dict) or not quota.get("supported"):
             continue
-        rows: list[tuple[float, float]] = []
+        rows: list[tuple[float, float, Any, Any]] = []
         for it in quota.get("items") or []:
-            if not isinstance(it, dict) or it.get("unit") != "credit":
+            if not isinstance(it, dict):
                 continue
             remaining = _as_num(it.get("remaining"))
             total = _as_num(it.get("total"))
             if remaining is None or total is None:
                 continue  # 口径与 quotaHeadSum 的 usable 一致：两个数都得有
-            rows.append((remaining, total))
+            rows.append((remaining, total, it.get("unit"), it.get("label")))
         if not rows:
             continue
         if quota.get("sum_items"):
-            rem_sum = sum(r for r, _ in rows)
-            tot_sum = sum(t for _, t in rows)
+            rem_sum = sum(r for r, _, _, _ in rows)
+            tot_sum = sum(t for _, t, _, _ in rows)
+            unit, label = rows[0][2], None   # 多条相加后 label 不再对应单一条目
         else:
             # 未声明可合计：第一条就是语义上的「总额度」，后面的不掺和
-            rem_sum, tot_sum = rows[0]
-        if rem_sum >= QUOTA_LOW_MIN_CREDITS and (
-            tot_sum <= 0 or rem_sum / tot_sum * 100 >= QUOTA_LOW_MIN_PERCENT
-        ):
-            continue
+            rem_sum, tot_sum, unit, label = rows[0]
+        percent_left = round(rem_sum / tot_sum * 100, 1) if tot_sum > 0 else None
+        if unit == "credit":
+            if rem_sum >= QUOTA_LOW_MIN_CREDITS:
+                continue
+        else:
+            if percent_left is None or percent_left >= QUOTA_LOW_MIN_PERCENT:
+                continue
         out.append({
             "provider": entry.get("id"),
             "provider_name": entry.get("name") or entry.get("id"),
-            "remaining_credits": round(rem_sum, 1),
-            "percent_left": round(rem_sum / tot_sum * 100, 1) if tot_sum > 0 else None,
+            "label": label,
+            "unit": unit,
+            "remaining": round(rem_sum, 1),
+            "percent_left": percent_left,
         })
     # 剩得最少的排最前；拿不到占比的（total 全缺）排最后
     out.sort(key=lambda e: (e["percent_left"] is None,
                             e["percent_left"] or 0.0,
-                            e["remaining_credits"]))
+                            e["remaining"]))
     return out
 
 
