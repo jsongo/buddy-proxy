@@ -140,6 +140,23 @@ def test_request_sentinel_fallback_when_cache_miss_for_gemini3():
     assert fc_part["thoughtSignature"] == ts.SENTINEL
 
 
+def test_request_sentinel_on_cache_hit_with_empty_sig_for_gemini():
+    """缓存命中但签名是空的（claude/gpt-oss 轮次存的），切到 gemini 模型
+    后同样要注哨兵——实证（probe7）：fc 无签名 + gemini-3 → 400，注了才
+    200。别把「缓存命中」当成「不用兜底」：空签名和未命中一样致命。"""
+    ts.remember("call_from_claude", signature="", name="get_weather")
+    req = chat_to_gemini_request(
+        _body_with_tool_round("call_from_claude"), project_id="p",
+        model="gemini-3.1-pro-low", stream=False)
+    fc_part = req["request"]["contents"][1]["parts"][0]
+    assert fc_part["thoughtSignature"] == ts.SENTINEL
+    # 非 gemini 模型下同样命中空签名 → 不注（保持干净）
+    req2 = chat_to_gemini_request(
+        _body_with_tool_round("call_from_claude"), project_id="p",
+        model="claude-sonnet-4-6", stream=False)
+    assert "thoughtSignature" not in req2["request"]["contents"][1]["parts"][0]
+
+
 def test_request_no_sentinel_for_non_gemini3():
     """claude/gpt-oss 不需要签名，缓存 miss 不注哨兵（干净请求体）。"""
     req = chat_to_gemini_request(
