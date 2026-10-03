@@ -36,6 +36,12 @@ FLIP_GRACE_S = 3600
 # 一到 7 天内就刷屏，真正值钱的会员包反而被淹）。判定见 :func:`_expiring`。
 EXPIRY_WARN_DAYS = 7
 EXPIRY_WARN_MIN_CREDITS = 300
+# 余额告急：通道积分类总额度剩得比它少（或剩余占比比它低）就上横幅（用户
+# 2026-10-03 要求「不足 300 credits（或不足 8%）」）。与到期告警互补——
+# 权益还早但量快烧干的通道，只等到期告警就要在烧干那天才被发现。判定见
+# :func:`_quota_low`。
+QUOTA_LOW_MIN_CREDITS = 300
+QUOTA_LOW_MIN_PERCENT = 8
 
 
 def _state_flipped(data: Any, now: float) -> bool:
@@ -147,6 +153,72 @@ def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) 
                 "unit": it.get("unit"),
             })
     out.sort(key=lambda e: e["expire_ts"])
+    return out
+
+
+def _quota_low(provider_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """挑出「余额告急」的通道，供管理页顶部横幅展示（2026-10-03）。
+
+    与 :func:`_expiring` 互补：那边管「权益什么时候到期」，这边管「还剩多少」
+    ——用户要求「某个 provider 剩余的总 token 不足 300 credits（或不足 8%）
+    就上横幅」。
+
+    判定口径与面板标题行（``quotaHeadSum``）一致——用户在面板上看到的
+    「剩 X / Y」就是这里判定的输入，两边不说两套话：
+
+    1. **量纲**：只对 ``unit == "credit"`` 的条目判定。day（剩几天）、
+       permille（千分制）、count（次数）跟 300 credits 比大小毫无意义；这些
+       通道要么余量按周期回满（低余额告警会天天误报），要么本来就该按自己
+       的量纲预警。
+    2. **加总**：``sum_items`` 置真的通道把各条相加（Qoder 的并存额度、
+       CodeBuddy 的多个包）；没置的只取第一条有数的——Trae 的明细包是
+       「总额度」的拆解，相加会把同一份额度算两遍。这套取舍与 quotaHeadSum
+       完全一致。
+    3. **阈值**：合计剩余 ``< QUOTA_LOW_MIN_CREDITS``，或剩余占比
+       ``< QUOTA_LOW_MIN_PERCENT``——10000 分的包剩 700，绝对值不触发、占比
+       该报。恰好卡线（=300 / =8%）不算「不足」，不报。
+
+    ``remaining``/``total`` 拿不到数的条目跳过；通道内一条有数的都没有就不报
+    ——无法判断的余额不告警。纯函数，不触网、不改状态。
+    """
+    out: list[dict[str, Any]] = []
+    for entry in provider_entries:
+        if not isinstance(entry, dict):
+            continue
+        quota = entry.get("quota") or {}
+        if not isinstance(quota, dict) or not quota.get("supported"):
+            continue
+        rows: list[tuple[float, float]] = []
+        for it in quota.get("items") or []:
+            if not isinstance(it, dict) or it.get("unit") != "credit":
+                continue
+            remaining = _as_num(it.get("remaining"))
+            total = _as_num(it.get("total"))
+            if remaining is None or total is None:
+                continue  # 口径与 quotaHeadSum 的 usable 一致：两个数都得有
+            rows.append((remaining, total))
+        if not rows:
+            continue
+        if quota.get("sum_items"):
+            rem_sum = sum(r for r, _ in rows)
+            tot_sum = sum(t for _, t in rows)
+        else:
+            # 未声明可合计：第一条就是语义上的「总额度」，后面的不掺和
+            rem_sum, tot_sum = rows[0]
+        if rem_sum >= QUOTA_LOW_MIN_CREDITS and (
+            tot_sum <= 0 or rem_sum / tot_sum * 100 >= QUOTA_LOW_MIN_PERCENT
+        ):
+            continue
+        out.append({
+            "provider": entry.get("id"),
+            "provider_name": entry.get("name") or entry.get("id"),
+            "remaining_credits": round(rem_sum, 1),
+            "percent_left": round(rem_sum / tot_sum * 100, 1) if tot_sum > 0 else None,
+        })
+    # 剩得最少的排最前；拿不到占比的（total 全缺）排最后
+    out.sort(key=lambda e: (e["percent_left"] is None,
+                            e["percent_left"] or 0.0,
+                            e["remaining_credits"]))
     return out
 
 
@@ -399,6 +471,9 @@ class BenefitsManager:
             # 的文案（比不写更让人困惑）。下发之后只有一处定义。
             "expiry_warn_days": EXPIRY_WARN_DAYS,
             "expiring": _expiring(provider_entries),
+            # 余额告急明细（见 _quota_low）。与 expiring 同一套思路：规则集中
+            # 后端、pytest 直接覆盖，前端只渲染不判规则。
+            "low_quota": _quota_low(provider_entries),
         }
 
     async def _cached(self, key: str, fn: Callable, *args):

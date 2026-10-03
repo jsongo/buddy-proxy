@@ -330,3 +330,48 @@ def test_render_benefits_calls_the_banner():
     body = text[text.index("function renderBenefits()"):]
     body = body[:body.index("\n}\n")]
     assert "renderExpiryBanner()" in body, "renderBenefits 没调用横幅渲染"
+
+
+# ---------------------------------------------------------------------------
+# 余额告急横幅（2026-10-03，与到期告警同横幅、两种段拼接）
+# ---------------------------------------------------------------------------
+
+def test_banner_renders_low_quota_rows_alongside_expiry():
+    """两种告警齐发：head 用「 · 」拼两段，低余额行铺通道/剩余/占比，
+    日期列用 — 占位（余额告急没有日期概念），占比转红。"""
+    out = _render_banner("""{
+      expiry_warn_days: 7,
+      expiring: [{provider: 'trae', provider_name: 'trae', label: '签到奖励',
+                  expire_ts: 1792692336, days_left: 2.0, remaining: 500, unit: 'credit'}],
+      low_quota: [{provider: 'qoder', provider_name: 'Qoder',
+                   remaining_credits: 280, percent_left: 6.4}],
+    }""")
+    assert '有 1 项权益将在 7 天内到期 · 1 个通道余额告急' in out, out
+    assert '余额告急 · 剩 280 credits' in out, out
+    assert '剩 6.4%' in out, out
+    assert '<span class="eb-days over">' in out, f"占比该转红: {out}"
+    # 到期行照旧渲染，两种明细同列
+    assert '签到奖励' in out, out
+
+
+def test_banner_low_quota_only_has_no_expiry_segment():
+    """只有余额告急时：head 只有低余额段，「最近一项」提示（到期专属）不出现。"""
+    out = _render_banner("""{
+      low_quota: [{provider: 'codebuddy', provider_name: 'CodeBuddy',
+                   remaining_credits: 120, percent_left: 2.0}],
+    }""")
+    assert '1 个通道余额告急' in out, out
+    assert '项权益' not in out, f"不该出现到期段文案: {out}"
+    assert '最近一项' not in out, f"没有到期项不该有「最近一项」: {out}"
+    assert 'expirybar show' in out, "横幅要显示"
+    assert 'expired' not in out, out
+
+
+def test_banner_low_quota_without_percent_says_insufficient():
+    """占比拿不到（total 全缺）时别渲染成「剩 —%」，直接说「余额不足」。"""
+    out = _render_banner("""{
+      low_quota: [{provider: 'weird', provider_name: 'weird',
+                   remaining_credits: 0, percent_left: null}],
+    }""")
+    assert '余额不足' in out, out
+    assert '剩 —' not in out, f"不能渲染成「剩 —%」: {out}"

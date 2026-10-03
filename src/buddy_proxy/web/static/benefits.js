@@ -94,7 +94,8 @@ function renderExpiryBanner() {
   const el = document.getElementById('expirybar');
   if (!el) return;
   const list = (BENEFITS && BENEFITS.expiring) || [];
-  if (!list.length) {
+  const low = (BENEFITS && BENEFITS.low_quota) || [];
+  if (!list.length && !low.length) {
     el.className = 'expirybar';
     el.innerHTML = '';
     el.open = false;
@@ -102,13 +103,16 @@ function renderExpiryBanner() {
   }
   const hasOver = list.some(e => e.days_left < 0);
   el.className = 'expirybar show' + (hasOver ? ' expired' : '');
-  const soonest = list[0];  // 后端按 expire_ts 升序，第一条就是最紧的
   // 窗口天数以后端下发为准；老响应缺字段时退回 7（与后端默认一致）
   const warnDays = Number(BENEFITS && BENEFITS.expiry_warn_days) || 7;
-  const head = hasOver
-    ? `有 ${list.length} 项权益已过期或即将到期`
-    : `有 ${list.length} 项权益将在 ${warnDays} 天内到期`;
-  const rows = list.map(e => {
+  // 两种告警各说各的段，都命中就用「 · 」接上
+  const expHead = list.length
+    ? (hasOver ? `有 ${list.length} 项权益已过期或即将到期`
+               : `有 ${list.length} 项权益将在 ${warnDays} 天内到期`)
+    : '';
+  const lowHead = low.length ? `${low.length} 个通道余额告急` : '';
+  const head = [expHead, lowHead].filter(Boolean).join(' · ');
+  const expRows = list.map(e => {
     const over = e.days_left < 0;
     // 余量只对积分类有意义（天数/次数/千分制的 remaining 是各自的量纲，
     // 铺出来只会让人困惑），故只给 credit 带余量
@@ -118,12 +122,24 @@ function renderExpiryBanner() {
       `<span class="eb-label">${esc(e.label)}${amt}</span>` +
       `<span class="eb-date">${esc(fmtExpireDate(e.expire_ts))}</span>` +
       `<span class="eb-days${over ? ' over' : ''}">${esc(fmtDaysLeft(e.days_left))}</span>`;
-  }).join('');
+  });
+  // 余额告急没有日期可填（eb-date 用 — 占位）；判定与面板标题行同口径，
+  // 后端算好剩余与占比，这里照搬，不自己重算
+  const lowRows = low.map(p => {
+    const pct = p.percent_left != null ? `剩 ${fmtNum(p.percent_left)}%` : '余额不足';
+    return `<span class="eb-prov">${esc(p.provider_name || p.provider)}</span>` +
+      `<span class="eb-label">余额告急 · 剩 ${fmtNum(p.remaining_credits)} credits</span>` +
+      `<span class="eb-date">—</span>` +
+      `<span class="eb-days over">${esc(pct)}</span>`;
+  });
+  const soonest = list[0];  // 后端按 expire_ts 升序，第一条就是最紧的
+  const soonHint = soonest
+    ? `<span class="eb-hint"> · 最近一项 ${esc(fmtExpireDate(soonest.expire_ts))}（${esc(fmtDaysLeft(soonest.days_left))}）</span>`
+    : '';
   el.innerHTML =
-    `<summary><span class="eb-count"><b>⏳ ${esc(head)}</b>` +
-    `<span class="eb-hint"> · 最近一项 ${esc(fmtExpireDate(soonest.expire_ts))}（${esc(fmtDaysLeft(soonest.days_left))}）</span></span>` +
+    `<summary><span class="eb-count"><b>⏳ ${esc(head)}</b>${soonHint}</span>` +
     `<span class="eb-hint">展开明细 ▾</span></summary>` +
-    `<div class="eb-list">${rows}</div>`;
+    `<div class="eb-list">${expRows.concat(lowRows).join('')}</div>`;
 }
 
 // ---- 打卡日历 + 自动打卡 + 各通道额度 ----
@@ -592,15 +608,72 @@ async function agMoveAccount(idx, delta, id) {
   finally { AG_MOVING = false; }
 }
 
-// 删除账号（POST /ui/api/antigravity/accounts/delete）：被 Google 拉黑
-// （403 Verify your account，副标题会标「疑似拉黑」）或不再使用的账号从
-// 轮换里摘掉——留着只会每轮 failover 白打一次上游。confirm 确认后提交，
-// 与顺位调整共用 AG_MOVING 在飞锁（确认框关掉后的连点不再发第二个请求）。
-async function agDeleteAccount(id) {
-  if (AG_MOVING) return;
+// 删除确认弹窗：复用 index.html 的 overlay/modal 骨架（与「测试上游」同款），
+// 不用系统 confirm——样式割裂、标题还是文件路径，观感差。Promise 化：
+// 「删除该账号」resolve(true)；取消按钮/遮罩点击/Esc（都汇入 closeModal）
+// resolve(false)。closeModal 是 app.js 的全局函数（浏览器里即 window.closeModal，
+// 各关闭入口解析到的都是它），临时替换拦下全部关闭路径，关完立刻还原。
+let AG_CONFIRM_OPEN = false;   // 确认流程占位：弹窗在开，或已确认、请求还没起来
+// 通用删除确认弹窗（antigravity / kimi 共用）：复用 index.html 的 overlay/modal
+// 骨架（与「测试上游」同款），不用系统 confirm——样式割裂、标题还是文件路径，
+// 观感差。Promise 化：「删除该账号」resolve(true)；取消按钮/遮罩点击/Esc
+// （都汇入 closeModal）resolve(false)。closeModal 是 app.js 的全局函数（浏览器
+// 里即 window.closeModal，各关闭入口解析到的都是它），临时替换拦下全部关闭
+// 路径，关完立刻还原。opts: {title, name, extra, yes}（文案各通道自带）。
+function confirmAccountDelete(opts) {
+  if (AG_CONFIRM_OPEN) return Promise.resolve(false);
+  AG_CONFIRM_OPEN = true;
+  return new Promise(resolve => {
+    let done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      // 确认（v=true）时**不在这里清锁**：resolve 是微任务，调用方的 MOVING
+      // 置位要等下一拍——这中间的窗口里再点 ✕ 会叠开第二个确认框并永远等
+      // 不到表态（前端测试 test_delete_account_inflight_clicks_ignored 抓过）。
+      // 锁交给确认方（各 DeleteAccount 的 finally）在请求真正收尾后清；
+      // 取消（v=false）没有后续请求，立即清。
+      if (!v) AG_CONFIRM_OPEN = false;
+      resolve(v);
+    };
+    document.getElementById('modal-title').textContent = opts.title;
+    document.getElementById('modal-body').innerHTML =
+      `<p style="margin:0 0 6px">确定删除 <b>${esc(opts.name)}</b>？</p>` +
+      `<p class="muted" style="margin:0;font-size:12px">${opts.extra}</p>`;
+    setModalFoot(
+      `<button onclick="closeModal()">取消</button>` +
+      `<button class="danger" onclick="globalThis.__agDelYes()">${esc(opts.yes || '删除该账号')}</button>`);
+    const prevClose = globalThis.closeModal;
+    globalThis.closeModal = () => {
+      globalThis.closeModal = prevClose;   // 先还原再走原关闭，别的弹窗不受污染
+      finish(false);
+      if (prevClose) prevClose();
+    };
+    globalThis.__agDelYes = () => { finish(true); globalThis.closeModal(); };
+    document.getElementById('overlay').classList.add('show');
+  });
+}
+
+function agConfirmDelete(id) {
   const a = (AG_ACCTS || []).find(x => x.id === id);
   const name = (a && (a.email || a.id)) || id;
-  if (!confirm(`删除账号 ${name}？该账号的凭据文件一并移除，转发不再使用它。`)) return;
+  return confirmAccountDelete({
+    title: '删除 Antigravity 账号',
+    name,
+    extra: '该账号的凭据文件一并移除，转发不再使用它。' +
+      '被 Google 拉黑的账号（副标题标「疑似拉黑」）删掉后即不再白耗一轮 failover。',
+  });
+}
+
+// 删除账号（POST /ui/api/antigravity/accounts/delete）：被 Google 拉黑
+// （403 Verify your account，副标题会标「疑似拉黑」）或不再使用的账号从
+// 轮换里摘掉——留着只会每轮 failover 白打一次上游。确认弹窗（agConfirmDelete）
+// 后提交，与顺位调整共用 AG_MOVING 在飞锁（确认后的连点不再发第二个请求）。
+async function agDeleteAccount(id) {
+  if (AG_MOVING) return;
+  if (!(await agConfirmDelete(id))) return;
+  const a = (AG_ACCTS || []).find(x => x.id === id);
+  const name = (a && (a.email || a.id)) || id;
   AG_MOVING = true;
   try {
     const r = await api('/ui/api/antigravity/accounts/delete', {
@@ -610,7 +683,10 @@ async function agDeleteAccount(id) {
     toast(`${name} 已删除`);
     refreshAll();
   } catch (e) { toast('删除失败: ' + e.message, true); }
-  finally { AG_MOVING = false; }
+  finally {
+    AG_MOVING = false;
+    AG_CONFIRM_OPEN = false;  // 确认时从 agConfirmDelete 接手的锁，到这里才放
+  }
 }
 
 function renderAntigravityPanel() {

@@ -59,8 +59,26 @@ globalThis.syncQuotaFold = () => { globalThis.__SYNC_CALLS++; };
 globalThis.document = {
   querySelector: sel => (Object.prototype.hasOwnProperty.call(QS, sel) ? QS[sel] : null),
   querySelectorAll: () => [],
-  getElementById: id => (id === 'antigravity-panel' ? PANEL : null),
+  getElementById: id => {
+    if (id === 'antigravity-panel') return PANEL;
+    // 删除确认弹窗（agConfirmDelete）用到的 overlay/modal 骨架元素
+    if (id === 'modal-title' || id === 'modal-body' || id === 'overlay') {
+      if (!globalThis.MODAL[id]) globalThis.MODAL[id] = {textContent: '', innerHTML: '', className: '',
+        classList: {_s: new Set(),
+                    add(c) { this._s.add(c); },
+                    remove(c) { this._s.delete(c); },
+                    contains(c) { return this._s.has(c); }}};
+      return MODAL[id];
+    }
+    return null;
+  },
 };
+// app.js 的弹窗全局（benefits.js 先加载，运行时才引用）——桩成可观察的
+globalThis.MODAL = {};
+globalThis.__FOOT = '';
+globalThis.__CLOSED = 0;
+globalThis.setModalFoot = html => { globalThis.__FOOT = html; };
+globalThis.closeModal = () => { globalThis.__CLOSED++; };
 function el(text) {
   return {
     textContent: text,
@@ -482,14 +500,13 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
 
 
 def test_delete_account_confirms_posts_and_updates_snapshot():
-    """确认后 POST /delete（带 id），快照同步响应、toast 报邮箱、触发刷新。"""
+    """确认弹窗点「删除」后 POST /delete（带 id），快照同步、toast 报邮箱、触发刷新。"""
     out = _run_js("""
 AG_ACCTS = [
   {index: 1, id: 'a@x.com', email: 'a@x.com', cooling: []},
   {index: 2, id: 'b@x.com', email: 'b@x.com', cooling: []},
 ];
 let CALLS = [];
-globalThis.confirm = () => true;
 globalThis.api = async (path, opts) => {
   CALLS.push({path, body: opts ? JSON.parse(opts.body) : null});
   return {enabled: true, accounts: [{index: 1, id: 'b@x.com', email: 'b@x.com'}]};
@@ -497,17 +514,31 @@ globalThis.api = async (path, opts) => {
 let TOASTS = [], REFRESHED = 0;
 globalThis.toast = m => TOASTS.push(m);
 globalThis.refreshAll = () => REFRESHED++;
-await agDeleteAccount('a@x.com');
+const p = agDeleteAccount('a@x.com');          // 打开确认弹窗，等用户表态
+await new Promise(r => setTimeout(r, 5));
+const shown = {
+  title: globalThis.MODAL['modal-title'].textContent,
+  body: globalThis.MODAL['modal-body'].innerHTML,
+  foot: globalThis.__FOOT,
+  overlayShown: globalThis.MODAL['overlay'].classList.contains('show'),
+};
+globalThis.__agDelYes();                        // 点「删除该账号」
+await p;
 console.log(JSON.stringify({
-  calls: CALLS, toasts: TOASTS, refreshed: REFRESHED,
-  snapshot: AG_ACCTS.map(a => a.id)}));
+  shown, calls: CALLS, toasts: TOASTS, refreshed: REFRESHED,
+  snapshot: AG_ACCTS.map(a => a.id), closed: globalThis.__CLOSED}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
+    assert data["shown"]["title"] == "删除 Antigravity 账号"
+    assert "a@x.com" in data["shown"]["body"], "弹窗正文带账号邮箱"
+    assert 'class="danger"' in data["shown"]["foot"], "删除键用危险样式"
+    assert data["shown"]["overlayShown"], "弹窗要真的展开"
     assert len(data["calls"]) == 1 and data["calls"][0]["path"].endswith("/delete")
     assert data["calls"][0]["body"] == {"id": "a@x.com"}
     assert data["snapshot"] == ["b@x.com"], "快照同步成删除后响应"
     assert data["refreshed"] == 1, "删除改变轮换组成，要刷新额度面板"
     assert any("a@x.com" in t for t in data["toasts"])
+    assert data["closed"] >= 1, "确认后弹窗要关掉"
 
 
 def test_first_snapshot_rerenders_panel_with_buttons():
@@ -534,20 +565,33 @@ console.log(JSON.stringify({html: PANEL.innerHTML, syncs: globalThis.__SYNC_CALL
 
 
 def test_delete_account_cancelled_sends_nothing():
-    """confirm 取消：不发请求、快照不动。"""
+    """确认弹窗取消（closeModal 路径=取消按钮/遮罩/Esc）：不发请求、快照不动；
+    取消后确认锁释放，再点 ✕ 还能重新弹。"""
     out = _run_js("""
 AG_ACCTS = [{index: 1, id: 'a@x.com', email: 'a@x.com', cooling: []}];
 let CALLS = [];
-globalThis.confirm = () => false;
 globalThis.api = async (path) => { CALLS.push(path); return {enabled: true, accounts: []}; };
 globalThis.toast = () => {};
 globalThis.refreshAll = () => {};
-await agDeleteAccount('a@x.com');
-console.log(JSON.stringify({calls: CALLS, snapshot: AG_ACCTS.map(a => a.id)}));
+const p = agDeleteAccount('a@x.com');
+await new Promise(r => setTimeout(r, 5));      // 弹窗已渲染
+const footShown = globalThis.__FOOT;
+globalThis.closeModal();                        // 走被 agConfirmDelete 接管的关闭入口
+const yes = await p;
+// 取消后再点 ✕：确认锁已释放，应能重新弹出（行为断言——let 声明不进 globalThis）
+const p2 = agDeleteAccount('a@x.com');
+await new Promise(r => setTimeout(r, 5));
+const reShown = globalThis.__FOOT;
+globalThis.closeModal();
+await p2;
+console.log(JSON.stringify({canceled: !yes, calls: CALLS, snapshot: AG_ACCTS.map(a => a.id),
+                            footShown, reShown}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
+    assert data["canceled"], "取消路径不得当作已确认"
     assert data["calls"] == []
     assert data["snapshot"] == ["a@x.com"]
+    assert data["footShown"] and data["reShown"], "取消后确认锁要释放，下次 ✕ 还能弹"
 
 
 def test_delete_account_inflight_clicks_ignored():
@@ -558,7 +602,6 @@ AG_ACCTS = [
   {index: 2, id: 'b@x.com', email: 'b@x.com', cooling: []},
 ];
 let CALLS = [];
-globalThis.confirm = () => true;
 globalThis.api = async (path, opts) => {
   CALLS.push(path);
   await new Promise(r => setTimeout(r, 20));   // 拉长在飞窗口
@@ -566,9 +609,13 @@ globalThis.api = async (path, opts) => {
 };
 globalThis.toast = () => {};
 globalThis.refreshAll = () => {};
-const p1 = agDeleteAccount('a@x.com');
-const p2 = agDeleteAccount('a@x.com');   // 在飞，应被忽略
-await Promise.all([p1, p2]);
+const p1 = agDeleteAccount('a@x.com');          // 开确认弹窗
+await new Promise(r => setTimeout(r, 5));
+const p2 = agDeleteAccount('a@x.com');   // 弹窗已开：第二个 ✕ 不叠层（resolve false）
+globalThis.__agDelYes();                        // 确认；resolve 是微任务，AG_MOVING
+await new Promise(r => setTimeout(r, 5));       // 随后置位——等它落地再模拟下一次点击
+const p3 = agDeleteAccount('a@x.com');   // POST 在飞，应被 AG_MOVING 挡掉
+await Promise.all([p1, p2, p3]);
 console.log(JSON.stringify({calls: CALLS}));
 """)
     data = json.loads(out.strip().splitlines()[-1])

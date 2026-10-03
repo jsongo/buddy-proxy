@@ -68,7 +68,7 @@ copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影
   failover 循环带 180s 尝试期预算（`_ATTEMPT_DEADLINE_S`，首个账号不受挡）：
   防超时换号把 N 个账号串成分钟级等待。
 - **删除账号**：`POST /ui/api/antigravity/accounts/delete`（管理页 ✕，
-  confirm 确认）→ `delete_account`（索引 + cred 文件）+ `clear_cooldown`
+  弹窗确认）→ `delete_account`（索引 + cred 文件）+ `clear_cooldown`
   （防内存残留）。
 - **防串号**：`ensure_account_token(account_id)` 把 token 与 cred 快照同源
   返回，project_id 从同一份快照取；每账号独立刷新锁 + 锁内重读双检。

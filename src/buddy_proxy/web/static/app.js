@@ -217,7 +217,14 @@ function ensureData(key, force) {
     GEN[key]++;      // 调用方都在 force 之前捕获了 gen，故本次强制的返回仍算数
     markStale(key);
   }
-  if (INFLIGHT[key]) return INFLIGHT[key];
+  if (INFLIGHT[key]) {
+    // force 撞上在飞请求：在飞的那发是「force 之前」发起的，可能带着写操作
+    // 之前的旧数据（写操作 → 刷新 → 旧在飞返回 → 被世代守卫作废 → 本次刷新
+    // 白跑，界面停留旧值直到下轮轮询——顺位调整后面板不换位即此）。等它落定
+    // 再补一发真正的重取，本次刷新的语义才算兑现。非 force 的去重不受影响。
+    if (!force) return INFLIGHT[key];
+    return INFLIGHT[key].catch(() => {}).then(() => ensureData(key, true));
+  }
   const gen = GEN[key];
   const p = LOADERS[key]().finally(() => { delete INFLIGHT[key]; });
   // 结果已被更新的 force 取代 → 不渲染、不标记 LOADED，让后续按需重取
