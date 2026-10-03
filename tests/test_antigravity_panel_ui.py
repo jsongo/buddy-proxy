@@ -280,6 +280,59 @@ console.log(JSON.stringify({
         f"toast 报被移动的账号与其新顺位: {data['toasts']}"
 
 
+def test_move_buttons_carry_account_id_when_snapshot_present():
+    """有快照时按钮内联账号 id：面板重绘滞后于快照时靠它定位（见 agMoveAccount）。"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'AG #1 · Gemini 组', remaining: 900, total: 1000, percent: 10, used: null, reset_ts: null},
+  {label: 'AG #2 · Gemini 组', remaining: 500, total: 1000, percent: 50, used: null, reset_ts: null},
+]}}]};
+AG_ACCTS = [
+  {index: 1, id: 'a@x.com', email: 'a@x.com', cooling: []},
+  {index: 2, id: 'b@x.com', email: 'b@x.com', cooling: []},
+];
+globalThis.__RESPONSE = {enabled: false};
+renderAntigravityPanel();
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    html = json.loads(out.strip().splitlines()[-1])["html"]
+    assert "agMoveAccount(1,-1,'a@x.com')" in html and "agMoveAccount(1,1,'a@x.com')" in html
+    assert "agMoveAccount(2,1,'b@x.com')" in html, "每个按钮都带自己账号的 id"
+
+
+def test_move_account_uses_id_position_when_dom_is_stale():
+    """按钮 idx 过期（重排响应已回、面板未重绘）：按 id 校正，挪的是账号自己。"""
+    out = _run_js("""
+AG_ACCTS = [
+  {index: 1, id: 'a@x.com', email: 'a@x.com'},
+  {index: 2, id: 'b@x.com', email: 'b@x.com'},
+  {index: 3, id: 'c@x.com', email: 'c@x.com'},
+];
+let CALLS = [];
+globalThis.api = async (path, opts) => {
+  CALLS.push(opts ? JSON.parse(opts.body).ids : null);
+  if (path.endsWith('/order')) {
+    const ids = JSON.parse(opts.body).ids;
+    return {enabled: true, accounts: ids.map((id, i) => ({index: i+1, id, email: id}))};
+  }
+  return {enabled: true, accounts: []};
+};
+let TOASTS = [];
+globalThis.toast = m => TOASTS.push(m);
+globalThis.refreshAll = () => {};
+await agMoveAccount(1, 1, 'a@x.com');   // [a,b,c] → [b,a,c]
+// 面板还没重绘，屏幕上的按钮仍是 idx=1；但 a 的实际位次已是 #2。
+// 不按 id 校正的话这次会挪到 b（提交 [a,b,c] 把整轮点回去）。
+await agMoveAccount(1, 1, 'a@x.com');
+console.log(JSON.stringify({calls: CALLS, final: AG_ACCTS.map(a => a.id), toasts: TOASTS}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["calls"][1] == ["b@x.com", "c@x.com", "a@x.com"], \
+        f"第二次点按应按 id 定位到 a 的当前位次: {data['calls']}"
+    assert data["final"] == ["b@x.com", "c@x.com", "a@x.com"]
+    assert any("a@x.com" in t and "#3" in t for t in data["toasts"])
+
+
 def test_move_account_fetches_snapshot_when_missing():
     """按钮随额度先到、快照还没回：点按时先补拉 accounts 再提交。"""
     out = _run_js("""
@@ -301,3 +354,55 @@ console.log(JSON.stringify({calls: CALLS}));
     assert len(data["calls"]) == 2, "先 GET 补快照，再 POST order"
     assert data["calls"][0]["path"] == "/ui/api/antigravity/accounts"
     assert data["calls"][1]["body"]["ids"] == ["b@x.com", "a@x.com"]
+
+
+def test_move_account_inflight_clicks_ignored():
+    """重排在途（POST + 额度重取还没完）：第二次点按直接忽略，不重复提交。"""
+    out = _run_js("""
+AG_ACCTS = [
+  {index: 1, id: 'a@x.com', email: 'a@x.com'},
+  {index: 2, id: 'b@x.com', email: 'b@x.com'},
+  {index: 3, id: 'c@x.com', email: 'c@x.com'},
+];
+let CALLS = [], TOASTS = [];
+globalThis.api = async (path, opts) => {
+  CALLS.push(opts ? JSON.parse(opts.body).ids : null);
+  if (path.endsWith('/order')) {
+    const ids = JSON.parse(opts.body).ids;
+    return {enabled: true, accounts: ids.map((id, i) => ({index: i+1, id, email: id}))};
+  }
+  return {enabled: true, accounts: []};
+};
+globalThis.toast = m => TOASTS.push(m);
+globalThis.refreshAll = () => {};
+const p1 = agMoveAccount(1, 1, 'a@x.com');
+const p2 = agMoveAccount(1, 1, 'a@x.com');   // 在飞，应被忽略
+await Promise.all([p1, p2]);
+console.log(JSON.stringify({calls: CALLS, final: AG_ACCTS.map(a => a.id), toasts: TOASTS}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["calls"] == [["b@x.com", "a@x.com", "c@x.com"]], \
+        f"在途点按不应产生第二次提交: {data['calls']}"
+    assert data["final"] == ["b@x.com", "a@x.com", "c@x.com"]
+    assert len(data["toasts"]) == 1, "只报一次"
+
+
+def test_move_account_missing_id_is_noop():
+    """按钮带的 id 不在快照里（账号刚被删）：宁可不动，也不按过期 idx 挪别人。"""
+    out = _run_js("""
+AG_ACCTS = [
+  {index: 1, id: 'a@x.com', email: 'a@x.com'},
+  {index: 2, id: 'b@x.com', email: 'b@x.com'},
+];
+let CALLS = [];
+globalThis.api = async (path, opts) => {
+  CALLS.push(path);
+  return {enabled: true, accounts: []};
+};
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+await agMoveAccount(1, 1, 'gone@x.com');   // 不在快照里的 id
+console.log(JSON.stringify({calls: CALLS}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["calls"] == [], f"不应发任何请求: {data['calls']}"
