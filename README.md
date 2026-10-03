@@ -413,6 +413,8 @@ curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"gemini/gemini-2.5-f
 
 The gateway talks to the same `v1internal:generateContent` endpoint as the real gemini CLI, with the CLI's own request fingerprint (UA, `x-goog-api-client`, no `safetySettings` — see `src/buddy_proxy/gemini/README.md` for the full alignment table and the risk notes).
 
+**Cache hits are reported** — upstream `usageMetadata.cachedContentTokenCount` maps to OpenAI's `prompt_tokens_details.cached_tokens` (`prompt_tokens` already includes the cached part, OpenAI convention — no deduction here). The Anthropic-protocol exit converts it to `cache_read_input_tokens` and discounts `input_tokens` accordingly, so the request log's cached-token column fills in too. The gemini and antigravity channels share these converters, so both get it at once.
+
 **Login is interoperable with the local `gemini` CLI** — both sides use the same OAuth client, so the credentials are mutually recognized:
 
 - After `buddy login gemini` succeeds, the credentials are written back into `~/.gemini` in the CLI's own format (`oauth_creds.json`, `settings.json` auth type, `google_accounts.json`) — the `gemini` command has a login state immediately, without running its own login.

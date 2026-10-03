@@ -784,6 +784,11 @@ uv run python -m buddy_proxy --desensitize --gemini
 （UA / `x-goog-api-client` / 不发 safetySettings）逐项对齐本机真 CLI 0.33.1——
 对齐表与防封号注意事项见 `src/buddy_proxy/gemini/README.md`。
 
+**缓存命中会透出**——上游 `usageMetadata.cachedContentTokenCount` 映射为 OpenAI 的
+`prompt_tokens_details.cached_tokens`（`prompt_tokens` 口径已含缓存命中，这里不扣减）。
+Anthropic 协议出口会把它转成 `cache_read_input_tokens` 并从 `input_tokens` 里扣除，
+请求日志的缓存列随之有数。gemini 与 antigravity 两条通道共用这套转换，一起生效。
+
 **登录与本机 gemini CLI 双向互通**（两边是同一个 OAuth client，凭证互认）：
 
 - `buddy login gemini` 成功后，凭证按 CLI 的格式回写 `~/.gemini/`
