@@ -159,6 +159,34 @@ async def ui_antigravity_accounts_order(request: Request):
     return await asyncio.to_thread(failover.accounts_status)
 
 
+@app.post("/ui/api/antigravity/accounts/delete")
+async def ui_antigravity_accounts_delete(request: Request):
+    """删除一个 antigravity 账号（索引条目 + cred 文件 + 冷却标记）。
+
+    给「能登录但被 Google 拉黑（403 Verify your account，面板副标题显示
+    疑似拉黑）」或不再使用的账号准备——留在轮换里只会每轮 failover 白打
+    一次。返回删除后的账号状态（与 GET 同构，前端直接重渲染）。
+    """
+    _ensure_local(request)
+    try:
+        from ...antigravity import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "antigravity 通道不可用"}})
+    body = await request.json()
+    aid = body.get("id")
+    if not isinstance(aid, str) or not aid.strip():
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（要删除的账号 id）"}})
+    aid = aid.strip()
+    removed = await asyncio.to_thread(creds.delete_account, aid)
+    if not removed:
+        raise HTTPException(status_code=404,
+                            detail={"error": {"message": f"账号不存在: {aid}"}})
+    from ...antigravity import failover
+    await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.post("/ui/api/traepat/refresh-tokens")
 async def ui_traepat_refresh_tokens(request: Request):
     """立即补签 traepat 缺失/临期 Token；健康账号不强刷。"""

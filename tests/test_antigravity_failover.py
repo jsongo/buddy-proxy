@@ -166,6 +166,41 @@ def test_403_switches_account_short_cooldown(two_accounts, monkeypatch):
     assert 0 < left <= 60 and kind == "account"
 
 
+def test_403_verify_account_blacklisted_long_cooldown(two_accounts, monkeypatch):
+    """403「Verify your account to continue.」= Google 风控拉黑：6h 档，kind=blacklist。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (
+        403, {"error": {"code": 403, "message": "Verify your account to continue."}}, {})
+    up.plan["tok-v@y.com"] = (200, _gemini_ok(), {})
+    _patch_token(monkeypatch)
+
+    resp = _run(provider)
+    assert resp.status_code == 200
+    left, kind = failover.cooldown_left("u@x.com")
+    assert kind == "blacklist"
+    assert failover._ACCOUNT_COOLDOWN_S < left <= failover._BLACKLIST_COOLDOWN_S
+
+
+def test_in_band_403_verify_account_blacklisted(two_accounts, monkeypatch):
+    """带内（HTTP 200 首事件）403 拉黑同样识别——闸门路径不漏。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    sse_403 = _sse([json.dumps(
+        {"error": {"code": 403, "message": "Verify your account to continue."}})])
+    up.plan["tok-u@x.com"] = (200, sse_403, {})
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    sr = _run(provider, stream=True)
+    assert sr.status_code == 200
+    left, kind = failover.cooldown_left("u@x.com")
+    assert kind == "blacklist" and left > 0
+    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+
+
 def test_401_forces_refresh_then_switches(two_accounts, monkeypatch):
     from buddy_proxy.antigravity import failover
 
@@ -195,6 +230,8 @@ def test_all_accounts_failed_maps_last_status(two_accounts, monkeypatch):
     assert ei.value.status_code == 429
     msg = ei.value.detail["error"]["message"]
     assert "所有账号均不可用" in msg and "quota b" in msg  # 带上最后错误详情
+    # 逐账号状态画像：谁在额度冷却、还剩多久（不然「两个账号明明能用」没法自查）
+    assert "u@x.com 额度冷却剩" in msg and "v@y.com 额度冷却剩" in msg
 
 
 def test_business_4xx_passthrough_without_switching(two_accounts, monkeypatch):
@@ -225,6 +262,8 @@ def test_no_available_accounts_fast_429(two_accounts):
         _run(provider)
     assert ei.value.status_code == 429
     assert "冷却中" in ei.value.detail["error"]["message"]
+    assert "u@x.com 额度冷却剩" in ei.value.detail["error"]["message"], \
+        "空候选的报错要说明谁在冷却、还剩多久"
 
 
 def test_account_meta_records_selected_account(two_accounts, monkeypatch):
@@ -486,3 +525,68 @@ def test_reorder_endpoint_rejects_bad_shape(two_accounts):
         with pytest.raises(HTTPException) as ei:
             asyncio.run(web_ui.ui_antigravity_accounts_order(_order_request(bad)))
         assert ei.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 删除账号（POST /ui/api/antigravity/accounts/delete）
+# ---------------------------------------------------------------------------
+
+def _delete_request(aid):
+    import types
+
+    class _Req:
+        client = types.SimpleNamespace(host="127.0.0.1")
+
+        async def json(self):
+            return {"id": aid}
+
+    return _Req()
+
+
+def test_delete_endpoint_removes_account_and_cooldown(two_accounts):
+    """删除账号：索引+cred 文件移除、冷却清掉、状态返回剩余账号；再删 404。"""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from buddy_proxy.antigravity import credentials as creds, failover
+    from buddy_proxy.web.ui import channels as web_ui
+
+    failover.mark_cooldown("v@y.com", quota=True)  # 冷却残留应随删除一起清掉
+    out = asyncio.run(web_ui.ui_antigravity_accounts_delete(_delete_request("v@y.com")))
+    assert [a["id"] for a in out["accounts"]] == ["u@x.com"]
+    assert creds.load_account_cred("v@y.com") is None
+    assert not creds.account_cred_path("v@y.com").exists()
+    assert failover.cooldown_left("v@y.com") == (0.0, "")
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(web_ui.ui_antigravity_accounts_delete(_delete_request("v@y.com")))
+    assert ei.value.status_code == 404
+
+
+def test_delete_endpoint_rejects_bad_shape(two_accounts):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from buddy_proxy.web.ui import channels as web_ui
+
+    for bad in (None, 123, "", "  "):
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(web_ui.ui_antigravity_accounts_delete(_delete_request(bad)))
+        assert ei.value.status_code == 400
+
+
+def test_blacklist_cooldown_report_and_status_shape():
+    """blacklist 类别进 accounts_status 透传、cooldown_report 里标「疑似拉黑」。"""
+    from buddy_proxy.antigravity import credentials as creds, failover
+
+    creds.save_account_cred({"access_token": "a", "refresh_token": "r",
+                             "expiry": "2099-01-01T00:00:00+00:00",
+                             "email": "u@x.com", "project_id": "p1"})
+    failover.mark_cooldown("u@x.com", blacklist=True)
+
+    acct = failover.accounts_status()["accounts"][0]
+    assert acct["cooling"] == [{"kind": "blacklist", "minutes_left": pytest.approx(360, rel=0.01)}]
+    report = failover.cooldown_report()
+    assert "u@x.com 疑似拉黑剩" in report and report.endswith("h"), "6h 档按小时展示"

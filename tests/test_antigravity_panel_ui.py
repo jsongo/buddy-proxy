@@ -406,3 +406,126 @@ console.log(JSON.stringify({calls: CALLS}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["calls"] == [], f"不应发任何请求: {data['calls']}"
+
+
+# ---------------------------------------------------------------------------
+# 删除账号（✕ 按钮 + agDeleteAccount）
+# ---------------------------------------------------------------------------
+
+def test_delete_button_renders_even_for_single_account():
+    """✕ 不依赖多账号（单个被拉黑的账号恰恰最需要删）；要等快照给出 id。"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'Gemini 组', remaining: 900, total: 1000, percent: 10, used: null, reset_ts: null},
+]}}]};
+AG_ACCTS = [{index: 1, id: 'a@x.com', email: 'a@x.com', cooling: []}];
+globalThis.__RESPONSE = {enabled: false};
+renderAntigravityPanel();
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    html = json.loads(out.strip().splitlines()[-1])["html"]
+    assert "agDeleteAccount('a@x.com')" in html, "单账号也要有删除入口"
+    assert "agMoveAccount(" not in html, "单账号没有顺位可调（与既有行为一致）"
+
+    nosnap = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'Gemini 组', remaining: 900, total: 1000, percent: 10, used: null, reset_ts: null},
+]}}]};
+AG_ACCTS = null;
+globalThis.__RESPONSE = {enabled: false};
+renderAntigravityPanel();
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    assert "agDeleteAccount(" not in json.loads(nosnap.strip().splitlines()[-1])["html"], \
+        "快照没到（拿不到 id）时先不渲染删除按钮"
+
+
+def test_delete_account_confirms_posts_and_updates_snapshot():
+    """确认后 POST /delete（带 id），快照同步响应、toast 报邮箱、触发刷新。"""
+    out = _run_js("""
+AG_ACCTS = [
+  {index: 1, id: 'a@x.com', email: 'a@x.com', cooling: []},
+  {index: 2, id: 'b@x.com', email: 'b@x.com', cooling: []},
+];
+let CALLS = [];
+globalThis.confirm = () => true;
+globalThis.api = async (path, opts) => {
+  CALLS.push({path, body: opts ? JSON.parse(opts.body) : null});
+  return {enabled: true, accounts: [{index: 1, id: 'b@x.com', email: 'b@x.com'}]};
+};
+let TOASTS = [], REFRESHED = 0;
+globalThis.toast = m => TOASTS.push(m);
+globalThis.refreshAll = () => REFRESHED++;
+await agDeleteAccount('a@x.com');
+console.log(JSON.stringify({
+  calls: CALLS, toasts: TOASTS, refreshed: REFRESHED,
+  snapshot: AG_ACCTS.map(a => a.id)}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert len(data["calls"]) == 1 and data["calls"][0]["path"].endswith("/delete")
+    assert data["calls"][0]["body"] == {"id": "a@x.com"}
+    assert data["snapshot"] == ["b@x.com"], "快照同步成删除后响应"
+    assert data["refreshed"] == 1, "删除改变轮换组成，要刷新额度面板"
+    assert any("a@x.com" in t for t in data["toasts"])
+
+
+def test_delete_account_cancelled_sends_nothing():
+    """confirm 取消：不发请求、快照不动。"""
+    out = _run_js("""
+AG_ACCTS = [{index: 1, id: 'a@x.com', email: 'a@x.com', cooling: []}];
+let CALLS = [];
+globalThis.confirm = () => false;
+globalThis.api = async (path) => { CALLS.push(path); return {enabled: true, accounts: []}; };
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+await agDeleteAccount('a@x.com');
+console.log(JSON.stringify({calls: CALLS, snapshot: AG_ACCTS.map(a => a.id)}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["calls"] == []
+    assert data["snapshot"] == ["a@x.com"]
+
+
+def test_delete_account_inflight_clicks_ignored():
+    """与顺位调整共用 AG_MOVING 在飞锁：确认框关掉后的连点只发一个请求。"""
+    out = _run_js("""
+AG_ACCTS = [
+  {index: 1, id: 'a@x.com', email: 'a@x.com', cooling: []},
+  {index: 2, id: 'b@x.com', email: 'b@x.com', cooling: []},
+];
+let CALLS = [];
+globalThis.confirm = () => true;
+globalThis.api = async (path, opts) => {
+  CALLS.push(path);
+  await new Promise(r => setTimeout(r, 20));   // 拉长在飞窗口
+  return {enabled: true, accounts: [{index: 1, id: 'b@x.com', email: 'b@x.com'}]};
+};
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+const p1 = agDeleteAccount('a@x.com');
+const p2 = agDeleteAccount('a@x.com');   // 在飞，应被忽略
+await Promise.all([p1, p2]);
+console.log(JSON.stringify({calls: CALLS}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["calls"].count("/ui/api/antigravity/accounts/delete") == 1, \
+        f"在飞点按不应产生第二次删除请求: {data['calls']}"
+
+
+def test_blacklist_subtitle_label_and_hours():
+    """拉黑冷却的副标题标注「疑似拉黑」；2h 以上按小时显示（不是 360min）。"""
+    out = _run_js("""
+globalThis.__RESPONSE = {enabled: true, accounts: [
+  {index: 1, email: 'a@x.com', project_id: 'p', hours_left: 1,
+   cooling: [{kind: 'blacklist', minutes_left: 359.5}]},
+  {index: 2, email: 'b@x.com', project_id: 'p', hours_left: 1, cooling: []},
+]};
+QS['#antigravity-panel [data-ag-idx="1"]'] = el('AG #1');
+QS['#antigravity-panel [data-ag-idx="2"]'] = el('AG #2');
+await loadAntigravityAccounts();
+console.log(JSON.stringify({sub: QS['#antigravity-panel [data-ag-idx="1"]'].inserted.join('')}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert "疑似拉黑" in data["sub"], data["sub"]
+    assert "6.0h" in data["sub"], f"6h 档要按小时展示: {data['sub']}"
+    assert "360min" not in data["sub"]

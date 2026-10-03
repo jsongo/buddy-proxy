@@ -194,7 +194,8 @@ class AntigravityProvider(BaseProvider):
             raise HTTPException(
                 status_code=429,
                 detail={"error": {
-                    "message": "antigravity 所有账号均在冷却中（额度耗尽或凭据问题），稍后自动恢复",
+                    "message": (f"antigravity 所有账号均在冷却中：{failover.cooldown_report()}"
+                                "；额度冷却到点自动恢复，疑似拉黑的账号请在管理页删除"),
                     "type": "rate_limit_error",
                 }},
             )
@@ -250,7 +251,9 @@ class AntigravityProvider(BaseProvider):
                     failover.mark_cooldown(acct.id, reason="401 强刷后仍被拒")
                     continue
 
-            # 403/429：账号级拒绝（额度/风控）——冷却该账号换下一个
+            # 403/429：账号级拒绝（额度/风控）——冷却该账号换下一个。
+            # 403 文案是「Verify your account to continue.」时按拉黑档（6h）
+            # 冷却：账号能登录但被 Google 风控挡在门外，60s 一探只会白打。
             if resp.status_code in (403, 429):
                 last_status = resp.status_code
                 last_detail = await _error_detail(resp, stream)
@@ -258,6 +261,7 @@ class AntigravityProvider(BaseProvider):
                     acct.id,
                     retry_after=resp.headers.get("Retry-After"),
                     quota=resp.status_code == 429,
+                    blacklist=failover.is_blacklist_signal(resp.status_code, last_detail),
                     reason=f"HTTP {resp.status_code}{(': ' + last_detail) if last_detail else ''}",
                 )
                 await _drain_and_close(resp, stream)
@@ -279,6 +283,7 @@ class AntigravityProvider(BaseProvider):
                 last_status, last_detail = gate.code, gate.message
                 failover.mark_cooldown(
                     acct.id, quota=gate.code == 429,
+                    blacklist=failover.is_blacklist_signal(gate.code, gate.message),
                     reason=f"带内 error {gate.code}: {gate.message}")
                 await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
@@ -319,11 +324,15 @@ class AntigravityProvider(BaseProvider):
                 chat = chat_completion_to_anthropic_message(chat, original)
             return JSONResponse(content=chat)
 
+        # 全部账号失败：报错里逐账号说明当前状态（谁在额度冷却还剩几分钟、
+        # 谁疑似被拉黑）——不然用户看到「两个账号明明能用」却报 403，没法自查。
+        report = failover.cooldown_report()
+        tail = f"最后错误 HTTP {last_status or 'n/a'}{(': ' + last_detail) if last_detail else ''}"
         raise HTTPException(
             status_code=last_status if last_status in (401, 403, 429) else 502,
             detail={"error": {
-                "message": (f"antigravity 所有账号均不可用（最后错误 HTTP {last_status or 'n/a'}"
-                            f"{(': ' + last_detail) if last_detail else ''}）"),
+                "message": (f"antigravity 所有账号均不可用（{report}；{tail}）" if report
+                            else f"antigravity 所有账号均不可用（{tail}）"),
                 "type": "rate_limit_error" if last_status in (403, 429) else "bad_gateway",
             }},
         )

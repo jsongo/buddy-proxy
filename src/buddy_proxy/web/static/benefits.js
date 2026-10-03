@@ -360,7 +360,7 @@ async function refreshTraepatTokens(btn) {
 // 组名/副标题由账号数据回填），账号状态走 /ui/api/antigravity/accounts（纯本地不触
 // 网）。未登录时整个面板隐藏。
 let AG_ACCTS = null;  // 最近一次 accounts 快照；render 先用它，避免每 30s 闪回「AG #N」
-let AG_MOVING = false;  // 重排在途（POST + 额度重取是秒级窗口）：期间忽略新的点按
+let AG_MOVING = false;  // 面板账号操作（重排/删除）在途：期间忽略新的点按
 
 function _ag_acct_for(idx) {
   // idx=null（单账号组名无 AG #N 前缀）只在恰有一个账号时能对上
@@ -370,12 +370,18 @@ function _ag_acct_for(idx) {
 }
 
 function _ag_sub_html(a) {
-  // 副标题（进度条上面那行 muted 小字）：缺 project / token 剩余 / 冷却
+  // 副标题（进度条上面那行 muted 小字）：缺 project / token 剩余 / 冷却。
+  // blacklist（Google 风控拉黑）不是「冷却」语义——标注成疑似拉黑引导删除；
+  // 时长 2h 以上按小时显示（6h 拉黑档读着不像「360min」）。
   if (!a) return '';
   const bits = [];
   if (!a.project_id) bits.push('缺 project');
   if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
-  for (const c of a.cooling || []) bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${c.minutes_left}min`);
+  for (const c of a.cooling || []) {
+    const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
+    bits.push(c.kind === 'blacklist' ? `疑似拉黑 剩${left}`
+      : `${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
+  }
   return bits.length
     ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-ag-sub>${esc(bits.join(' · '))}</div>`
     : '';
@@ -434,6 +440,27 @@ async function agMoveAccount(idx, delta, id) {
   finally { AG_MOVING = false; }
 }
 
+// 删除账号（POST /ui/api/antigravity/accounts/delete）：被 Google 拉黑
+// （403 Verify your account，副标题会标「疑似拉黑」）或不再使用的账号从
+// 轮换里摘掉——留着只会每轮 failover 白打一次上游。confirm 确认后提交，
+// 与顺位调整共用 AG_MOVING 在飞锁（确认框关掉后的连点不再发第二个请求）。
+async function agDeleteAccount(id) {
+  if (AG_MOVING) return;
+  const a = (AG_ACCTS || []).find(x => x.id === id);
+  const name = (a && (a.email || a.id)) || id;
+  if (!confirm(`删除账号 ${name}？该账号的凭据文件一并移除，转发不再使用它。`)) return;
+  AG_MOVING = true;
+  try {
+    const r = await api('/ui/api/antigravity/accounts/delete', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id})});
+    AG_ACCTS = r.accounts || [];
+    toast(`${name} 已删除`);
+    refreshAll();
+  } catch (e) { toast('删除失败: ' + e.message, true); }
+  finally { AG_MOVING = false; }
+}
+
 function renderAntigravityPanel() {
   const panel = document.getElementById('antigravity-panel');
   if (!panel) return;
@@ -469,6 +496,11 @@ function renderAntigravityPanel() {
     // 个别账号额度查询失败时它没有卡片，按「可见卡片」定界正好。
     // acct.id 内联进按钮：点按时按快照里的真实位次挪（面板重绘延迟见 agMoveAccount）。
     const moveBtns = (m && n > 1) ? _ag_move_html(idx, n, acct && acct.id) : '';
+    // 删除按钮：要账号 id 才能删，快照没到（首屏首渲）时先不渲染，等下轮。
+    // id 字符集由后端 _ID_RE 约束（字母数字 ._@-），内联进 onclick 安全。
+    const delBtn = acct
+      ? `<button class="ghost" title="删除该账号（被 Google 拉黑/不再使用时）" ` +
+        `onclick="agDeleteAccount('${acct.id}')">✕</button>` : '';
     // 注意按钮放块尾、副标题紧随名字——loadAntigravityAccounts 的就地回填
     // 靠「名字元素的下一个兄弟是副标题」定位，中间插任何元素都会让它错乱。
     return `
@@ -476,7 +508,7 @@ function renderAntigravityPanel() {
       <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</span>
       ${_ag_sub_html(acct)}
       ${its.map(quotaItemHtml).join('')}
-      ${moveBtns}
+      ${moveBtns}${delBtn}
     </div>`;
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
   const noticeHtml = notices.map(quotaItemHtml).join('');
