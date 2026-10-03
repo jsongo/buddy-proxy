@@ -347,6 +347,31 @@ def delete_account(account_id: str) -> bool:
     return True
 
 
+def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
+    """按给定 id 顺序重写全部账号的 priority（failover 顺位）。
+
+    入参必须是**完整**的当前账号 id 列表（少一个/多一个/重复即拒绝）——
+    局部重排语义模糊（没提到的账号排哪？），要求全量提交让调用方（UI 上移
+    下移按钮、拖拽）自己算好完整顺序，这里只做校验与落盘。
+
+    priority 重写为 0..n-1；added_at 原样保留（它是「登录时间」的事实，
+    与顺位解耦后仍可用于展示/审计）。返回重排后的 list_accounts()。
+    """
+    list_accounts()  # 先走唯一的枚举入口：迁移/自愈完再重排，别在残缺索引上动刀
+    with _index_lock:
+        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
+        current = [str(e.get("id") or "") for e in entries]
+        if sorted(ordered_ids) != sorted(current) or len(set(ordered_ids)) != len(ordered_ids):
+            raise ValueError(
+                f"重排必须提交完整的账号 id 列表（当前 {len(current)} 个，"
+                f"收到 {len(ordered_ids)} 个）")
+        rank = {aid: i for i, aid in enumerate(ordered_ids)}
+        for e in entries:
+            e["priority"] = rank[str(e.get("id") or "")]
+        _atomic_write_json(index_path(), _index_payload(entries))
+    return list_accounts()
+
+
 def primary_cred() -> dict[str, Any] | None:
     """优先级最高的账号 cred（转发/旧 API 的默认账号）。"""
     accounts = list_accounts()

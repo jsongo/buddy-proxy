@@ -125,6 +125,35 @@ def test_delete_account(tmp_path, monkeypatch):
     assert creds.delete_account("u@x.com") is False  # 再删一次 = 没这账号
 
 
+def test_reorder_accounts_rewrites_priority(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    for i in range(3):
+        creds.save_account_cred(_cred(email=f"u{i}@x.com", refresh_token=f"rt{i}"))
+    refs = creds.reorder_accounts(["u2@x.com", "u0@x.com", "u1@x.com"])
+    assert [r.id for r in refs] == ["u2@x.com", "u0@x.com", "u1@x.com"]
+    assert [r.priority for r in refs] == [0, 1, 2]
+    # added_at 是登录事实，不随顺位改写
+    assert refs[0].added_at == creds.list_accounts()[0].added_at
+    # 重启语义：重新读盘（新进程视角）也是新顺位
+    assert [r.id for r in creds.list_accounts()] == ["u2@x.com", "u0@x.com", "u1@x.com"]
+
+
+def test_reorder_accounts_rejects_incomplete_or_duplicate(tmp_path, monkeypatch):
+    from buddy_proxy.antigravity import credentials as creds
+
+    for i in range(2):
+        creds.save_account_cred(_cred(email=f"u{i}@x.com", refresh_token=f"rt{i}"))
+    with pytest.raises(ValueError, match="完整的账号"):
+        creds.reorder_accounts(["u0@x.com"])  # 少一个
+    with pytest.raises(ValueError, match="完整的账号"):
+        creds.reorder_accounts(["u0@x.com", "u1@x.com", "ghost@x.com"])  # 多一个
+    with pytest.raises(ValueError, match="完整的账号"):
+        creds.reorder_accounts(["u0@x.com", "u0@x.com"])  # 重复
+    # 拒绝后索引原封不动
+    assert [r.id for r in creds.list_accounts()] == ["u0@x.com", "u1@x.com"]
+
+
 def test_refresh_account_cred_updates_and_saves(tmp_path, monkeypatch):
     from buddy_proxy.antigravity import credentials as creds
 

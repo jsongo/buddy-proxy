@@ -33,8 +33,8 @@ buddy login antigravity     # Google OAuth 登录（检测到本机 agy 登录�
 curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"antigravity/claude-sonnet-4-6","messages":[...]}'
 ```
 
-凭证存放 `~/.buddy-proxy/antigravity/`：`index.json`（账号清单，登录顺序即
-failover 顺位）+ 每账号一份 `<account_id>.json`（0600 原子写，account_id 由
+凭证存放 `~/.buddy-proxy/antigravity/`：`index.json`（账号清单，priority 即
+failover 顺位——登录顺序初始化，管理页可调）+ 每账号一份 `<account_id>.json`（0600 原子写，account_id 由
 email 规范化，email 缺失时退 `acct-<token hash 前 12 位>`）。access_token
 过期自动刷新；refresh_token 长期有效（Google 安装型应用不轮换）。删掉某账号
 的 JSON 文件 = 退出该账号（索引自愈）；删除 `index.json` 全部账号即全退出。
@@ -46,6 +46,11 @@ copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影
 
 - **登录即追加**：换 Google 账号再跑一次 `buddy login antigravity` 就是追加
   备用账号；相同邮箱 = upsert 该账号凭据且顺位不变。上限 8 个。
+- **顺位可调**：管理页面板每个账号卡片悬停出 ▲▼（多账号时），点一下即改
+  failover 顺位——`POST /ui/api/antigravity/accounts/order` 提交**完整**的
+  id 顺序列表（少/多/重复一律 400），后端重写 index.json 的 priority 为
+  0..n-1，added_at 保留（登录事实不动）。quota 缓存键带 priority
+  （`quota_epoch`），重排后旧额度快照自动失效、下一轮即换新顺位。
 - **换号条件**：HTTP 429（额度）/ 403 / 401 强刷后仍拒 / 凭据层 AuthError /
   缺 project_id → 冷却当前账号换下一个；业务 4xx（模型名等）原样透传不换号。
 - **冷却时长**：429 尊重 `Retry-After`（钳 1s~7d），默认 5 分钟；403/凭据

@@ -209,3 +209,95 @@ console.log(JSON.stringify({snapshot: AG_ACCTS}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["snapshot"] == []
+
+
+def test_move_buttons_multi_account_with_boundary_disables():
+    """多账号：每块有 ▲▼，首位 ▲ 禁用、末位 ▼ 禁用；单账号不渲染按钮。"""
+    multi = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'AG #1 · Gemini 组', remaining: 900, total: 1000, percent: 10, used: null, reset_ts: null},
+  {label: 'AG #2 · Gemini 组', remaining: 500, total: 1000, percent: 50, used: null, reset_ts: null},
+]}}]};
+globalThis.__RESPONSE = {enabled: false};
+renderAntigravityPanel();
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    html = json.loads(multi.strip().splitlines()[-1])["html"]
+    assert html.count("agMoveAccount(") == 4, "两个账号各 ▲▼ 共 4 个按钮"
+    assert "agMoveAccount(1,-1)" in html and "agMoveAccount(1,1)" in html
+    assert "agMoveAccount(2,-1)" in html and "agMoveAccount(2,1)" in html
+    # 首位 ▲、末位 ▼ 禁用（看按钮前后的 disabled）
+    first_up = html.split("agMoveAccount(1,-1)")[0].rsplit("<button", 1)[-1]
+    last_down = html.split("agMoveAccount(2,1)")[0].rsplit("<button", 1)[-1]
+    assert "disabled" in first_up and "disabled" in last_down
+
+    single = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'Gemini 组', remaining: 900, total: 1000, percent: 10, used: null, reset_ts: null},
+]}}]};
+globalThis.__RESPONSE = {enabled: false};
+renderAntigravityPanel();
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    assert "agMoveAccount(" not in json.loads(single.strip().splitlines()[-1])["html"], \
+        "单账号没有顺位可调，不应渲染按钮"
+
+
+def test_move_account_posts_full_order_and_refreshes():
+    """点 ▼（把 #1 下移）：POST 完整的重排后 id 列表，拿到响应后触发刷新。"""
+    out = _run_js("""
+AG_ACCTS = [
+  {index: 1, id: 'a@x.com', email: 'a@x.com', project_id: 'p', hours_left: 1, cooling: []},
+  {index: 2, id: 'b@x.com', email: 'b@x.com', project_id: 'p', hours_left: 1, cooling: []},
+  {index: 3, id: 'c@x.com', email: 'c@x.com', project_id: 'p', hours_left: 1, cooling: []},
+];
+let CALLS = [];
+globalThis.api = async (path, opts) => {
+  CALLS.push({path, body: opts ? JSON.parse(opts.body) : null});
+  if (path.endsWith('/order')) {
+    return {enabled: true, accounts: [
+      {index: 1, id: 'b@x.com', email: 'b@x.com'}, {index: 2, id: 'a@x.com', email: 'a@x.com'},
+      {index: 3, id: 'c@x.com', email: 'c@x.com'}]};
+  }
+  return {enabled: true, accounts: []};
+};
+let TOASTS = [], REFRESHED = 0;
+globalThis.toast = (m) => TOASTS.push(m);
+globalThis.refreshAll = () => REFRESHED++;
+await agMoveAccount(1, 1);   // #1 下移 → 期望 b,a,c
+console.log(JSON.stringify({
+  calls: CALLS, toasts: TOASTS, refreshed: REFRESHED,
+  snapshot: AG_ACCTS.map(a => a.id)}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    order_call = [c for c in data["calls"] if c["path"].endswith("/order")]
+    assert len(order_call) == 1
+    assert order_call[0]["body"]["ids"] == ["b@x.com", "a@x.com", "c@x.com"], \
+        "提交的是完整顺序（后端校验完整性）"
+    assert data["refreshed"] == 1, "重排后要刷新额度（quota_epoch 变了，重查换新顺位）"
+    assert data["snapshot"] == ["b@x.com", "a@x.com", "c@x.com"], "本地快照同步成响应"
+    assert any("a@x.com" in t and "#2" in t for t in data["toasts"]), \
+        f"toast 报被移动的账号与其新顺位: {data['toasts']}"
+
+
+def test_move_account_fetches_snapshot_when_missing():
+    """按钮随额度先到、快照还没回：点按时先补拉 accounts 再提交。"""
+    out = _run_js("""
+AG_ACCTS = null;
+let CALLS = [];
+globalThis.api = async (path, opts) => {
+  CALLS.push({path, body: opts ? JSON.parse(opts.body) : null});
+  if (path.endsWith('/order')) return {enabled: true, accounts: []};
+  return {enabled: true, accounts: [
+    {index: 1, id: 'a@x.com', email: 'a@x.com'},
+    {index: 2, id: 'b@x.com', email: 'b@x.com'}]};
+};
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+await agMoveAccount(2, -1);  // #2 上移 → 期望 b,a
+console.log(JSON.stringify({calls: CALLS}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert len(data["calls"]) == 2, "先 GET 补快照，再 POST order"
+    assert data["calls"][0]["path"] == "/ui/api/antigravity/accounts"
+    assert data["calls"][1]["body"]["ids"] == ["b@x.com", "a@x.com"]

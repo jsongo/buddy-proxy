@@ -380,6 +380,41 @@ function _ag_sub_html(a) {
     : '';
 }
 
+function _ag_move_html(idx, n) {
+  // 上/下移按钮（idx 是 1-based 顺位）；首尾各自禁用对应的那个
+  return `<span class="ag-move">` +
+    `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+    `onclick="agMoveAccount(${idx},-1)">▲</button>` +
+    `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
+    `onclick="agMoveAccount(${idx},1)">▼</button></span>`;
+}
+
+// 调 POST /ui/api/antigravity/accounts/order 提交完整顺序；后端重写
+// priority 后 quota 缓存键（quota_epoch 带 priority）随之失效，所以这里
+// 拿到响应后直接 refreshAll() 走一遍 benefits 重取，进度条组顺序即更新。
+async function agMoveAccount(idx, delta) {
+  try {
+    // 按钮随额度数据先到、账号状态可能还没回：按需补一次快照再算全量 id
+    if (!AG_ACCTS) {
+      const r0 = await api('/ui/api/antigravity/accounts');
+      AG_ACCTS = r0.accounts || [];
+    }
+    const accts = AG_ACCTS;
+    const to = idx + delta;  // idx 是 1-based 顺位，to 是目标顺位
+    if (to < 1 || to > accts.length) return;
+    const ids = accts.map(a => a.id);
+    const [moved] = ids.splice(idx - 1, 1);
+    ids.splice(to - 1, 0, moved);
+    const r = await api('/ui/api/antigravity/accounts/order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids})});
+    AG_ACCTS = r.accounts || [];
+    const movedEmail = (accts.find(a => a.id === moved) || {}).email || moved;
+    toast(`${movedEmail} 已移到顺位 #${to}`);
+    refreshAll();
+  } catch (e) { toast('调整失败: ' + e.message, true); }
+}
+
 function renderAntigravityPanel() {
   const panel = document.getElementById('antigravity-panel');
   if (!panel) return;
@@ -401,15 +436,27 @@ function renderAntigravityPanel() {
   // 组名=邮箱、副标题=账号状态：额度接口（benefits）不含邮箱，先挂 data-ag-idx
   // 占位；已有 AG_ACCTS 快照则同步直接渲染（30s 轮询重建面板不闪内部代号），
   // 没有就等 loadAntigravityAccounts 回填。
+  // 顺位按钮的界标 n：全部「AG #N」序号的最大值（首屏首渲就有按钮，
+  // 不依赖 accounts 快照时序）。
+  const n = Math.max(...[...groups.keys()]
+    .map(g => g.match(/^AG #(\d+)$/)).filter(Boolean).map(mm => Number(mm[1])), 1);
   const quotaHtml = [...groups.entries()].map(([grp, its]) => {
     const m = grp.match(/^AG #(\d+)$/);
     const idx = m ? Number(m[1]) : null;
     const acct = _ag_acct_for(idx);
+    // 顺位按钮：多账号才有意义。界标 n 直接取分组序号的最大值（自包含，
+    // 不依赖 AG_ACCTS 快照的到达时序——首屏首渲就有按钮，快照只是点按时
+    // 提交全量 id 列表的数据源）。正常情况所有账号都有额度分组，n=账号数；
+    // 个别账号额度查询失败时它没有卡片，按「可见卡片」定界正好。
+    const moveBtns = (m && n > 1) ? _ag_move_html(idx, n) : '';
+    // 注意按钮放块尾、副标题紧随名字——loadAntigravityAccounts 的就地回填
+    // 靠「名字元素的下一个兄弟是副标题」定位，中间插任何元素都会让它错乱。
     return `
     <div class="pat-pkg">
-      <div class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</div>
+      <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</span>
       ${_ag_sub_html(acct)}
       ${its.map(quotaItemHtml).join('')}
+      ${moveBtns}
     </div>`;
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
   const noticeHtml = notices.map(quotaItemHtml).join('');

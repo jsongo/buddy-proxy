@@ -420,3 +420,69 @@ def test_ui_endpoint_antigravity_accounts():
     out = asyncio.run(web_ui.ui_antigravity_accounts(request))
     assert out["enabled"] is True
     assert out["accounts"][0]["email"] == "u@x.com"
+
+
+# ---------------------------------------------------------------------------
+# 账号顺位调整（POST /ui/api/antigravity/accounts/order）
+# ---------------------------------------------------------------------------
+
+def _order_request(ids):
+    import types
+
+    class _Req:
+        client = types.SimpleNamespace(host="127.0.0.1")
+
+        async def json(self):
+            return {"ids": ids}
+
+    return _Req()
+
+
+def test_reorder_endpoint_switches_failover_priority(two_accounts, monkeypatch):
+    """端点重排 → 转发先打新首位账号；available_accounts 顺序随之变。"""
+    import asyncio
+
+    from buddy_proxy.antigravity import failover
+    from buddy_proxy.web.ui import channels as web_ui
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, _gemini_ok("u"), {})
+    up.plan["tok-v@y.com"] = (200, _gemini_ok("v"), {})
+    _patch_token(monkeypatch)
+
+    out = asyncio.run(web_ui.ui_antigravity_accounts_order(
+        _order_request(["v@y.com", "u@x.com"])))
+    assert [a["id"] for a in out["accounts"]] == ["v@y.com", "u@x.com"]
+    assert out["accounts"][0]["index"] == 1  # UI 顺位即 failover 顺位
+    assert [a.id for a in failover.available_accounts()] == ["v@y.com", "u@x.com"]
+
+    resp = _run(provider)
+    assert resp.status_code == 200
+    assert up.calls == ["tok-v@y.com"]  # 重排后首选是 v，u 根本没被打
+
+
+def test_reorder_endpoint_rejects_incomplete_ids(two_accounts):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from buddy_proxy.web.ui import channels as web_ui
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(web_ui.ui_antigravity_accounts_order(
+            _order_request(["v@y.com"])))  # 少一个账号
+    assert ei.value.status_code == 400
+    assert "完整的账号" in ei.value.detail["error"]["message"]
+
+
+def test_reorder_endpoint_rejects_bad_shape(two_accounts):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from buddy_proxy.web.ui import channels as web_ui
+
+    for bad in ([1, 2], "u@x.com", None):
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(web_ui.ui_antigravity_accounts_order(_order_request(bad)))
+        assert ei.value.status_code == 400
