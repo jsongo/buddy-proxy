@@ -1102,8 +1102,10 @@ function renderKimiPanel() {
     const delBtn = acct
       ? `<button class="ghost danger" title="删除该账号（refresh_token 作废/不再使用时）" ` +
         `onclick="kimiDeleteAccount('${acct.id}')">✕</button>` : '';
-    const rowBtns = (moveBtns || delBtn)
-      ? `<span class="ag-move">${moveBtns}${delBtn}</span>` : '';
+    // ↻ 刷新：与 antigravity 卡片同款（refreshProviderQuota 通用）
+    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
+      `onclick="refreshProviderQuota('kimi', this)">↻</button>`;
+    const rowBtns = `<span class="ag-move">${refreshBtn}${moveBtns}${delBtn}</span>`;
     return `
     <div class="pat-pkg">
       <span class="pat-pkg-name"${m ? ` data-kimi-idx="${idx}"` : ''}>${esc(acct ? (acct.name || acct.id) : grp)}</span>
