@@ -133,6 +133,32 @@ async def ui_antigravity_accounts(request: Request):
     return await asyncio.to_thread(failover.accounts_status)
 
 
+@app.post("/ui/api/antigravity/accounts/order")
+async def ui_antigravity_accounts_order(request: Request):
+    """调整 antigravity 账号的 failover 顺位（管理页上移/下移按钮）。
+
+    提交完整的账号 id 顺序列表，重写 index.json 的 priority；返回重排后的
+    账号状态（与 GET 同构，前端直接重渲染）。quota 缓存键带 priority
+    （``quota_epoch``），重排后旧额度快照自动失效、下一轮刷新即换新顺位。
+    """
+    _ensure_local(request)
+    try:
+        from ...antigravity import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "antigravity 通道不可用"}})
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 ids（账号 id 的完整顺序列表）"}})
+    try:
+        await asyncio.to_thread(creds.reorder_accounts, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    from ...antigravity import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.post("/ui/api/traepat/refresh-tokens")
 async def ui_traepat_refresh_tokens(request: Request):
     """立即补签 traepat 缺失/临期 Token；健康账号不强刷。"""

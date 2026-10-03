@@ -360,6 +360,7 @@ async function refreshTraepatTokens(btn) {
 // 组名/副标题由账号数据回填），账号状态走 /ui/api/antigravity/accounts（纯本地不触
 // 网）。未登录时整个面板隐藏。
 let AG_ACCTS = null;  // 最近一次 accounts 快照；render 先用它，避免每 30s 闪回「AG #N」
+let AG_MOVING = false;  // 重排在途（POST + 额度重取是秒级窗口）：期间忽略新的点按
 
 function _ag_acct_for(idx) {
   // idx=null（单账号组名无 AG #N 前缀）只在恰有一个账号时能对上
@@ -378,6 +379,59 @@ function _ag_sub_html(a) {
   return bits.length
     ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-ag-sub>${esc(bits.join(' · '))}</div>`
     : '';
+}
+
+function _ag_move_html(idx, n, id) {
+  // 上/下移按钮（idx 是渲染时的 1-based 顺位）；首尾各自禁用对应的那个。
+  // 有账号 id 就内联带上：重排响应回来后、面板重绘前（要先重取一次额度），
+  // DOM 里还挂着旧按钮，其 idx 按旧顺序标号——点按时按「快照里该 id 的实际
+  // 位次」挪才不会动到别的账号（只凭 idx 挪实测会把刚调好的顺序点回去）。
+  // id 字符集由后端 _ID_RE 约束（字母数字 ._@-），内联进 onclick 安全。
+  const arg = id ? `,'${id}'` : '';
+  return `<span class="ag-move">` +
+    `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+    `onclick="agMoveAccount(${idx},-1${arg})">▲</button>` +
+    `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
+    `onclick="agMoveAccount(${idx},1${arg})">▼</button></span>`;
+}
+
+// 调 POST /ui/api/antigravity/accounts/order 提交完整顺序；后端重写
+// priority 后 quota 缓存键（quota_epoch 带 priority）随之失效，所以这里
+// 拿到响应后直接 refreshAll() 走一遍 benefits 重取，进度条组顺序即更新。
+//
+// id 是按钮渲染时所在账号（可选）：按钮可能比面板旧一拍（重排响应已回、
+// 额度还没重取完），按快照里该 id 的**当前**位次挪，而不是按按钮上的 idx
+// ——否则连点两下 = 连提交两次同方向重排（第二次拿旧 idx 在新顺序里挪到了
+// 别的账号，整轮被点回去）。在飞期间 AG_MOVING 挡住后续点按。
+async function agMoveAccount(idx, delta, id) {
+  if (AG_MOVING) return;
+  AG_MOVING = true;
+  try {
+    // 按钮随额度数据先到、账号状态可能还没回：按需补一次快照再算全量 id
+    if (!AG_ACCTS) {
+      const r0 = await api('/ui/api/antigravity/accounts');
+      AG_ACCTS = r0.accounts || [];
+    }
+    const accts = AG_ACCTS;
+    if (id) {  // 按 id 校正到快照里的真实位次（面板重绘滞后于快照时 idx 会过期）
+      const at = accts.findIndex(a => a.id === id);
+      if (at < 0) return;  // 该账号已不在快照里（刚被删？）：宁可不动，别按过期 idx 挪错人
+      idx = at + 1;
+    }
+    const to = idx + delta;  // idx 是 1-based 顺位，to 是目标顺位
+    if (to < 1 || to > accts.length) return;
+    const ids = accts.map(a => a.id);
+    const [moved] = ids.splice(idx - 1, 1);
+    ids.splice(to - 1, 0, moved);
+    const r = await api('/ui/api/antigravity/accounts/order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids})});
+    AG_ACCTS = r.accounts || [];
+    const movedEmail = (accts.find(a => a.id === moved) || {}).email || moved;
+    toast(`${movedEmail} 已移到顺位 #${to}`);
+    refreshAll();
+  } catch (e) { toast('调整失败: ' + e.message, true); }
+  finally { AG_MOVING = false; }
 }
 
 function renderAntigravityPanel() {
@@ -401,15 +455,28 @@ function renderAntigravityPanel() {
   // 组名=邮箱、副标题=账号状态：额度接口（benefits）不含邮箱，先挂 data-ag-idx
   // 占位；已有 AG_ACCTS 快照则同步直接渲染（30s 轮询重建面板不闪内部代号），
   // 没有就等 loadAntigravityAccounts 回填。
+  // 顺位按钮的界标 n：全部「AG #N」序号的最大值（首屏首渲就有按钮，
+  // 不依赖 accounts 快照时序）。
+  const n = Math.max(...[...groups.keys()]
+    .map(g => g.match(/^AG #(\d+)$/)).filter(Boolean).map(mm => Number(mm[1])), 1);
   const quotaHtml = [...groups.entries()].map(([grp, its]) => {
     const m = grp.match(/^AG #(\d+)$/);
     const idx = m ? Number(m[1]) : null;
     const acct = _ag_acct_for(idx);
+    // 顺位按钮：多账号才有意义。界标 n 直接取分组序号的最大值（自包含，
+    // 不依赖 AG_ACCTS 快照的到达时序——首屏首渲就有按钮，快照只是点按时
+    // 提交全量 id 列表的数据源）。正常情况所有账号都有额度分组，n=账号数；
+    // 个别账号额度查询失败时它没有卡片，按「可见卡片」定界正好。
+    // acct.id 内联进按钮：点按时按快照里的真实位次挪（面板重绘延迟见 agMoveAccount）。
+    const moveBtns = (m && n > 1) ? _ag_move_html(idx, n, acct && acct.id) : '';
+    // 注意按钮放块尾、副标题紧随名字——loadAntigravityAccounts 的就地回填
+    // 靠「名字元素的下一个兄弟是副标题」定位，中间插任何元素都会让它错乱。
     return `
     <div class="pat-pkg">
-      <div class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</div>
+      <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</span>
       ${_ag_sub_html(acct)}
       ${its.map(quotaItemHtml).join('')}
+      ${moveBtns}
     </div>`;
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
   const noticeHtml = notices.map(quotaItemHtml).join('');
