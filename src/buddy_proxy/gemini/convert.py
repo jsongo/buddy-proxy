@@ -20,11 +20,12 @@ functionCall/functionResponse；响应用 usageMetadata 映射回 OpenAI usage�
 safetySettings **不注入**——真 CLI 全源码不发这个字段，注入反而是指纹。
 
 thoughtSignature：Gemini 3 系在 functionCall part 上返回
-``thoughtSignature``，多轮工具调用时上游校验它。这里在响应→OpenAI 方向把它
-藏进 ``tool_calls[i].gemini_thought_signature``（不发给客户端），请求方向若
-消息里带着就还原回 part 上。OpenAI 客户端不认识这个字段，但 FastAPI 序列化
-时它会原样透出——为避免泄漏内部字段，改存内存 session 外表不可行（无状态），
-折中：作为 ``provider_specific`` 元数据挂在 tool_call 上，客户端原样回传即可。
+``thoughtSignature``，多轮工具调用时上游强制校验它（缺 → 400）。回环通道
+是 tool call id：响应方向把签名存进 :mod:`.thought_signature` 的进程内
+LRU（OpenAI 路径同时透出 ``tool_calls[i].gemini_thought_signature`` 扩展
+字段供直连客户端回传），请求方向凭 id 还原；Anthropic 协议丢非标字段，
+靠它的 tool_use.id ↔ tool_result.tool_use_id 忠实回环。缺签名时 gemini-3
+系注哨兵兜底。详见 :mod:`.thought_signature` 的实证矩阵。
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ import secrets
 import time
 import uuid
 from typing import Any
+
+from .thought_signature import lookup, remember, resolve_signature
 
 #: 真 CLI 的 user_prompt_id 形态：Math.random().toString(16).slice(2)，
 #: 13 位左右的小写 hex。保持同样形态（长度随机 11-14 位）。
@@ -94,7 +97,9 @@ def _content_to_parts(content: Any) -> list[dict[str, Any]]:
     return parts
 
 
-def _tool_call_to_function_call(tc: dict[str, Any]) -> dict[str, Any] | None:
+def _tool_call_to_function_call(
+    tc: dict[str, Any], *, model: str, known_names: dict[str, str] | None = None
+) -> dict[str, Any] | None:
     fn = tc.get("function") or {}
     name = sanitize_function_name(str(fn.get("name") or ""))
     if not name or name == "_":
@@ -108,14 +113,28 @@ def _tool_call_to_function_call(tc: dict[str, Any]) -> dict[str, Any] | None:
             args = {"_raw": raw}
     elif isinstance(raw, dict):
         args = raw
-    call: dict[str, Any] = {"functionCall": {"name": name, "args": args or {}}}
-    sig = tc.get("gemini_thought_signature")
-    if isinstance(sig, str) and sig:
+    call_id = str(tc.get("id") or "")
+    fc_part: dict[str, Any] = {"name": name, "args": args or {}}
+    if call_id:
+        # fc.id 与 fr.id 成对是 claude/gpt-oss/gemini-3 的硬要求（缺 → 400）
+        fc_part["id"] = call_id
+        if known_names is not None:
+            known_names[call_id] = name
+    call: dict[str, Any] = {"functionCall": fc_part}
+    # 签名：客户端显式回传（OpenAI 协议的 gemini_thought_signature）> 缓存
+    # 还原（Anthropic 协议丢字段，靠 id 回环）> gemini-3 系哨兵兜底。
+    explicit = tc.get("gemini_thought_signature")
+    sig = resolve_signature(
+        call_id, explicit if isinstance(explicit, str) else "", model=model
+    )
+    if sig:
         call["thoughtSignature"] = sig
     return call
 
 
-def _messages_to_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _messages_to_contents(
+    messages: list[dict[str, Any]], *, model: str
+) -> list[dict[str, Any]]:
     """OpenAI messages → Gemini contents。
 
     关键点：tool 消息 → ``functionResponse`` part（role=user），并且**按上游
@@ -123,8 +142,14 @@ def _messages_to_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]
     assistant(tool_calls) → tool → tool…，顺序天然满足）。连续 tool 消息合并
     进同一个 user content 的多个 parts（Gemini 一次 functionCall 组对应一个
     user turn，多 response 拆多个 turn 某些模型会 400）。
+
+    ``functionCall.id`` 与 ``functionResponse.id`` 成对回传（claude/gpt-oss
+    的硬要求，缺 → 400；gemini-3 同样接受）。函数名的还原顺序：tool 消息自带
+    name > 本请求里 tool_call 的 name > 签名缓存的 name > id 兜底——Anthropic
+    的 tool_result 不带函数名，过去只能拿 id 顶替，现在能还原真名。
     """
     contents: list[dict[str, Any]] = []
+    known_names: dict[str, str] = {}
     for msg in messages:
         role = str(msg.get("role") or "user")
         role = _ROLE_MAP.get(role, role)
@@ -132,7 +157,11 @@ def _messages_to_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]
             role = "user"
 
         if role == "user" and msg.get("role") == "tool":
-            name = sanitize_function_name(str(msg.get("name") or msg.get("tool_call_id") or "tool"))
+            tid = str(msg.get("tool_call_id") or "")
+            name = str(msg.get("name") or "")
+            if not name and tid:
+                name = known_names.get(tid, "") or lookup(tid)[1]
+            name = sanitize_function_name(name or tid or "tool")
             resp_body = msg.get("content")
             if isinstance(resp_body, str):
                 try:
@@ -142,12 +171,11 @@ def _messages_to_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]
                     resp_body = {"result": resp_body}
             elif not isinstance(resp_body, dict):
                 resp_body = {"result": "" if resp_body is None else str(resp_body)}
-            part = {
-                "functionResponse": {
-                    "name": name,
-                    "response": {"content": resp_body},
-                }
-            }
+            fr: dict[str, Any] = {"name": name}
+            if tid:
+                fr["id"] = tid
+            fr["response"] = {"content": resp_body}
+            part = {"functionResponse": fr}
             # 与上一个 user turn（若也是纯 functionResponse）合并
             if contents and contents[-1].get("role") == "user" and all(
                 "functionResponse" in p for p in contents[-1].get("parts", [])
@@ -164,7 +192,9 @@ def _messages_to_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]
             parts.extend(text_parts)
             for tc in tool_calls:
                 if isinstance(tc, dict):
-                    call = _tool_call_to_function_call(tc)
+                    call = _tool_call_to_function_call(
+                        tc, model=model, known_names=known_names
+                    )
                     if call:
                         parts.append(call)
         else:
@@ -309,7 +339,7 @@ def chat_to_gemini_request(
             chat_messages.append(msg)
 
     request: dict[str, Any] = {
-        "contents": _messages_to_contents(chat_messages),
+        "contents": _messages_to_contents(chat_messages, model=model),
     }
     if system_texts:
         request["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_texts)}]}
@@ -347,6 +377,28 @@ def chat_to_gemini_request(
 # Gemini → OpenAI
 # ---------------------------------------------------------------------------
 
+def new_tool_call(fc: dict[str, Any], signature: str = "") -> dict[str, Any]:
+    """上游 functionCall → OpenAI tool_call（非流式/流式共用）。
+
+    自造唯一 id（上游短计数器 id 会撞车），签名与函数名记进 LRU 供请求
+    方向凭 id 还原；OpenAI 路径同时透出 ``gemini_thought_signature``
+    扩展字段（直连 OpenAI 客户端原样回传即天然命中）。
+    """
+    name = str(fc.get("name") or "")
+    call_id = f"call_{secrets.token_hex(12)}"
+    sig = signature or ""
+    remember(call_id, signature=sig, name=name)
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": json.dumps(fc.get("args") or {}, ensure_ascii=False),
+        },
+        "gemini_thought_signature": sig,
+    }
+
+
 def _candidate_text_and_calls(candidate: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]:
     """candidate → (text, tool_calls, reasoning_text)。"""
     text_parts: list[str] = []
@@ -356,17 +408,10 @@ def _candidate_text_and_calls(candidate: dict[str, Any]) -> tuple[str, list[dict
         if not isinstance(part, dict):
             continue
         if "functionCall" in part:
-            fc = part["functionCall"] or {}
-            calls.append({
-                "id": f"call_{secrets.token_hex(12)}",
-                "type": "function",
-                "function": {
-                    "name": str(fc.get("name") or ""),
-                    "arguments": json.dumps(fc.get("args") or {}, ensure_ascii=False),
-                },
-                # 多轮工具调用上游要校验；藏这里让客户端回传时带上
-                "gemini_thought_signature": part.get("thoughtSignature") or "",
-            })
+            calls.append(new_tool_call(
+                part["functionCall"] or {},
+                signature=str(part.get("thoughtSignature") or ""),
+            ))
         elif part.get("thought") is True and part.get("text"):
             reasoning_parts.append(str(part["text"]))
         elif "text" in part:

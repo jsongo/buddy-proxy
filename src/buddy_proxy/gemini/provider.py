@@ -31,6 +31,7 @@ from ..providers.base import BaseProvider
 from .convert import (
     chat_to_gemini_request,
     gemini_response_to_chat,
+    new_tool_call,
 )
 from .credentials import AuthError, ensure_access_token, has_cred, load_cred
 
@@ -424,16 +425,10 @@ async def _to_openai_stream(response: httpx.Response, model: str) -> AsyncIterat
                 if not isinstance(part, dict):
                     continue
                 if "functionCall" in part:
-                    fc = part["functionCall"] or {}
-                    call = {
-                        "id": f"call_{secrets.token_hex(12)}",
-                        "type": "function",
-                        "function": {
-                            "name": str(fc.get("name") or ""),
-                            "arguments": json.dumps(fc.get("args") or {}, ensure_ascii=False),
-                        },
-                        "gemini_thought_signature": part.get("thoughtSignature") or "",
-                    }
+                    call = new_tool_call(
+                        part["functionCall"] or {},
+                        signature=str(part.get("thoughtSignature") or ""),
+                    )
                     for delta in buf.feed([call]):
                         yield _dump(_openai_chunk(model, delta={"tool_calls": [delta]}))
                 elif part.get("thought") is True and part.get("text"):

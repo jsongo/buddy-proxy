@@ -822,6 +822,17 @@ uv run python -m buddy_proxy --desensitize --antigravity
 `gemini-3.8-flash` 实发 `gemini-3.8-flash-tiered`、`gpt-oss-120b` 实发
 `gpt-oss-120b-medium`）。
 
+**thoughtSignature 穿透协议转换**——gemini 系在每个 `functionCall` part 上
+返回 `thoughtSignature`，多轮工具调用时上游强制要求原样带回（缺失 → `400
+Function call is missing a thought_signature`）；claude/gpt-oss 系则要求
+`functionCall.id` 与 `functionResponse.id` 成对回传（缺 → 400）。签名只在
+OpenAI 协议的扩展字段里有容身之处，Anthropic 客户端（Claude Code 等）转换
+时会把未知字段丢掉——所以走两条协议都忠实回传的通道：tool call id。响应
+方向自造唯一 id 并把签名+函数名记进进程内 LRU（`gemini/thought_signature.py`），
+请求方向凭 id 还原签名、把 `fc.id`/`fr.id` 配对，缓存未命中（如网关重启后）
+时回落到上游接受（实测 200）的哨兵值 `skip_thought_signature_validator`。
+三种行为均于 2026-10-03 对真实上游实证（矩阵见模块 docstring）。
+
 模型（真实账号实测通过；表在 `src/buddy_proxy/antigravity/models.json`）：
 `antigravity/gemini-3.1-pro`（默认 `-low`，可显式 `-high`）、
 `gemini-3.6-flash`（默认 `-medium`，可 `-low`/`-high`）、`gemini-3.8-flash`
@@ -839,7 +850,9 @@ uv run python -m buddy_proxy --desensitize --antigravity
 自动换下一个账号重放请求；业务 4xx（模型名写错等）原样透传不换号。冷却只放
 内存不落盘，重启即清零（每账号重新探测一次）。全部账号都在冷却中时转发直接
 429 快速失败。流式请求绝不重复计费：首个上游事件先压住，语义内容开始前的
-带内 429/403 错误会换号重放；语义事件一旦出现就绝不重放。
+带内 429/403 错误会换号重放；语义事件一旦出现就绝不重放。闸门对响应流只开
+一次迭代器（httpx 流一次性消费，重开会抛 StreamConsumed 静默丢光剩余事件，
+claude 流式曾因此完全空流），缓冲行补放与换号前排空都续跑这同一个迭代器。
 
 凭据存放在 `~/.buddy-proxy/antigravity/`（`index.json` + 每账号一份 0600
 JSON，上限 8 个）。旧的单账号文件 `~/.buddy-proxy/antigravity_oauth.json`

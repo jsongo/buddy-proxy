@@ -280,17 +280,17 @@ class AntigravityProvider(BaseProvider):
                 failover.mark_cooldown(
                     acct.id, quota=gate.code == 429,
                     reason=f"带内 error {gate.code}: {gate.message}")
-                await _drain_and_close(gate.resp, stream)
+                await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
             if gate.eof:
                 # 语义事件之前断流/空流：没向客户端吐过字节，换下一个账号
-                await _drain_and_close(gate.resp, stream)
+                await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
 
             if stream:
                 from ..gemini.provider import _to_anthropic_stream, _to_openai_stream
 
-                replay = _ReplayStream(gate.resp, gate.buffered)
+                replay = _ReplayStream(gate.resp, gate.buffered, gate.lines)
                 if protocol == "anthropic":
                     return StreamingResponse(
                         _to_anthropic_stream(replay, upstream_model),
@@ -352,13 +352,16 @@ class AntigravityProvider(BaseProvider):
                          payload=payload if isinstance(payload, dict) else None)
 
         buffered: list[str] = []
+        # httpx 响应流一次性消费：迭代器只创建这一次，所有 return 都把它
+        # 带上（透传时 _ReplayStream 续跑、换号时 _drain_and_close 排空）。
+        lines = resp.aiter_lines()
         try:
-            async for line in resp.aiter_lines():
+            async for line in lines:
                 buffered.append(line)
                 if len(buffered) > _GATE_BUFFER_MAX_LINES:
                     # 上游一直发非语义事件（心跳/注释刷屏）：按已到达透传放行，
                     # 别让每个请求无界攒内存；定性交给转换器
-                    return _Gate(resp=resp, committed=True, buffered=buffered)
+                    return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
                 stripped = line.strip()
                 if not stripped.startswith("data:"):
                     continue
@@ -379,15 +382,15 @@ class AntigravityProvider(BaseProvider):
                     code = int(err.get("code") or 0)
                     if code in (429, 403):
                         return _Gate(resp=resp, account_error=True, code=code,
-                                     message=str(err.get("message") or ""))
+                                     message=str(err.get("message") or ""), lines=lines)
                     # 其它带内错误（400 等）：换号没意义，缓冲行随透传交给转换器
-                    return _Gate(resp=resp, committed=True, buffered=buffered)
+                    return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
                 if inner.get("candidates"):
-                    return _Gate(resp=resp, committed=True, buffered=buffered)
+                    return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
                 # 仅 usageMetadata 等非语义事件：继续等下一条
         except httpx.HTTPError:
-            return _Gate(resp=resp, eof=True)
-        return _Gate(resp=resp, eof=True)  # 语义事件前 EOF：假成功，换号
+            return _Gate(resp=resp, eof=True, lines=lines)
+        return _Gate(resp=resp, eof=True, lines=lines)  # 语义事件前 EOF：假成功，换号
 
     # ---- 内部 ----
 
@@ -623,10 +626,18 @@ def _primary_token() -> str:
 
 @dataclass
 class _Gate:
-    """首事件闸门的判定结果。"""
+    """首事件闸门的判定结果。
+
+    ``lines`` 是闸门持有的**在途行迭代器**（流式判定时创建的那个
+    ``resp.aiter_lines()``）。httpx 响应流是一次性消费的：闸门读过之后
+    再调 ``resp.aiter_lines()`` 会抛 StreamConsumed，剩余流全丢——所以
+    后续「透传剩余流」（_ReplayStream）与「换号前排空」（_drain_and_close）
+    都必须续跑这同一个迭代器，不能重新打开。
+    """
     resp: httpx.Response
     committed: bool = False  # 已见语义事件：缓冲行必须透传，绝不重放
     buffered: list[str] = field(default_factory=list)  # 闸门期间缓冲的原始 SSE 行
+    lines: AsyncIterator[str] | None = None  # 在途行迭代器（流式时非 None）
     payload: dict[str, Any] | None = None  # 非流式：解析好的 JSON
     account_error: bool = False  # 429/403 账号级错误：冷却换号
     code: int = 0
@@ -638,28 +649,51 @@ class _ReplayStream:
     """闸门缓冲行 → 真实流的适配器（先补放缓冲，再接原流）。
 
     gemini 转换器只用 ``aiter_lines()``/``aclose()``，实现这两个就够了，
-    转换器零改动。
+    转换器零改动。``lines`` 为闸门的在途迭代器（见 _Gate）：续跑它而不是
+    重开 ``resp.aiter_lines()``，否则缓冲行往后的整条流会被 httpx 判为
+    二次消费（#67 预存 bug：claude 流式因此完全空流）。
     """
 
-    def __init__(self, resp: httpx.Response, buffered: list[str]) -> None:
+    def __init__(self, resp: httpx.Response, buffered: list[str],
+                 lines: AsyncIterator[str] | None = None) -> None:
         self._resp = resp
         self._buffered = list(buffered)
+        self._lines = lines
 
     async def aiter_lines(self) -> AsyncIterator[str]:
         for line in self._buffered:
             yield line
-        async for line in self._resp.aiter_lines():
-            yield line
+        if self._lines is not None:
+            async for line in self._lines:
+                yield line
+        # 兜底分支仅在未传 lines 时走到——此时响应流还没被消费过，直接
+        # 重开是安全的（闸门流式路径必然带 lines，正常不经过这里）。
+        else:  # pragma: no cover
+            async for line in self._resp.aiter_lines():
+                yield line
 
     async def aclose(self) -> None:
         await self._resp.aclose()
 
 
-async def _drain_and_close(resp: httpx.Response, stream: bool) -> None:
-    """读完丢弃响应体并关闭（换号前必须回收连接，别挂着半开流）。"""
+async def _drain_and_close(resp: httpx.Response, stream: bool,
+                           lines: AsyncIterator[str] | None = None) -> None:
+    """读完丢弃响应体并关闭（换号前必须回收连接，别挂着半开流）。
+
+    ``lines`` 给出时（闸门已消费过响应）续跑迭代器排空；否则才 ``aread()``
+    ——对已消费的响应调 aread 会抛 StreamConsumed（异常在 finally 里 aclose
+    之前炸出，换号路径被它带崩）。
+    """
     try:
         if stream:
-            await resp.aread()
+            try:
+                if lines is not None:
+                    async for _ in lines:
+                        pass
+                elif not resp.is_stream_consumed:
+                    await resp.aread()
+            except (httpx.HTTPError, httpx.StreamError):
+                pass  # 反正是丢弃：排空途中断网不该把换号路径带崩
     finally:
         await resp.aclose()
 

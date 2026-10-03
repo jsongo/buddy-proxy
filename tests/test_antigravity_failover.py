@@ -44,6 +44,23 @@ _SSE_OK = _sse([
 _SSE_429 = _sse([json.dumps({"error": {"code": 429, "message": "RESOURCE_EXHAUSTED: quota"}})])
 
 
+class _ChunkedBody(httpx.AsyncByteStream):
+    """真实网络流的替身：字节不可重放（httpx ``is_stream_consumed``）。
+
+    MockTransport 的 ``content=`` 响应会把字节缓进 ``_content``、可重复
+    迭代——恰好掩盖了「httpx 响应流只能消费一次」的 bug（#67 引入：闸门
+    读走首事件后 ``_ReplayStream`` 二次消费抛 StreamConsumed，剩余流全丢）。
+    凡是要回归「闸门读过后剩余流还能不能读」的测试都必须用这个流式 body。
+    """
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
 class _Upstream:
     """按 Bearer token（=账号）路由 canned 响应，记录调用顺序。"""
 
@@ -55,6 +72,8 @@ class _Upstream:
         tok = request.headers.get("authorization", "").removeprefix("Bearer ")
         self.calls.append(tok)
         status, payload, headers = self.plan[tok]
+        if isinstance(payload, httpx.AsyncByteStream):
+            return httpx.Response(status, stream=payload, headers=headers)
         if isinstance(payload, (bytes, str)):
             return httpx.Response(status, content=payload, headers=headers)
         return httpx.Response(status, json=payload, headers=headers)
@@ -229,6 +248,46 @@ def test_account_meta_records_selected_account(two_accounts, monkeypatch):
 # ---------------------------------------------------------------------------
 # 流式首事件闸门
 # ---------------------------------------------------------------------------
+
+def test_stream_gate_one_shot_body_not_double_consumed(two_accounts, monkeypatch):
+    """闸门读过首事件后，剩余流必须还能继续读（#67 预存 bug）。
+
+    真实网络的 httpx 响应流只能消费一次；闸门用 ``resp.aiter_lines()``
+    读走首事件后，``_ReplayStream`` 再调一次即抛 StreamConsumed，缓冲行
+    之后的整条流静默丢失（claude 流式因此完全空流）。首事件带文本 + 次事件
+    带 usage，复现「尾部事件被吞」的最直观形态。
+
+    **必须单 loop 跑完 forward + 消费**：闸门持有的在途迭代器是 async
+    generator，跨 ``asyncio.run`` 边界时前一个 loop 收尾会 aclose 它，
+    只剩缓冲行可读——那种形态既不复现 StreamConsumed，也掩盖真实回归
+    （生产是 uvicorn 单 loop，与本节一致）。``_run``/``_stream_text``
+    的两段式只适合断言缓冲行内内容的用例。
+    """
+    provider, up = two_accounts
+    first = json.dumps({"candidates": [{"content": {"parts": [{"text": "hello"}]}}]})
+    second = json.dumps({"usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1}})
+    up.plan["tok-u@x.com"] = (
+        200,
+        _ChunkedBody([f"data: {first}\n\n".encode(), f"data: {second}\n\n".encode()]),
+        {"content-type": "text/event-stream"},
+    )
+    _patch_token(monkeypatch)
+
+    async def _forward_and_collect() -> str:
+        from buddy_proxy.antigravity.provider import MODELS
+
+        body = {**_BODY, "model": f"antigravity/{MODELS[0]['id']}", "stream": True}
+        sr = await provider.forward(body, "openai")
+        assert sr.status_code == 200
+        chunks = []
+        async for chunk in sr.body_iterator:
+            chunks.append(chunk.encode() if isinstance(chunk, str) else chunk)
+        return b"".join(chunks).decode()
+
+    text = asyncio.run(_forward_and_collect())
+    assert "hello" in text
+    assert '"usage"' in text and '"prompt_tokens": 1' in text  # 第二事件（闸门缓冲行之后）没有丢
+
 
 def test_stream_gate_switches_on_in_band_429(two_accounts, monkeypatch):
     """HTTP 200 但首条 SSE 事件是 429 error：未出字节，冷却换号。"""

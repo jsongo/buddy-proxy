@@ -16,6 +16,7 @@ OpenAI / Anthropic 兼容接口。协议与指纹**以本机真实 gemini CLI �
 | `login.py` | `buddy login gemini`（PKCE + 本地回调；含 CLI 登录态采用） |
 | `cli_bridge.py` | 与本机 gemini CLI 凭证互通（读 `~/.gemini`，回写三件套） |
 | `convert.py` | OpenAI chat ↔ Gemini v1internal 双向转换 |
+| `thought_signature.py` | thoughtSignature 的 id 回环缓存（三条模型族的实测矩阵见模块 docstring） |
 | `provider.py` | BaseProvider 实现（转发、SSE、协议转换） |
 
 ## 使用

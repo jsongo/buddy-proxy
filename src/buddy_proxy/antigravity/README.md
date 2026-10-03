@@ -21,7 +21,7 @@ Claude Sonnet/Opus 和 GPT-OSS。
 | `setup.py` | loadCodeAssist / onboardUser onboarding（项目 ID 获取；daily→prod 端点 fallback） |
 | `login.py` | `buddy login antigravity`（PKCE + 本地回调；含 agy 登录态采用） |
 | `cli_bridge.py` | 与本机 agy CLI 凭证互通（**只读** keyring 导入） |
-| `convert.py` | OpenAI chat ↔ Antigravity envelope 双向转换（内层复用 gemini convert） |
+| `convert.py` | OpenAI chat ↔ Antigravity envelope 双向转换（内层复用 gemini convert，含 thoughtSignature/id 回环） |
 | `failover.py` | 多账号 failover：可用账号枚举 + 内存冷却 + UI 账号状态数据 |
 | `provider.py` | BaseProvider 实现（转发、SSE、协议转换、配额展示） |
 
@@ -56,7 +56,9 @@ copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影
 - **流式防重复计费**：首事件闸门（`_gate_first_event`）压住第一个上游事件
   再定性——带内 429/403 error（一个字节没出网）冷却换号；语义事件
   （candidates）出现即 committed，缓冲行经 `_ReplayStream` 补放、绝不重放；
-  语义前 EOF 视为假成功换号（不冷却）。
+  语义前 EOF 视为假成功换号（不冷却）。闸门只创建一次 `resp.aiter_lines()`
+  并把它（`_Gate.lines`）传下去：httpx 响应流一次性消费，重开必抛
+  StreamConsumed 静默丢光剩余事件（claude 流式曾因此完全空流）。
 - **可观测**：每次转发把实际服务的账号写入 `ACCOUNT_META`（metrics 落库可
   归属）；管理页有独立 Antigravity 面板（各账号额度左右分栏 + 账号状态行，
   数据来自 `failover.accounts_status()`，纯本地不触网）。
@@ -173,6 +175,39 @@ agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h �
 
 所以 effort 后缀由模型表逐模型声明（`efforts` / `default_effort` /
 `upstream`），`convert.apply_effort_suffix` 解析成上游真名，不按名字前缀猜。
+
+## thoughtSignature 与 functionCall id（实测，2026-10-03）
+
+gemini-3 系在每个 `functionCall` part 上返回 `thoughtSignature`（~0.7-1.2KB
+密文）；第二轮回传时**强制要求原样带回**，缺失直接 400
+（`Function call is missing a thought_signature in functionCall parts`——
+用户实测报错即此）。claude/gpt-oss 系不返回签名，但要求 `functionCall.id`
+与 `functionResponse.id` **成对回传**（缺 → 400 `tool_use.id: Field
+required` / `Expected the 'id'`）。三族都容忍哨兵值
+`skip_thought_signature_validator`（官方给无状态客户端的逃生门）。
+
+实测矩阵（直连上游逐项跑过）：
+
+| 模型族 | fc.id/fr.id | thoughtSignature | 哨兵 |
+|---|---|---|---|
+| gemini-3 系 | 带上要成对 | 必带（缺 → 400） | ✓ 200 |
+| claude 系 | 必须成对 | 不需要 | ✓ 200 |
+| gpt-oss | 必须成对 | 不需要 | ✓ 200 |
+
+两个实现坑：
+
+1. **签名过不了 Anthropic 协议**——签名只在 OpenAI 的扩展字段里有容身
+   之处，Claude Code 这类客户端走 `/v1/messages`，tool_use 块只有
+   id/name/input，签名根本到不了回程。修法：哨兵兜底 + id 回环缓存。
+2. **上游 id 是短计数器**（`call_850216`），跨响应/跨账号会撞车——不能
+   拿它当回环键。实测上游**只校验 fc.id 与 fr.id 成对、不校验等于原
+   值**（自造 id 配对也 200），所以响应方向一律自造 `call_<24hex>` 并
+   把签名/函数名记进 `gemini/thought_signature.py` 的进程内 LRU，请求
+   方向凭 id 还原；缓存未命中（如代理重启）时 gemini 系注哨兵兜底，
+   非 gemini 系不注（保持请求体干净）。
+
+`functionResponse.name` 也从 id 还原：Anthropic 的 tool_result 不带函数名，
+过去拿 tool_call_id 顶替（sanitize 后是错名字），现在从缓存取回真名。
 
 ## 模型更新怎么做
 
