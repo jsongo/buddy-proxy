@@ -73,10 +73,9 @@ document.addEventListener('visibilitychange', syncNextTimeAuto);
 // 「积分类才做量过滤」的逻辑都在 benefits._expiring 一处，免得两边各写一份
 // 慢慢走偏（比如前端漏掉 unit 判断，就会给 mimo 的「还剩 3 天」也套 300 门槛）。
 //
-// 唯一的例外是这个天数常量：它只用来拼汇总文案（「将在 N 天内到期」），
-// 不参与筛选。改后端 EXPIRY_WARN_DAYS 时这里也要跟着改——文案跟实际窗口
-// 对不上（写着 7 天、实际 3 天）比不写还糟。
-const EXPIRY_WARN_DAYS = 7;
+// 汇总文案要写「将在 N 天内到期」，这个 N 由后端随 expiring 一起下发
+// （``expiry_warn_days``），前端不自己存一份——两处各写一个常量，改了一处
+// 就会出现「文案写着 7 天、实际窗口 3 天」，比不写更让人困惑。
 //
 // 形态用 <details>：默认收起，汇总行说明有几项、最早是哪天；展开才列明细
 // （通道 / 名称 / 到期日 / 剩余天数）。已过期项用红色单独标——那是最该看的。
@@ -104,9 +103,11 @@ function renderExpiryBanner() {
   const hasOver = list.some(e => e.days_left < 0);
   el.className = 'expirybar show' + (hasOver ? ' expired' : '');
   const soonest = list[0];  // 后端按 expire_ts 升序，第一条就是最紧的
+  // 窗口天数以后端下发为准；老响应缺字段时退回 7（与后端默认一致）
+  const warnDays = Number(BENEFITS && BENEFITS.expiry_warn_days) || 7;
   const head = hasOver
     ? `有 ${list.length} 项权益已过期或即将到期`
-    : `有 ${list.length} 项权益将在 ${EXPIRY_WARN_DAYS} 天内到期`;
+    : `有 ${list.length} 项权益将在 ${warnDays} 天内到期`;
   const rows = list.map(e => {
     const over = e.days_left < 0;
     // 余量只对积分类有意义（天数/次数/千分制的 remaining 是各自的量纲，

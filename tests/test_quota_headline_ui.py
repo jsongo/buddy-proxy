@@ -201,11 +201,6 @@ def _run_fn(names: tuple[str, ...], body: str) -> str:
     """抽若干顶层函数在 node 里跑一段脚本（附 DOM 桩）。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
     src = "".join(_extract_fn(text, n) for n in names)
-    # 横幅文案引用的天数常量也一并带上（改后端阈值时前端要同步，这条从源码
-    # 抓而不是在桩里另写一份死值，否则改漏了测试还是绿的）
-    const = re.search(r"^const EXPIRY_WARN_DAYS = \d+;$", text, re.M)
-    assert const, "benefits.js 里找不到 EXPIRY_WARN_DAYS"
-    src = const.group(0) + "\n" + src
     stub = """
 globalThis.esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -253,11 +248,34 @@ def test_expiry_banner_renders_summary_and_rows():
 def test_expiry_banner_warns_without_expired_items():
     """都是临期、没有已过期时用黄档（不带 expired 类），文案也不说「已过期」。"""
     out = _render_banner("""{
+      expiry_warn_days: 7,
       expiring: [{provider: 'trae', provider_name: 'trae', label: '签到奖励',
                   expire_ts: 1792692336, days_left: 2.0, remaining: 500, unit: 'credit'}],
     }""")
     assert 'expirybar show' in out and 'expired' not in out, f"该是黄档: {out}"
     assert '将在 7 天内到期' in out, out
+
+
+def test_expiry_banner_takes_window_from_response():
+    """汇总文案的「N 天」以后端下发为准，不是前端写死的 7。
+
+    写死的话，后端把窗口调成 3 天时文案还说 7 天——用户看到「有 1 项将在 7 天
+    内到期」点开发现是 3 天后，比不写更困惑。
+    """
+    out = _render_banner("""{
+      expiry_warn_days: 3,
+      expiring: [{provider: 'trae', provider_name: 'trae', label: '加油包',
+                  expire_ts: 1792692336, days_left: 2.0, remaining: 900, unit: 'credit'}],
+    }""")
+    assert '将在 3 天内到期' in out, out
+    assert '7 天' not in out, f"不该再出现写死的 7: {out}"
+
+
+def test_banner_window_days_is_not_hardcoded_in_js():
+    """前端不该自带天数常量——窗口只在 benefits.EXPIRY_WARN_DAYS 一处定义。"""
+    text = BENEFITS_JS.read_text(encoding="utf-8")
+    assert "EXPIRY_WARN_DAYS" not in text, \
+        "benefits.js 又出现了自带的天数常量（应改为读后端下发的 expiry_warn_days）"
 
 
 def test_expiry_banner_hides_when_no_alerts():

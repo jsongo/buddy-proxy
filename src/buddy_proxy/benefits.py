@@ -68,6 +68,28 @@ def _state_flipped(data: Any, now: float) -> bool:
     return nxt <= now and now - nxt <= FLIP_GRACE_S
 
 
+def _as_num(v: Any) -> float | None:
+    """宽松取数：数字照收，数字字符串也收（上游偶发给 ``"500"``）。
+
+    布尔**不收**——``True`` 是 1、``False`` 是 0，混进额度判断会变成
+    「剩 1 分」这种假数据。前端 ``quotaHeadSum`` 有两道一模一样的剔除，
+    来由相同（见那里的注释）。
+    """
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
 def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) -> list[dict[str, Any]]:
     """挑出「快到期」的权益条目，供管理页顶部横幅展示（2026-10-03）。
 
@@ -95,23 +117,23 @@ def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) 
     now = time.time() if now is None else now
     out: list[dict[str, Any]] = []
     for entry in provider_entries:
+        if not isinstance(entry, dict):
+            continue
         quota = entry.get("quota") or {}
-        if not quota.get("supported"):
+        if not isinstance(quota, dict) or not quota.get("supported"):
             continue
         for it in quota.get("items") or []:
             if not isinstance(it, dict):
                 continue
-            expire_ts = it.get("expire_ts")
-            if isinstance(expire_ts, bool) or not isinstance(expire_ts, (int, float)):
-                continue
-            if expire_ts <= 0:
+            expire_ts = _as_num(it.get("expire_ts"))
+            if expire_ts is None or expire_ts <= 0:
                 continue
             days_left = (expire_ts - now) / 86400.0
             if days_left >= EXPIRY_WARN_DAYS:
                 continue
             if it.get("unit") == "credit":
-                remaining = it.get("remaining")
-                if isinstance(remaining, bool) or not isinstance(remaining, (int, float)):
+                remaining = _as_num(it.get("remaining"))
+                if remaining is None:
                     continue  # 拿不到余量就不报：无法判断值不值得提醒
                 if remaining <= EXPIRY_WARN_MIN_CREDITS:
                     continue
@@ -371,6 +393,11 @@ class BenefitsManager:
             # 到期告警明细（见 _expiring）。放后端算而不是前端：阈值与「积分类
             # 才做量过滤」的规则集中一处，pytest 直接覆盖；前端只渲染不判规则，
             # 免得两边各写一份慢慢走偏。空列表＝无告警，前端据此隐藏横幅。
+            #
+            # 窗口天数一起下发：横幅汇总文案要写「将在 N 天内到期」，前端若
+            # 自己存一份常量，改后端忘改前端就会出现「写着 7 天、实际 3 天」
+            # 的文案（比不写更让人困惑）。下发之后只有一处定义。
+            "expiry_warn_days": EXPIRY_WARN_DAYS,
             "expiring": _expiring(provider_entries),
         }
 
