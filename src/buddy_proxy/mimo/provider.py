@@ -300,7 +300,7 @@ def _is_auth_rejection(resp: httpx.Response) -> bool:
 
 class MimoProvider(BaseProvider):
     id = "mimo"
-    name = "Xiaomi MiMo (桌面端登录态 / API key)"
+    name = "Xiaomi MiMo (桌面端)"
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
