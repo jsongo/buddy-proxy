@@ -241,6 +241,26 @@ silent:
   banner's amount filter — a 200-credit check-in pack expiring in 7 days is
   noise, a 4000-credit plan is not; days and counts are not comparable to a
   credit threshold and are filtered by time alone.
+- **Providers report every quota item; the frontend decides what to show.**
+  `quota()` must not truncate `items` for display. CodeBuddy used to return
+  only the first 4 packs (`if len(packs) < 4`) and the cut was invisible in a
+  specific way: the dropped rows are never sent, so nothing downstream can
+  know they exist or say so. Trae has the same shape of bug historically
+  (deduped by name, capped at 3, hiding 12 unspent allowances). Row count is a
+  *view* concern, so it lives in the view: `benefits.js` renders items through
+  `quotaItemsHtml`, which shows only items with remaining allowance, folds the
+  used-up ones (remaining ≤ 0) into a collapsed block **after** the live ones,
+  and clips the whole region past `--qfold-max` with an expand button. Three
+  rules are load-bearing. (1) *Items with unknown remaining are never folded* —
+  a PAT failure notice or `reset_pending` carries text, not a number, and
+  reading that as zero would hide the one row that matters. (2) *The fold
+  decision uses measured height, not an item count* — in the two-column layout
+  a narrow card's usable height differs from a full-width card's. (3) *Expand
+  state lives in `QUOTA_FOLD`, not the DOM* — the panel is rebuilt from
+  `innerHTML` every 30 s (same reason as `_state_flipped` above: the page's own
+  refresh cycle is the thing that would otherwise undo the user's action).
+  Anything the backend withholds for display reasons is unreachable by
+  construction, so "keep the payload small" is not a valid reason to trim here.
 
 ## Logging and privacy
 

@@ -49,11 +49,16 @@ def _quota_with(monkeypatch, packages):
     return cbp.CodeBuddyProvider().quota()
 
 
-def test_headline_sums_every_pack_even_beyond_the_display_cap(monkeypatch):
-    """合计必须覆盖**全部**包，哪怕明细只列前 4 条。
+def test_headline_sums_every_pack_and_lists_them_all(monkeypatch):
+    """合计必须覆盖**全部**包，明细也要**全给**——展示条数由前端折叠管。
 
-    6 个包：订阅 4000 + 5 个 1000 的资源包。真实总额 9000，但明细只列 4 条。
-    老实现把 break 写在累加循环里，合计只到 7000 —— 少 2000。
+    6 个包：订阅 4000 + 5 个 1000 的资源包，真实总额 9000。老实现把 break
+    写在累加循环里，合计只到 7000（少 2000）。
+
+    明细原先还有一条 ``len(packs) < 4`` 的截断。它比合计那个 bug 更隐蔽：
+    合计错了至少能靠数字对不上发现，而被砍掉的包**后端不再提、前端无从得知**，
+    界面上彻底消失且没有任何迹象。2026-10-03 起改由前端折叠（只铺没花完的 +
+    超限收起 + 展开看全），后端如实给全部条目。
     """
     packages = [_pack("SUB", 4000, 0, 4000)]
     packages += [_pack(f"PK{i}", 1000, 100, 900) for i in range(1, 6)]
@@ -61,11 +66,10 @@ def test_headline_sums_every_pack_even_beyond_the_display_cap(monkeypatch):
     out = _quota_with(monkeypatch, packages)
     head = out["items"][0]
     assert head["label"] == "积分余额合计"
-    assert head["total"] == 9000.0, f"合计被 4 条上限截断了: {head}"
+    assert head["total"] == 9000.0, f"合计被截断了: {head}"
     assert head["used"] == 500.0, head
     assert head["remaining"] == 8500.0, head
-    # 明细仍然限 4 条（上限是给展示用的，别为了凑合计把它撑爆）
-    assert len(out["items"]) == 1 + 4, [i["label"] for i in out["items"]]
+    assert len(out["items"]) == 1 + 6, [i["label"] for i in out["items"]]
 
 
 def test_headline_matches_the_sum_of_the_listed_details_when_under_the_cap(monkeypatch):

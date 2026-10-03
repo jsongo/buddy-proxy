@@ -202,22 +202,25 @@ class CodeBuddyProvider(BaseProvider):
             # 合计**必须遍历全部包**：这个 break 早先写在累加同一个循环里，
             # 于是包多于 4 个时，标题行的「积分余额合计」只加了前 4 个——
             # 显示的剩余比账号实际少一截，而且列的明细也刚好在断点处结束，
-            # 用户从界面上看不出还有包没算进来。上限只管**明细列几条**，
-            # 不能管合计。
+            # 用户从界面上看不出还有包没算进来。
+            #
+            # 明细这里**不再截断**（原先 ``if len(packs) < 4``）：后端砍掉的
+            # 条目前端无从得知，几个包被永久藏起来。展示条数交给前端折叠
+            # （``benefits.js`` 的 quotaItemsHtml：只铺没花完的 + 超限收起），
+            # 那里有展开入口、用户想看能看全；后端只要如实给数据。
             used_sum += used; total_sum += total; remain_sum += remain
-            if len(packs) < 4:
-                packs.append({
-                    "label": "订阅套餐" if p.get("PackageCode") == sub_code else "资源包",
-                    "used": used, "total": total, "remaining": remain,
-                    "percent": round(used / total * 100) if total else 0,
-                    # 上游 ``Packages[]`` 只有周期容量字段（CycleUsed/Total/
-                    # Remain/CapacityUnit），**没有任何日期字段**（2026-10-03
-                    # 实测），所以到期/重置都无从谈起，恒 None——本通道不会
-                    # 出现在到期横幅里，除非上游换接口。
-                    "reset_ts": None,
-                    "expire_ts": None,
-                    "unit": "credit",
-                })
+            packs.append({
+                "label": "订阅套餐" if p.get("PackageCode") == sub_code else "资源包",
+                "used": used, "total": total, "remaining": remain,
+                "percent": round(used / total * 100) if total else 0,
+                # 上游 ``Packages[]`` 只有周期容量字段（CycleUsed/Total/
+                # Remain/CapacityUnit），**没有任何日期字段**（2026-10-03
+                # 实测），所以到期/重置都无从谈起，恒 None——本通道不会
+                # 出现在到期横幅里，除非上游换接口。
+                "reset_ts": None,
+                "expire_ts": None,
+                "unit": "credit",
+            })
         items = [{
             "label": "积分余额合计",
             "used": round(used_sum, 2), "total": round(total_sum, 2),

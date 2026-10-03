@@ -339,6 +339,25 @@
   .qitem .qhead { display: flex; justify-content: space-between; gap: 8px; font-size: 12px;
                   color: var(--muted); margin-bottom: 4px; }
   .qbar { background: var(--bg); height: 8px; border-radius: 4px; overflow: hidden; }
+  /* 额度条目区：默认只铺没消耗完的，整块超过最大高度就裁掉，按钮展开。
+     裁剪用 max-height + overflow:hidden —— 展开态由 JS 摘掉这个类，高度自然
+     撑开，不必算具体像素。
+     上限写进 --qfold-max 供 JS 读（syncQuotaFold 按它判断该不该露按钮）：
+     这个值只此一处，改这里就够。 */
+  .qbody { --qfold-max: 208px; }
+  .qbody.clipped { max-height: var(--qfold-max); overflow: hidden;
+                   /* 底部渐隐，暗示「下面还有」而不是让进度条被硬切一刀 */
+                   mask-image: linear-gradient(180deg, #000 76%, transparent);
+                   -webkit-mask-image: linear-gradient(180deg, #000 76%, transparent); }
+  /* 已用完的区块：默认藏在展开态后面（JS 切 hidden）。展开后沉到底部、
+     与还在用的部分用一条分隔线断开，并降一档亮度——它们是历史，不是当前状态 */
+  .qspent { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); opacity: .72; }
+  .qspent-head { font-size: 11.5px; color: var(--muted); margin-bottom: 2px; }
+  .qmore { display: block; width: 100%; margin-top: 6px; padding: 4px 0; font-size: 12px;
+           background: transparent; border: 1px dashed var(--line); border-radius: 8px;
+           color: var(--muted); }
+  .qmore:hover { color: var(--text); border-color: var(--accent); }
+  .qmore[hidden] { display: none; }
   .qbar > div { height: 100%; border-radius: 4px; }
   /* TRAE PAT 面板：日包/周包按 PAT 单双数两栏；下方 账号状态 / 模型负载 左右两栏 */
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }

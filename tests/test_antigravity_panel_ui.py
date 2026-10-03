@@ -46,7 +46,16 @@ globalThis.esc = s => String(s)
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 globalThis.api = async () => globalThis.__RESPONSE;
 globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) + '</div>';
+// 面板现在走 quotaItemsHtml（分组 + 折叠，见 test_quota_fold.py）；这里只关心
+// 面板自身的布局与按钮，折叠那层照样打桩——不桩的话 syncQuotaFold 还要 DOM
+globalThis.quotaItemsHtml = (items, key) =>
+  '<div class="qbody" data-qfold="' + esc(key) + '">' +
+  items.map(globalThis.quotaItemHtml).join('') + '</div>';
 globalThis.BENEFITS = {};
+// syncQuotaFold 定义在折叠区块（不在本测试切片里），打桩成计数器：
+// 面板每次改完高度都该校准一次折叠，漏调就是「整块没裁、按钮不露」
+globalThis.__SYNC_CALLS = 0;
+globalThis.syncQuotaFold = () => { globalThis.__SYNC_CALLS++; };
 globalThis.document = {
   querySelector: sel => (Object.prototype.hasOwnProperty.call(QS, sel) ? QS[sel] : null),
   querySelectorAll: () => [],
@@ -513,11 +522,15 @@ globalThis.__RESPONSE = {enabled: true, accounts: [
 ]};
 renderAntigravityPanel();   // 首渲（无快照占位）尾部拉账号 → 快照到位触发重渲
 await new Promise(r => setTimeout(r, 10));   // render 内部 load 是 fire-and-forget，等它落地
-console.log(JSON.stringify({html: PANEL.innerHTML}));
+console.log(JSON.stringify({html: PANEL.innerHTML, syncs: globalThis.__SYNC_CALLS}));
 """)
-    html = json.loads(out.strip().splitlines()[-1])["html"]
+    data = json.loads(out.strip().splitlines()[-1])
+    html = data["html"]
     assert "agDeleteAccount('a@x.com')" in html, "首份快照就该带出 ✕，不等下一轮 30s"
     assert "a@x.com" in html and ">AG #1<" not in html, "重渲走快照直出，不闪内部代号"
+    # 重渲换了整块 DOM（占位组名 → 邮箱、多一行副标题），高度变了要跟着校准；
+    # 这条分支原先直接 return，校准得拖到下个 30s 轮询
+    assert data["syncs"] >= 1, "首份快照重渲后要同步一次折叠校准"
 
 
 def test_delete_account_cancelled_sends_nothing():
