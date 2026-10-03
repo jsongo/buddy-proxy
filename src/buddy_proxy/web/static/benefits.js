@@ -539,18 +539,18 @@ function _ag_sub_html(a) {
     : '';
 }
 
-function _ag_move_html(idx, n, id) {
+function _ag_move_btns(idx, n, id) {
   // 上/下移按钮（idx 是渲染时的 1-based 顺位）；首尾各自禁用对应的那个。
   // 有账号 id 就内联带上：重排响应回来后、面板重绘前（要先重取一次额度），
   // DOM 里还挂着旧按钮，其 idx 按旧顺序标号——点按时按「快照里该 id 的实际
   // 位次」挪才不会动到别的账号（只凭 idx 挪实测会把刚调好的顺序点回去）。
   // id 字符集由后端 _ID_RE 约束（字母数字 ._@-），内联进 onclick 安全。
+  // 只出裸按钮——外壳 <span class="ag-move"> 由调用方统一搭（✕ 删除同排）。
   const arg = id ? `,'${id}'` : '';
-  return `<span class="ag-move">` +
-    `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+  return `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
     `onclick="agMoveAccount(${idx},-1${arg})">▲</button>` +
     `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
-    `onclick="agMoveAccount(${idx},1${arg})">▼</button></span>`;
+    `onclick="agMoveAccount(${idx},1${arg})">▼</button>`;
 }
 
 // 调 POST /ui/api/antigravity/accounts/order 提交完整顺序；后端重写
@@ -647,20 +647,25 @@ function renderAntigravityPanel() {
     // 提交全量 id 列表的数据源）。正常情况所有账号都有额度分组，n=账号数；
     // 个别账号额度查询失败时它没有卡片，按「可见卡片」定界正好。
     // acct.id 内联进按钮：点按时按快照里的真实位次挪（面板重绘延迟见 agMoveAccount）。
-    const moveBtns = (m && n > 1) ? _ag_move_html(idx, n, acct && acct.id) : '';
+    const moveBtns = (m && n > 1) ? _ag_move_btns(idx, n, acct && acct.id) : '';
     // 删除按钮：要账号 id 才能删，快照没到（首屏首渲）时先不渲染，等下轮。
     // id 字符集由后端 _ID_RE 约束（字母数字 ._@-），内联进 onclick 安全。
+    // ghost danger：与 app.js「删除此目标」同款危险样式（悬停变红），且
+    // .ag-move button.danger 常红——小尺寸 ✕ 里红色是唯一的危险提示。
     const delBtn = acct
-      ? `<button class="ghost" title="删除该账号（被 Google 拉黑/不再使用时）" ` +
+      ? `<button class="ghost danger" title="删除该账号（被 Google 拉黑/不再使用时）" ` +
         `onclick="agDeleteAccount('${acct.id}')">✕</button>` : '';
-    // 注意按钮放块尾、副标题紧随名字——loadAntigravityAccounts 的就地回填
-    // 靠「名字元素的下一个兄弟是副标题」定位，中间插任何元素都会让它错乱。
+    // ▲▼ 顺位 + ✕ 删除合成一个右上角按钮组（用户视角=「账号名那一行」的行尾）。
+    // 仍放块尾、绝对定位到右上角——loadAntigravityAccounts 的就地回填靠
+    // 「名字元素的下一个兄弟是副标题」定位，中间插任何元素都会让它错乱。
+    const rowBtns = (moveBtns || delBtn)
+      ? `<span class="ag-move">${moveBtns}${delBtn}</span>` : '';
     return `
     <div class="pat-pkg">
       <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</span>
       ${_ag_sub_html(acct)}
       ${quotaItemsHtml(its, 'ag:' + grp)}
-      ${moveBtns}${delBtn}
+      ${rowBtns}
     </div>`;
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
   const noticeHtml = notices.map(quotaItemHtml).join('');
@@ -695,6 +700,10 @@ async function loadAntigravityAccounts() {
       // id 才能渲），会干等下一轮 30s 重渲才出现。重渲尾部的再拉取数据
       // 已同、走上面的早退，不会循环。
       renderAntigravityPanel();
+      // 重渲换了整块 DOM（邮箱、副标题都变了高度），校准要跟着走一次，
+      // 否则首屏这次校准要拖到下个 30s 轮询：renderBenefits 末尾那次
+      // syncQuotaFold 跑在本函数 await 之前，看不到重渲后的高度。
+      syncQuotaFold();
       return;
     }
     // 就地回填：组名换成邮箱、组名后插副标题。多账号按 data-ag-idx 对应；

@@ -52,6 +52,10 @@ globalThis.quotaItemsHtml = (items, key) =>
   '<div class="qbody" data-qfold="' + esc(key) + '">' +
   items.map(globalThis.quotaItemHtml).join('') + '</div>';
 globalThis.BENEFITS = {};
+// syncQuotaFold 定义在折叠区块（不在本测试切片里），打桩成计数器：
+// 面板每次改完高度都该校准一次折叠，漏调就是「整块没裁、按钮不露」
+globalThis.__SYNC_CALLS = 0;
+globalThis.syncQuotaFold = () => { globalThis.__SYNC_CALLS++; };
 globalThis.document = {
   querySelector: sel => (Object.prototype.hasOwnProperty.call(QS, sel) ? QS[sel] : null),
   querySelectorAll: () => [],
@@ -438,6 +442,31 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
     html = json.loads(out.strip().splitlines()[-1])["html"]
     assert "agDeleteAccount('a@x.com')" in html, "单账号也要有删除入口"
     assert "agMoveAccount(" not in html, "单账号没有顺位可调（与既有行为一致）"
+    assert 'class="ghost danger"' in html, "删除 ✕ 用危险样式"
+
+
+def test_delete_button_sits_next_to_move_buttons():
+    """✕ 与 ▲▼ 同排（.ag-move 按钮组内）= 账号名那一行的行尾，不再孤零零挂块尾。"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'AG #1 · Gemini 组', remaining: 900, total: 1000, percent: 10, used: null, reset_ts: null},
+  {label: 'AG #2 · Gemini 组', remaining: 800, total: 1000, percent: 20, used: null, reset_ts: null},
+]}}]};
+AG_ACCTS = [
+  {index: 1, id: 'a@x.com', email: 'a@x.com', cooling: []},
+  {index: 2, id: 'b@x.com', email: 'b@x.com', cooling: []},
+];
+globalThis.__RESPONSE = {enabled: false};
+renderAntigravityPanel();
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    html = json.loads(out.strip().splitlines()[-1])["html"]
+    groups = re.findall(r'<span class="ag-move">(.*?)</span>', html, re.S)
+    assert len(groups) == 2, f"每个账号一个按钮组: {html}"
+    for g in groups:
+        assert "agMoveAccount(" in g and "agDeleteAccount(" in g, \
+            f"▲▼ 与 ✕ 要同排: {g}"
+        assert 'class="ghost danger"' in g, f"✕ 用危险样式: {g}"
 
     nosnap = _run_js("""
 globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
@@ -493,11 +522,15 @@ globalThis.__RESPONSE = {enabled: true, accounts: [
 ]};
 renderAntigravityPanel();   // 首渲（无快照占位）尾部拉账号 → 快照到位触发重渲
 await new Promise(r => setTimeout(r, 10));   // render 内部 load 是 fire-and-forget，等它落地
-console.log(JSON.stringify({html: PANEL.innerHTML}));
+console.log(JSON.stringify({html: PANEL.innerHTML, syncs: globalThis.__SYNC_CALLS}));
 """)
-    html = json.loads(out.strip().splitlines()[-1])["html"]
+    data = json.loads(out.strip().splitlines()[-1])
+    html = data["html"]
     assert "agDeleteAccount('a@x.com')" in html, "首份快照就该带出 ✕，不等下一轮 30s"
     assert "a@x.com" in html and ">AG #1<" not in html, "重渲走快照直出，不闪内部代号"
+    # 重渲换了整块 DOM（占位组名 → 邮箱、多一行副标题），高度变了要跟着校准；
+    # 这条分支原先直接 return，校准得拖到下个 30s 轮询
+    assert data["syncs"] >= 1, "首份快照重渲后要同步一次折叠校准"
 
 
 def test_delete_account_cancelled_sends_nothing():
