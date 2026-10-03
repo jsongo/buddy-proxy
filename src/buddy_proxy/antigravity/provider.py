@@ -666,7 +666,9 @@ class _ReplayStream:
         if self._lines is not None:
             async for line in self._lines:
                 yield line
-        else:  # pragma: no cover - 闸门流式路径必然带 lines；兜底不重开已消费流
+        # 兜底分支仅在未传 lines 时走到——此时响应流还没被消费过，直接
+        # 重开是安全的（闸门流式路径必然带 lines，正常不经过这里）。
+        else:  # pragma: no cover
             async for line in self._resp.aiter_lines():
                 yield line
 
