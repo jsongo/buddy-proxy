@@ -54,8 +54,14 @@ copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影
 - **换号条件**：HTTP 429（额度）/ 403 / 401 强刷后仍拒 / 凭据层 AuthError /
   缺 project_id → 冷却当前账号换下一个；业务 4xx（模型名等）原样透传不换号。
 - **冷却时长**：429 尊重 `Retry-After`（钳 1s~7d），默认 5 分钟；403/凭据
-  问题 60 秒。只放内存不落盘——重启清零，代价只是每账号重探一次。全账号
-  冷却时转发直接 429（通道级快速失败）。
+  问题 60 秒；403 文案是「Verify your account to continue.」= Google 风控
+  拉黑（能登录但上游一律拒），6 小时档 + `blacklist` 类别（面板标「疑似
+  拉黑」，管理页 ✕ 删除）。只放内存不落盘——重启清零，代价只是每账号重探
+  一次。全账号冷却时转发直接 429（通道级快速失败），全部试败时报错带
+  `cooldown_report()` 逐账号画像（谁在冷却剩多久/疑似拉黑）。
+- **删除账号**：`POST /ui/api/antigravity/accounts/delete`（管理页 ✕，
+  confirm 确认）→ `delete_account`（索引 + cred 文件）+ `clear_cooldown`
+  （防内存残留）。
 - **防串号**：`ensure_account_token(account_id)` 把 token 与 cred 快照同源
   返回，project_id 从同一份快照取；每账号独立刷新锁 + 锁内重读双检。
 - **流式防重复计费**：首事件闸门（`_gate_first_event`）压住第一个上游事件
