@@ -32,7 +32,7 @@ from buddy_proxy.core.checkin import SOURCE_UPSTREAM, next_from_window
 from buddy_proxy.providers.base import BaseProvider
 
 from .campaigns import CLAIM_ACTION, CampaignClient
-from .catalog import Catalog, is_hidden, public_model_id, to_openai_model
+from .catalog import Catalog, is_enabled, is_hidden, public_model_id, to_openai_model
 from .config import COSY_VERSION, Region, resolve_region, with_cached_endpoints
 from .convert import _normalize_message, _to_anthropic_stream, _unwrap
 from .cosy import sign
@@ -135,11 +135,15 @@ class QoderProvider(BaseProvider):
     def models(self) -> Sequence[dict[str, Any]]:
         """同步返回模型列表（用兜底目录；异步刷新见 ``refresh_models``）。
 
-        旧模型（:data:`catalog.HIDDEN_KEYS`）只列表不展示——列表太长反而找不到
-        要用的那几个。隐藏 ≠ 停用：直接点名仍可调用，只是不列出来。
+        两类条目不展示：旧模型（:data:`catalog.HIDDEN_KEYS`）和上游已停用的
+        （``enable=false``，:func:`catalog.is_enabled`）。隐藏 ≠ 停用：两类
+        直接点名仍可调用（透传上游，由上游裁决），只是不列出来——列表里
+        摆着调不通的模型只会让客户端白白选到它（2026-10-03 三方模型整批
+        被收回后，/v1/models 仍虚报 7 个 403 模型的教训）。
         """
         entries = self._catalog._models or Catalog.fallback()
-        return [to_openai_model(e, self.id) for e in entries if not is_hidden(e)]
+        return [to_openai_model(e, self.id)
+                for e in entries if not is_hidden(e) and is_enabled(e)]
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
         """从上游刷新目录（供管理页「刷新模型」与转发前预热用）。"""
@@ -151,7 +155,8 @@ class QoderProvider(BaseProvider):
             entries = Catalog.fallback()
         else:
             entries = await self._catalog.fetch(cred, force=force)
-        return [to_openai_model(e, self.id) for e in entries if not is_hidden(e)]
+        return [to_openai_model(e, self.id)
+                for e in entries if not is_hidden(e) and is_enabled(e)]
 
     def resolve_model(self, model: str) -> str:
         """把显示名/大小写变体归一成上游 key。"""

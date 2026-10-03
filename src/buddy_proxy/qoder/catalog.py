@@ -35,6 +35,12 @@ CACHE_TTL_S = 600
 CHAT_SCENES = ("chat", "developer", "assistant", "app")
 
 #: 上游不可用时的兜底目录（全部为实测可用的 key）。
+#:
+#: 2026-10-03 起上游把三方模型整批收回（目录 ``enable=false``，调用返回
+#: code 112 + pricingUrl 的 403，官方桌面端同样不可用——账号/套餐级权益门，
+#: 不是代理问题）：DeepSeek/GLM/Kimi/MiniMax 全部摘除，``cmodel``/``smodel``
+#: 则从目录里彻底消失。这里只保留实测仍可调的 Qwen 系（3.8 两档 + 仍在
+#: enable 的 3.7 三档）；上游若恢复，目录会自然带回来，不必改这里。
 FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
     {"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.2, "is_free": True, "max_input_tokens": 180000},
@@ -44,28 +50,8 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
      "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
     {"key": "qmodel", "display_name": "Qwen3.7-Plus", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.04, "max_input_tokens": 1000000},
-    {"key": "dfmodel", "display_name": "DeepSeek-Flash", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
-    {"key": "dmodel", "display_name": "DeepSeek-V4-Pro", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.5, "max_input_tokens": 1000000},
-    {"key": "gmodel", "display_name": "GLM-5.3", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.8, "max_input_tokens": 180000},
-    {"key": "gfmodel", "display_name": "GLM-5.3-Flash", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
-    {"key": "kmodel_latest", "display_name": "Kimi-K3", "is_reasoning": True,
-     "is_vl": True, "price_factor": 1.4, "max_input_tokens": 180000},
-    {"key": "kmodel", "display_name": "Kimi-K2.8-Preview", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.8},
     {"key": "q37fmodel", "display_name": "Qwen3.7-Flash", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.02, "max_input_tokens": 1000000},
-    {"key": "gm51model", "display_name": "GLM-5.2", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.6, "max_input_tokens": 180000},
-    {"key": "mmodel", "display_name": "MiniMax-M2.7", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.2, "max_input_tokens": 180000},
-    {"key": "cmodel", "display_name": "Cantus", "is_reasoning": True,
-     "is_vl": True, "price_factor": 4.0, "max_input_tokens": 180000},
-    {"key": "smodel", "display_name": "Sonus", "is_reasoning": True,
-     "is_vl": True, "price_factor": 8.0, "max_input_tokens": 180000},
 )
 
 #: 档位模型（由平台路由，不绑定具体底层模型）。
@@ -75,9 +61,14 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
 #: 早期版本按客户端 UI 的印象合成过 ultimate/performance/efficient，但上游
 #: 不认这三个名字，调用会 502「Unsupported model "performance"」。故只保留
 #: `auto`；将来上游若真给出别的档位，会在目录里自然出现，不必在这里补。
+#:
+#: 2026-10-03 实测：``auto`` 也被上游关了（目录 enable=false，调用同样返回
+#: code 112 的 403）。条目保留并标 ``enable=False``：``is_enabled`` 会把它从
+#: 对外列表摘掉；点名调用仍原样透传上游（隐藏 ≠ 停用），上游恢复后去掉这个
+#: 标记即可。
 TIER_MODELS: tuple[dict[str, Any], ...] = (
     {"key": "auto", "display_name": "Auto", "is_reasoning": True, "is_vl": True,
-     "price_factor": 0.5, "max_input_tokens": 200000},
+     "price_factor": 0.5, "max_input_tokens": 200000, "enable": False},
 )
 
 #: 旧模型：仅用于兼容调用，**不在模型列表里展示**（列表太长反而找不到要用的）。
@@ -85,22 +76,36 @@ TIER_MODELS: tuple[dict[str, Any], ...] = (
 #: 判定按**上游 key**——对外 id 与 key 一一对应，用 key 更稳（不会因改名漏掉）。
 #: 隐藏 ≠ 停用：客户端直接点名仍可调用，只是 /v1/models 与管理页不列出来。
 #: 想恢复展示：把 key 从本集合里删掉即可。
+#:
+#: 2026-10-03 收缩：三方模型（gm51model/kmodel/cmodel/smodel 等）不再走
+#: 「隐藏」——它们被上游 ``enable=false`` 关掉了，由 :func:`is_enabled` 负责
+#: 摘除（上游恢复后自动回到列表，不需要动这里）；cmodel/smodel 已从目录
+#: 消失。这里只留仍可调、只是太旧不展示的 Qwen 3.7 三档。
 HIDDEN_KEYS: frozenset[str] = frozenset({
     "qmodel_latest",   # Qwen3.7-Max
     "qmodel",          # Qwen3.7-Plus
     "q37fmodel",       # Qwen3.7-Flash
-    "gm51model",       # GLM-5.2
-    "kmodel",          # Kimi-K2.8-Preview
-    "cmodel",          # Cantus
-    "smodel",          # Sonus
 })
 #: 注意：``dfmodel``（上游显示名 ``DeepSeek-Flash``，即用户口中的 4.1-Flash）
-#: **不隐藏**——它是最常用的模型之一，名字看着旧不代表模型旧。
+#: 曾因「名字看着旧但最常用」而不隐藏；2026-10-03 起它被上游停用，由
+#: :func:`is_enabled` 摘除。
 
 
 def is_hidden(entry: dict[str, Any]) -> bool:
     """该条目是否属于「旧模型，不展示」。"""
     return str(entry.get("key") or "").strip() in HIDDEN_KEYS
+
+
+def is_enabled(entry: dict[str, Any]) -> bool:
+    """该条目是否处于上游可用状态（缺字段视为可用——兜底目录不带 enable）。
+
+    2026-10-03 实测：上游把三方模型整批 ``enable=false``，调用返回
+    code 112 + pricingUrl 的 403（权益门，官方客户端同样不可用）。目录字段
+    就是唯一可信的判据——不要试图从 ``minimal_version`` 等哨兵字段推断，
+    那些在放行的模型上也会出现。上游恢复后字段翻回 true，列表自动带回，
+    不需要改代码。
+    """
+    return entry.get("enable") is not False
 
 
 #: 上游 key -> 对外模型 id（小写真实名）。

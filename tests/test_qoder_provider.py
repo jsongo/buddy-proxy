@@ -519,18 +519,16 @@ def _catalog() -> Catalog:
         ("qwen3.8-max", "qmodel_38max"),
         ("QWEN3.8-MAX", "qmodel_38max"),
         ("qmodel_38max", "qmodel_38max"),
-        ("DeepSeek-Flash", "dfmodel"),
-        ("deepseek-flash", "dfmodel"),
-        ("DFMODEL", "dfmodel"),
-        ("GLM-5.3", "gmodel"),
-        ("glm5.3", "gmodel"),
-        ("GLM-5.3-Flash", "gfmodel"),
-        ("Kimi-K3", "kmodel_latest"),
-        ("kmodel_latest", "kmodel_latest"),
+        ("Qwen3.7-Flash", "q37fmodel"),
     ],
 )
 def test_resolve_model_accepts_display_name_and_key(given, expected):
-    """显示名、大小写变体、内部 key 都归一成同一个上游 key。"""
+    """显示名、大小写变体、内部 key 都归一成同一个上游 key。
+
+    2026-10-03 起三方模型（DeepSeek/GLM/Kimi）被上游 enable=false 收回，
+    兜底目录已摘除——别名随之消失，点名原样透传由上游裁决（返回 112/403），
+    故不再有它们的归一用例。
+    """
     assert _catalog().resolve_key(given) == expected
 
 
@@ -611,19 +609,22 @@ def test_hidden_keys_are_not_listed_but_still_callable():
     """旧模型不展示（列表太长找不到要用的），但直接点名仍要能调通。"""
     catalog = _catalog()
     listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
-    for legacy in ("qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "glm-5.2",
-                   "kimi-k2.8-preview", "cantus", "sonus"):
+    for legacy in ("qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash"):
         assert legacy not in listed, f"{legacy} 不该出现在模型列表里"
         # 隐藏 ≠ 停用：仍然解析得到上游 key（点名可调）
         assert catalog.resolve_key(legacy) != legacy
 
 
 def test_hidden_keys_do_not_hide_the_models_we_want():
-    """新模型（千问3.8 / GLM-5.3 / Kimi-K3 等）必须留在列表里。"""
+    """可用的新模型必须留在列表里。
+
+    2026-10-03 起三方模型（GLM-5.3/Kimi-K3/DeepSeek 等）被上游整批
+    ``enable=false`` 收回——它们不该出现在兜底目录里（调用只会 403），
+    见 ``test_gated_models_are_not_in_fallback``。
+    """
     catalog = _catalog()
     listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
-    for wanted in ("qwen3.8-max", "qwen3.8-flash", "glm-5.3", "glm-5.3-flash",
-                   "kimi-k3", "deepseek-v4-pro", "deepseek-v4.1-flash", "minimax-m2.7"):
+    for wanted in ("qwen3.8-max", "qwen3.8-flash"):
         assert wanted in listed, f"{wanted} 被误隐藏"
 
 
@@ -631,6 +632,40 @@ def test_hidden_keys_are_all_real_catalog_keys():
     """HIDDEN_KEYS 里的 key 必须真实存在，避免改名后留下死配置。"""
     keys = {str(e.get("key")) for e in Catalog.fallback()}
     assert HIDDEN_KEYS <= keys
+
+
+def test_gated_models_are_not_in_fallback():
+    """2026-10-03 被上游收回的三方模型不得再出现在兜底目录。
+
+    兜底目录的语义是「实测可用」；摆着调不通的（调用返回 code 112 的
+    403，官方桌面端同样不可用）只会让 /v1/models 虚报。上游若恢复，
+    live 目录会自然带回来（enable=true），不需要改这里。
+    """
+    for key in ("dmodel", "dfmodel", "gmodel", "gfmodel", "gm51model",
+                "kmodel", "kmodel_latest", "mmodel", "cmodel", "smodel"):
+        assert key not in {str(m.get("key")) for m in Catalog.fallback()}, key
+
+
+def test_disabled_entries_are_filtered_from_listings():
+    """enable=false 的条目（含 auto 档位）要从对外列表摘掉。
+
+    _parse 会跳过上游标停用的条目、再由 TIER_MODELS 补回 auto（带
+    enable=False）——若不过滤，auto 会以「已停用」的状态混回列表。
+    """
+    from buddy_proxy.qoder.catalog import is_enabled
+
+    catalog = _catalog()
+    parsed = catalog._parse({"chat": []})  # 空目录：auto 由 TIER 补齐
+    auto = next(e for e in parsed if e["key"] == "auto")
+    assert auto.get("enable") is False
+    assert not is_enabled(auto)
+    live_gated = {"chat": [{"key": "gmodel", "display_name": "GLM-5.3",
+                            "enable": False}]}
+    parsed_live = catalog._parse(live_gated)
+    assert all(e["key"] != "gmodel" for e in parsed_live)  # 上游停用的直接跳过
+    listed = [m["id"] for m in
+              (to_openai_model(e, "qoder") for e in parsed if is_enabled(e))]
+    assert "qoder/auto" not in listed
 
 
 def test_to_openai_model_public_id_for_unmapped_key():
@@ -911,12 +946,18 @@ def _provider() -> object:
 
 
 def test_models_hide_legacy_but_keep_current():
-    """列表只列当前模型；旧模型隐藏（隐藏 ≠ 停用，点名仍可调）。"""
+    """列表只列当前模型；旧模型隐藏（隐藏 ≠ 停用，点名仍可调）。
+
+    2026-10-03 起三方模型被上游收回（enable=false）、auto 档位也停用——
+    已停用的条目一律不列（is_enabled 过滤），列表只剩仍可调的 Qwen 系。
+    """
     ids = [m["id"] for m in _provider().models()]
     assert "qoder/qwen3.8-max" in ids
     assert "qoder/qwen3.8-flash" in ids
-    assert "qoder/glm-5.3" in ids
-    assert "qoder/kimi-k3" in ids
+    # 被上游停用的：不展示
+    assert "qoder/glm-5.3" not in ids
+    assert "qoder/kimi-k3" not in ids
+    assert "qoder/auto" not in ids
     assert "qoder/qwen3.7-max" not in ids
     assert "qoder/glm-5.2" not in ids
     assert "qoder/cantus" not in ids
@@ -925,7 +966,7 @@ def test_models_hide_legacy_but_keep_current():
 def test_models_does_not_list_openai_style_ids():
     """对外 id 不能是上游内部代号（qmodel_38max 这种看不懂的名字）。"""
     ids = [m["id"] for m in _provider().models()]
-    for internal in ("qoder/qmodel_38max", "qoder/qfmodel", "qoder/gmodel"):
+    for internal in ("qoder/qmodel_38max", "qoder/qfmodel"):
         assert internal not in ids
 
 

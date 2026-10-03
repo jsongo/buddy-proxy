@@ -427,34 +427,35 @@ def test_real_qoder_yields_auto_to_codebuddy():
 
 
 def test_real_qoder_and_zcode_overlap_is_resolved_by_registration_order():
-    """``glm-5.3`` 两边都真的把它当自己的 id —— 归属由注册顺序决定。
+    """``glm-5.3`` 不再由 qoder 认领——三方模型已被上游收回。
 
-    这条**不是**拿来断言「谁该赢」的（两边都名正言顺：zcode 的模型名就叫
-    ``glm-5.3``，qoder 的 public id 也是 ``glm-5.3``，上游叫 ``gmodel``）。
-    它锁的是**这个重叠是已知且稳定的**：zcode 注册在前（231 < 259）所以赢。
-    哪天注册顺序变了、或有人「顺手」改掉这个顺序，这条会响。
-
-    真正必须归 CodeBuddy 的只有 ``auto``（见下一条）——那是**语义**问题，
-    不是顺序问题。
+    2026-10-03 起 qoder 目录里三方模型整批 ``enable=false``（调用 403
+    code 112），``models()`` 不再发布 ``qoder/glm-5.3`` 这类 id，精确轮
+    自然不再认领——裸名 ``glm-5.3`` 由此完全归 zcode（它真有这个模型）。
+    这条改为锁「qoder 让路」：哪天上游恢复了，这里是第一个该改回的地方。
     """
     q = _real_qoder()
     for name in ("glm-5.3", "glm-5.3-flash"):
-        assert q.accepts_model(name, aliases=False) is True, (
-            f"{name} 是 qoder 目录里真实存在的 public id，精确轮认领是对的"
+        assert q.accepts_model(name, aliases=False) is False, (
+            f"{name} 已被上游停用，qoder 不该再认领（流量应走 zcode）"
         )
 
 
 def test_real_qoder_still_exactly_claims_its_own_ids():
-    """修完不能过度收紧：qoder 自己的 id 仍要在精确轮被认领。"""
+    """修完不能过度收紧：qoder 自己仍可用的 id 仍要在精确轮被认领。"""
     q = _real_qoder()
-    for name in ("qwen3.8-flash", "qwen3.8-max", "qwen3.7-max", "kimi-k3", "minimax-m2.7"):
+    for name in ("qwen3.8-flash", "qwen3.8-max", "qwen3.7-max"):
         assert q.accepts_model(name, aliases=False) is True, f"{name} 应被 qoder 精确认领"
 
 
 def test_real_qoder_still_claims_official_display_names_via_alias():
-    """官方显示名仍走别名轮兜底（按官方文档写模型名是正常用法）。"""
+    """官方显示名仍走别名轮兜底（按官方文档写模型名是正常用法）。
+
+    只断言仍可调的 Qwen 系——三方模型的显示名（Kimi-K3 等）随目录收回
+    一并失效，见上一条。
+    """
     q = _real_qoder()
-    for name in ("Qwen3.8-Max", "Kimi-K3"):
+    for name in ("Qwen3.8-Max", "Qwen3.8-Flash"):
         assert q.accepts_model(name, aliases=False) is False
         assert q.accepts_model(name, aliases=True) is True
 
