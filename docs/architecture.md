@@ -224,6 +224,23 @@ silent:
   carries the moment it stops being true. Bounded by `FLIP_GRACE_S` (1 h) so an
   upstream that keeps returning a long-past timestamp cannot render the cache
   permanently useless and hammer the upstream on every poll.
+- **Expiry and reset are different things and live in different fields.** A
+  quota item carries `expire_ts` (the allowance is voided — plans, packs,
+  check-in credits) and `reset_ts` (it refills on a cycle — ZCode's 5-hour
+  window, antigravity's weekly pool). Upstreams rarely label which one they
+  mean, and the *same field name* means different things in different
+  channels: Qoder's `expiresAt` is an expiry, MiMo's `nextResetTime` a reset,
+  Trae's `entitlement_base_info.end_time` an expiry — but Trae **PAT's**
+  `end_time` is a reset (weekly/daily pools refill at midnight). All of them
+  were once fed into `reset_ts` and rendered as "· 重置", which is how Qoder's
+  "expires 10-30" displayed as "10-30 resets". Guessing wrong is not
+  cosmetic: `benefits._expiring` only
+  reads `expire_ts`, so a reset misfiled as an expiry would put "your 5-hour
+  window expires in 2 hours" on the warning banner every single round. Items
+  also carry `unit` (`credit` / `day` / `count` / `permille`), which gates the
+  banner's amount filter — a 200-credit check-in pack expiring in 7 days is
+  noise, a 4000-credit plan is not; days and counts are not comparable to a
+  credit threshold and are filtered by time alone.
 
 ## Logging and privacy
 

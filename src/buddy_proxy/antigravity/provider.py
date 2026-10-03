@@ -585,6 +585,8 @@ class AntigravityProvider(BaseProvider):
                 "remaining": None,
                 "percent": None,
                 "reset_ts": None,
+                "expire_ts": None,
+                "unit": None,
             }]
         cred = (load_account_cred(accounts[0].id) if accounts else None) or {}
         return {
@@ -650,7 +652,11 @@ class AntigravityProvider(BaseProvider):
                 "total": 1000,
                 "remaining": round(worst * 1000, 1),
                 "percent": round((1 - worst) * 100, 2),  # 前端 percent=已用
+                # weekly/5h 是周期重置，不是权益到期：不给 expire_ts，
+                # 否则「5 小时后重置」会被到期横幅误报成「5 小时后到期」
                 "reset_ts": reset or None,
+                "expire_ts": None,
+                "unit": "permille",
             })
         return items
 

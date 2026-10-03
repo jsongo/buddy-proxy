@@ -57,8 +57,15 @@ def _pkg_label(pkg: dict[str, Any]) -> str:
     return str(pkg.get("name") or "").strip() or "专属积分"
 
 
-def _reset_ts(data: dict[str, Any]) -> int | None:
-    """额度重置时间（上游给 ``expiresAt``，毫秒）。"""
+def _expire_ts(data: dict[str, Any]) -> int | None:
+    """额度**到期**时间（上游给 ``expiresAt``，毫秒）。
+
+    名字里是 expire 不是 reset：Qoder 的 ``expiresAt`` 是这套额度**作废**的
+    时刻（实测 2026-10-30），不是周期重置。早先它被当成 ``reset_ts`` 送给
+    前端，界面上就显示成「10-30 重置」——语义说反了，用户以为到期日没被
+    记录（见 2026-10-03 的横幅需求）。前端 ``quotaItemHtml`` 现在按两个字段
+    分别渲染「到期 / 重置」，这里只负责给对字段。
+    """
     value = data.get("expiresAt")
     if isinstance(value, (int, float)) and value > 0:
         # 上游偶尔用 253402214400000（9999 年）表示「不重置」，过滤掉。

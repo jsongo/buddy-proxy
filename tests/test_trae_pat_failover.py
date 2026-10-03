@@ -820,6 +820,26 @@ def test_quota_items_zero_usage_is_a_real_zero(monkeypatch):
     assert item["percent"] == 0
 
 
+def test_quota_items_end_time_is_a_reset_not_an_expiry(monkeypatch):
+    """PAT 包的 ``end_time`` 是**周期重置**不是到期——走 reset_ts。
+
+    weekly / daily 是到点回满的池（cooldown.py 实测：「日包按 00:00 重置」，
+    4031 的 extra 分 daily/weekly 两池），本周期结束不等于包作废。判成到期
+    的话，到期横幅会每天喊一次「PAT 日包要到期了」——其实只是又要刷新了。
+    """
+    _configure_two(monkeypatch)
+    profile = pat.ensure_pat_config()[0]
+    data = {"user_entitlement_pack_list": [
+        {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_6",
+                                   "quota": {"basic_usage_limit": 58},
+                                   "end_time": 1791046705},
+         "usage": {"basic_usage_amount": 2}},
+    ]}
+    (item,) = pat._quota_items(data, profile, True)
+    assert item["reset_ts"] == 1791046705, "周期重置时刻该给 reset_ts"
+    assert item["expire_ts"] is None, "池到期会回满，不是权益作废，别给 expire_ts"
+
+
 def test_model_function_override_used_in_payload(monkeypatch):
     """目录里带 function 覆盖的模型，payload 的 function 字段用覆盖值。"""
     _configure_two(monkeypatch)

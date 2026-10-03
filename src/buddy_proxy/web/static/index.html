@@ -100,6 +100,10 @@
   </section>
 
   <section class="page" id="page-benefits">
+    <!-- 权益到期告警横幅：有权益将在 7 天内到期时挂在 h2 上方。常驻 DOM、
+         默认隐藏（.show 打开），内容由 renderExpiryBanner() 按 /ui/api/benefits
+         的 expiring 字段填。默认收起明细，点 <summary> 展开。 -->
+    <details class="expirybar" id="expirybar"></details>
     <h2>打卡 &amp; 额度 <span class="sub">自动打卡 · 最近 35 天 · 按通道额度</span></h2>
     <div class="grid2 top">
       <!-- 左栏两张卡竖排：日历 + 各通道签到。签到行必须紧挨日历（都在左上，

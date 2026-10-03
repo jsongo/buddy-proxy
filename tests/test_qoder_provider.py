@@ -963,12 +963,16 @@ def test_quota_prefers_subscription_when_larger():
     assert "加油包" in labels
 
 
-def test_quota_reset_ts_filters_sentinel():
-    """上游用 253402214400000（9999 年）表示「不重置」，不该展示。"""
-    from buddy_proxy.qoder.provider import _reset_ts
+def test_quota_expire_ts_filters_sentinel():
+    """上游用 253402214400000（9999 年）表示「不重置」，不该展示。
 
-    assert _reset_ts({"expiresAt": 253402214400000}) is None
-    assert _reset_ts({"expiresAt": 1791653946861}) == 1791653946
+    该字段是**到期**时刻（``expire_ts``）不是重置——2026-10-03 前它被错送进
+    ``reset_ts``，界面上显示成「10-30 重置」。
+    """
+    from buddy_proxy.qoder.provider import _expire_ts
+
+    assert _expire_ts({"expiresAt": 253402214400000}) is None
+    assert _expire_ts({"expiresAt": 1791653946861}) == 1791653946
 
 
 def test_used_percent_prefers_counted_values():
@@ -1064,9 +1068,12 @@ def test_quota_includes_dedicated_resource_packages():
     pkg = by_label["Qwen 专属积分"]
     assert pkg["total"] == 2000.0
     assert pkg["remaining"] == 1811.0
-    # 专属包自带过期时间，比账号级 expiresAt 更早——必须按包取，不能用账号级的
-    assert pkg["reset_ts"] == 1793212321, "专属包要用自己的 expiresAt"
-    assert by_label["订阅额度"]["reset_ts"] == 1793289600, "订阅额度用账号级 expiresAt"
+    # 专属包自带**到期**时间，比账号级 expiresAt 更早——必须按包取，
+    # 不能用账号级的。走 expire_ts 不走 reset_ts：Qoder 的额度只到期、
+    # 不周期重置（早先错投 reset_ts，界面把「10-30 到期」显示成「10-30 重置」）
+    assert pkg["expire_ts"] == 1793212321, "专属包要用自己的 expiresAt"
+    assert pkg["reset_ts"] is None, "Qoder 额度只到期不重置"
+    assert by_label["订阅额度"]["expire_ts"] == 1793289600, "订阅额度用账号级 expiresAt"
     # 三个节点都在，合计才对得上真实总额
     assert sum(i["total"] for i in out["items"]) == 4300.0
     # 并且要**声明**它们可合计：管理页标题行只认这个标记，不认列表顺序。

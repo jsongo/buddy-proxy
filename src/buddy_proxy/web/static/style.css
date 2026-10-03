@@ -68,6 +68,44 @@
   .page { display: none; }
   .page.active { display: block; animation: fade .18s ease; }
   .page h2:first-child { margin-top: 0; }
+  /* 「打卡 & 额度」页的 h2 前面多了一个告警横幅，于是它不再是 :first-child，
+     掉回 h2 { margin-top: 26px }，页面顶部凭空多出一块空白。这里补一条
+     **作用域限定的**例外，而不是把上面那条改成 :first-of-type——那样其它页
+     的 h2 会跟着丢掉上边距，连锁改版式。横幅默认 display:none，但 :first-child
+     在 DOM 里照样算数，所以这条无条件生效。 */
+  #page-benefits > .expirybar + h2 { margin-top: 0; }
+  /* 权益到期告警横幅（贴在「打卡 & 额度」页顶部）。
+     配色沿用 .alertbar 的红系，但分两档：默认黄（临期，还行），
+     含已过期项时加 .expired 转红（真出事了）。形态是 <details>，
+     默认只显示 <summary> 一行汇总，展开才列明细。 */
+  .expirybar { display: none; background: rgba(240,180,41,.12);
+               border: 1px solid rgba(240,180,41,.45); border-radius: 12px;
+               color: #ffe3b0; padding: 10px 14px; font-size: 13px;
+               line-height: 1.6; margin-bottom: 10px; }
+  .expirybar.show { display: block; }
+  .expirybar.expired { background: rgba(255,107,107,.13);
+                       border-color: rgba(255,107,107,.5); color: #ffd0d0; }
+  .expirybar > summary { cursor: pointer; list-style: none;
+                         display: flex; align-items: flex-start; gap: 8px; }
+  .expirybar > summary::-webkit-details-marker { display: none; }
+  .expirybar > summary::before { content: '▸'; flex: none; color: inherit;
+                                 opacity: .7; transition: transform .15s; }
+  .expirybar[open] > summary::before { transform: rotate(90deg); }
+  .expirybar .eb-count { flex: 1; min-width: 0; }
+  .expirybar .eb-count b { color: #fff; }
+  .expirybar .eb-hint { color: inherit; opacity: .65; font-size: 12px; }
+  /* 明细表：通道 / 名称 / 到期日 / 剩余天数。
+     grid 而非 table：列宽按内容自适应，窄屏不撑破卡片。 */
+  .expirybar .eb-list { display: grid; grid-template-columns: auto 1fr auto auto;
+                        gap: 2px 12px; margin-top: 8px; padding-top: 8px;
+                        border-top: 1px solid rgba(255,255,255,.12);
+                        font-size: 12.5px; }
+  .expirybar .eb-prov { color: inherit; opacity: .8; }
+  .expirybar .eb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .expirybar .eb-date { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .expirybar .eb-days { text-align: right; font-weight: 600; }
+  .expirybar .eb-days.over { color: var(--err); }
+  .expirybar .eb-head { color: inherit; opacity: .6; font-size: 11.5px; }
   @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
   header h1 { font-size: 19px; margin: 0; letter-spacing: .3px; }
   header .sub { color: var(--muted); font-size: 12.5px; }

@@ -68,9 +68,68 @@ function syncNextTimeAuto() {
 }
 document.addEventListener('visibilitychange', syncNextTimeAuto);
 
+// ---- 权益到期告警横幅 ----
+// 后端算好 expiring（谁快到期、还剩几天），这里只渲染不判规则——阈值与
+// 「积分类才做量过滤」的逻辑都在 benefits._expiring 一处，免得两边各写一份
+// 慢慢走偏（比如前端漏掉 unit 判断，就会给 mimo 的「还剩 3 天」也套 300 门槛）。
+//
+// 汇总文案要写「将在 N 天内到期」，这个 N 由后端随 expiring 一起下发
+// （``expiry_warn_days``），前端不自己存一份——两处各写一个常量，改了一处
+// 就会出现「文案写着 7 天、实际窗口 3 天」，比不写更让人困惑。
+//
+// 形态用 <details>：默认收起，汇总行说明有几项、最早是哪天；展开才列明细
+// （通道 / 名称 / 到期日 / 剩余天数）。已过期项用红色单独标——那是最该看的。
+function fmtExpireDate(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  const mmdd = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  // 不在今年的补上年份，免得「01-05」看不出是明年
+  return d.getFullYear() === now.getFullYear() ? mmdd : `${d.getFullYear()}-${mmdd}`;
+}
+function fmtDaysLeft(days) {
+  if (days < 0) return `已过期 ${Math.abs(Math.round(days))} 天`;
+  if (days < 1) return '今天到期';
+  return `剩 ${Math.round(days)} 天`;
+}
+function renderExpiryBanner() {
+  const el = document.getElementById('expirybar');
+  if (!el) return;
+  const list = (BENEFITS && BENEFITS.expiring) || [];
+  if (!list.length) {
+    el.className = 'expirybar';
+    el.innerHTML = '';
+    el.open = false;
+    return;
+  }
+  const hasOver = list.some(e => e.days_left < 0);
+  el.className = 'expirybar show' + (hasOver ? ' expired' : '');
+  const soonest = list[0];  // 后端按 expire_ts 升序，第一条就是最紧的
+  // 窗口天数以后端下发为准；老响应缺字段时退回 7（与后端默认一致）
+  const warnDays = Number(BENEFITS && BENEFITS.expiry_warn_days) || 7;
+  const head = hasOver
+    ? `有 ${list.length} 项权益已过期或即将到期`
+    : `有 ${list.length} 项权益将在 ${warnDays} 天内到期`;
+  const rows = list.map(e => {
+    const over = e.days_left < 0;
+    // 余量只对积分类有意义（天数/次数/千分制的 remaining 是各自的量纲，
+    // 铺出来只会让人困惑），故只给 credit 带余量
+    const amt = e.unit === 'credit' && e.remaining != null
+      ? `<span class="eb-hint">· 剩 ${fmtNum(e.remaining)}</span>` : '';
+    return `<span class="eb-prov">${esc(e.provider_name || e.provider)}</span>` +
+      `<span class="eb-label">${esc(e.label)}${amt}</span>` +
+      `<span class="eb-date">${esc(fmtExpireDate(e.expire_ts))}</span>` +
+      `<span class="eb-days${over ? ' over' : ''}">${esc(fmtDaysLeft(e.days_left))}</span>`;
+  }).join('');
+  el.innerHTML =
+    `<summary><span class="eb-count"><b>⏳ ${esc(head)}</b>` +
+    `<span class="eb-hint"> · 最近一项 ${esc(fmtExpireDate(soonest.expire_ts))}（${esc(fmtDaysLeft(soonest.days_left))}）</span></span>` +
+    `<span class="eb-hint">展开明细 ▾</span></summary>` +
+    `<div class="eb-list">${rows}</div>`;
+}
+
 // ---- 打卡日历 + 自动打卡 + 各通道额度 ----
 function renderBenefits() {
   if (!BENEFITS) return;
+  renderExpiryBanner();
   document.getElementById('auto-checkin').checked = !!BENEFITS.auto_checkin;
   document.getElementById('checkin-time').value = BENEFITS.checkin_time || '09:30';
   const enabled = BENEFITS.checkin_enabled_providers || [];
@@ -224,6 +283,13 @@ function quotaItemHtml(it) {
   // 免得看起来像池没被重置或卡在 100%。
   const pending = !hasNums && it.reset_pending;
   const reset = fmtReset && !pending ? ` · ${fmtReset} 重置` : '';
+  // 到期时间（expire_ts）与重置时间是两回事：到期是这份权益作废、不再回来，
+  // 重置是周期回满。早先 Qoder 的 expiresAt 被塞进 reset_ts，界面上显示成
+  // 「10-30 重置」——用户以为到期日没被记录。这里分开渲染，措辞也分开。
+  const fmtExpire = it.expire_ts
+    ? new Date(it.expire_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit'})
+    : '';
+  const expire = fmtExpire ? ` · ${fmtExpire} 到期` : '';
   // 查询失败说明条：后端给出 remaining 文案 + unreachable/query_failed 标记，
   // 用警告色区分于正常额度，并说明「是网络问题、已缓存、无需反复刷新」——
   // 以前这种情况页面只是转圈没有任何解释，用户不知道卡在哪。
@@ -241,7 +307,7 @@ function quotaItemHtml(it) {
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
   const bar = hasVolume && hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
-  return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${reset}</span>${nums}</div>${bar}</div>`;
+  return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${expire}${reset}</span>${nums}</div>${bar}</div>`;
 }
 
 // ---- TRAE PAT 面板（底部整宽卡片）----

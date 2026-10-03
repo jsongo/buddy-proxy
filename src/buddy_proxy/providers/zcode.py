@@ -276,7 +276,11 @@ def _quota_items(data: dict[str, Any]) -> list[dict[str, Any]]:
             "total": l.get("usage"),
             "remaining": l.get("remaining"),
             "percent": l.get("percentage"),
+            # 窗口周期重置（5 小时 / 月），不做到期告警——给了 expire_ts
+            # 会让横幅把「每 5 小时重置一次」误报成「快到期了」
             "reset_ts": reset_ts,
+            "expire_ts": None,
+            "unit": "count",
         })
     return items
 

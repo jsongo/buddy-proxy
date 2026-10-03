@@ -31,6 +31,11 @@ DEFAULT_CHECKIN_TIME = "09:30"
 # 「翻转点已过 → 提前作废快照」只在这个宽限窗口内生效。正常轮换最多让缓存
 # 早退这么多；超出说明上游给的 next_ts 已经不可信，退回按 TTL 过期。
 FLIP_GRACE_S = 3600
+# 到期告警：权益剩下的日子少于此值就上横幅；积分类还要剩得比它多才值得提醒
+# （用户 2026-10-03 要求「大于 300 积分再提醒」——每天签到送的 200 分小包
+# 一到 7 天内就刷屏，真正值钱的会员包反而被淹）。判定见 :func:`_expiring`。
+EXPIRY_WARN_DAYS = 7
+EXPIRY_WARN_MIN_CREDITS = 300
 
 
 def _state_flipped(data: Any, now: float) -> bool:
@@ -61,6 +66,88 @@ def _state_flipped(data: Any, now: float) -> bool:
     if isinstance(nxt, bool) or not isinstance(nxt, (int, float)):
         return False
     return nxt <= now and now - nxt <= FLIP_GRACE_S
+
+
+def _as_num(v: Any) -> float | None:
+    """宽松取数：数字照收，数字字符串也收（上游偶发给 ``"500"``）。
+
+    布尔**不收**——``True`` 是 1、``False`` 是 0，混进额度判断会变成
+    「剩 1 分」这种假数据。前端 ``quotaHeadSum`` 有两道一模一样的剔除，
+    来由相同（见那里的注释）。
+    """
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) -> list[dict[str, Any]]:
+    """挑出「快到期」的权益条目，供管理页顶部横幅展示（2026-10-03）。
+
+    到期告警是**权益**的到期（``expire_ts``：套餐、加油包、签到积分、资源包
+    这些领了就有保质期的东西），不是周期重置（``reset_ts``：5 小时窗口、
+    weekly 池这类到点回满的）。两种时刻在前端是两个字段、两套文案，这里只认
+    前者——把重充当到期会天天误报「你的额度快没了」（其实只是快刷新了）。
+
+    两条过滤，缺一不可：
+
+    1. **天数**：``days_left < EXPIRY_WARN_DAYS``（含已过期——最该提醒的正是
+       这个）。
+    2. **量**：``unit == "credit"`` 的条目还要 ``remaining >
+       EXPIRY_WARN_MIN_CREDITS``。用户 2026-10-03 要求「大于 300 积分再提醒」：
+       否则每天签到的 200 分小包一到 7 天内就刷一排横幅，真正值钱的（会员包、
+       4000 分加油包）反而被淹没。非积分类（天数 / 次数 / 千分制）量纲不同、
+       无法与 300 比较，只看天数——它们的 ``remaining`` 是「还剩几天」这类量，
+       本来就该按天预警。
+
+    ``unit`` 缺失或为 ``None`` 时**不做量过滤**（宽松放行）：宁可多提醒一个，
+    也别因为新通道忘了填 ``unit`` 而漏掉真到期。这是有意的取舍。
+
+    纯函数（``now`` 可注入），便于测试；不触网、不改状态。
+    """
+    now = time.time() if now is None else now
+    out: list[dict[str, Any]] = []
+    for entry in provider_entries:
+        if not isinstance(entry, dict):
+            continue
+        quota = entry.get("quota") or {}
+        if not isinstance(quota, dict) or not quota.get("supported"):
+            continue
+        for it in quota.get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            expire_ts = _as_num(it.get("expire_ts"))
+            if expire_ts is None or expire_ts <= 0:
+                continue
+            days_left = (expire_ts - now) / 86400.0
+            if days_left >= EXPIRY_WARN_DAYS:
+                continue
+            if it.get("unit") == "credit":
+                remaining = _as_num(it.get("remaining"))
+                if remaining is None:
+                    continue  # 拿不到余量就不报：无法判断值不值得提醒
+                if remaining <= EXPIRY_WARN_MIN_CREDITS:
+                    continue
+            out.append({
+                "provider": entry.get("id"),
+                "provider_name": entry.get("name") or entry.get("id"),
+                "label": it.get("label"),
+                "expire_ts": int(expire_ts),
+                "days_left": round(days_left, 1),
+                "remaining": it.get("remaining"),
+                "unit": it.get("unit"),
+            })
+    out.sort(key=lambda e: e["expire_ts"])
+    return out
 
 
 def _is_failure(data: Any) -> bool:
@@ -303,6 +390,15 @@ class BenefitsManager:
             "auto_checkin": checkin_cfg["auto_checkin"],
             "checkin_time": checkin_cfg["checkin_time"],
             "checkin_enabled_providers": sorted(self.checkin_providers()),
+            # 到期告警明细（见 _expiring）。放后端算而不是前端：阈值与「积分类
+            # 才做量过滤」的规则集中一处，pytest 直接覆盖；前端只渲染不判规则，
+            # 免得两边各写一份慢慢走偏。空列表＝无告警，前端据此隐藏横幅。
+            #
+            # 窗口天数一起下发：横幅汇总文案要写「将在 N 天内到期」，前端若
+            # 自己存一份常量，改后端忘改前端就会出现「写着 7 天、实际 3 天」
+            # 的文案（比不写更让人困惑）。下发之后只有一处定义。
+            "expiry_warn_days": EXPIRY_WARN_DAYS,
+            "expiring": _expiring(provider_entries),
         }
 
     async def _cached(self, key: str, fn: Callable, *args):

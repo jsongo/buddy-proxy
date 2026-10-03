@@ -38,7 +38,7 @@ from .convert import _normalize_message, _to_anthropic_stream, _unwrap
 from .cosy import sign
 from .credentials import AuthError, Credential, ensure_credential
 from .errors import _last_user_text, _sse_error, _upstream_error
-from .quota import _pkg_active, _pkg_label, _reset_ts, _used_percent
+from .quota import _expire_ts, _pkg_active, _pkg_label, _used_percent
 
 log = logging.getLogger(__name__)
 
@@ -400,7 +400,7 @@ class QoderProvider(BaseProvider):
             remaining = max(total - used, 0.0)
         percent = _used_percent(primary, used, total)
 
-        def _item(node: dict, name: str, reset_ts: int | None = None) -> dict[str, Any]:
+        def _item(node: dict, name: str, expire_ts: int | None = None) -> dict[str, Any]:
             total_v = _total(node)
             try:
                 used_v = float(node.get("used") or 0)
@@ -416,8 +416,12 @@ class QoderProvider(BaseProvider):
                 "total": round(total_v, 4),
                 "remaining": round(remain_v, 4),
                 "percent": round(_used_percent(node, used_v, total_v), 4),
-                # 专属包自带过期时间（比账号级的更早），不传则用账号级 expiresAt
-                "reset_ts": reset_ts if reset_ts is not None else _reset_ts(data),
+                # Qoder 的额度不会「周期性重置」，只会到期作废，故 reset_ts 恒
+                # None（前端据此不拼「重置」后缀）；到期时刻走 expire_ts。
+                # 专属包自带过期时间（比账号级的更早），不传则用账号级 expiresAt。
+                "reset_ts": None,
+                "expire_ts": expire_ts if expire_ts is not None else _expire_ts(data),
+                "unit": "credit",
             }
 
         # 有额度的一侧排前面（个人版 userQuota 常为 0，主力额度在 addOnQuota），
@@ -437,7 +441,7 @@ class QoderProvider(BaseProvider):
             if not _pkg_active(pkg):
                 continue  # 已失效/过期的包不占额度，不展示
             items.append(_item(
-                pkg, _pkg_label(pkg), reset_ts=_reset_ts(pkg),
+                pkg, _pkg_label(pkg), expire_ts=_expire_ts(pkg),
             ))
 
         return {
