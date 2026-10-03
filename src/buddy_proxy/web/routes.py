@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from typing import Any
 
@@ -77,13 +78,34 @@ async def health():
     state = get_state()
     auth = {} if state.mock_dir is not None else (state.client.session.get("auth") or {})
     expires = int(auth.get("expiresAt") or 0)
-    # 附加各 provider 的健康信息（兼容无 providers 属性的旧构造）
-    providers_health = {pid: p.health() for pid, p in getattr(state, "providers", {}).items()}
+    # 附加各 provider 的健康信息（兼容无 providers 属性的旧构造）。
+    # 单个通道的 health() 抛异常只降级为该通道的 error 字段——2026-10-03
+    # 排查「health 无响应」时发现探活方（curl -f）把 5xx 也当失败，任何
+    # 一个通道炸掉都会让 buddy status 误报整个代理死了。
+    providers_health: dict[str, Any] = {}
+    for pid, p in getattr(state, "providers", {}).items():
+        try:
+            providers_health[pid] = p.health()
+        except Exception as exc:  # noqa: BLE001 - 健康检查自身不能成为故障源
+            providers_health[pid] = {"id": pid, "error": f"{type(exc).__name__}: {exc}"}
+    # 资源水位自观测：FD 数（当前打开）与 RSS（进程峰值，ru_maxrss 只增不减，
+    # 持续上涨即可判断泄漏趋势）。排查「用一段时间卡死」时不用再猜——
+    # curl /health 就能看到是否 FD 耗尽/内存暴涨。
+    import resource
+    maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_mb = round(maxrss / (1024 * 1024), 1) if sys.platform == "darwin" else round(maxrss / 1024, 1)
+    try:
+        # macOS 自省用 /dev/fd，Linux 用 /proc/self/fd；都失败就不报该字段
+        open_fds = len(os.listdir("/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"))
+    except OSError:
+        open_fds = -1
     return {
         "status": "ok",
         "authenticated": bool(auth.get("accessToken")),
         "token_valid": not expires or expires > int(time.time() * 1000),
         "uptime_seconds": int(time.time() - state.started_at),
+        "rss_mb": rss_mb,
+        "open_fds": open_fds,
         "providers": providers_health,
     }
 
