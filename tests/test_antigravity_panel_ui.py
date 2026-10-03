@@ -645,3 +645,63 @@ console.log(JSON.stringify({sub: QS['#antigravity-panel [data-ag-idx="1"]'].inse
     assert "疑似拉黑" in data["sub"], data["sub"]
     assert "6.0h" in data["sub"], f"6h 档要按小时展示: {data['sub']}"
     assert "360min" not in data["sub"]
+
+
+# ---------------------------------------------------------------------------
+# 卡片级「↻ 刷新」（2026-10-03）：每张账号卡可单独重查本通道额度
+# ---------------------------------------------------------------------------
+
+def test_panel_renders_refresh_button_even_single_account():
+    """每张卡都有 ↻（单账号没有 ▲▼✕ 也能刷——缓存 TTL 5 分钟，等不及就用它）。"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', checkin: {supported: false},
+  quota: {supported: true, level: 'free', items: [
+    {label: 'Gemini 组', remaining: 900, total: 1000, percent: 10,
+     used: 100, reset_ts: null, unit: 'permille'}]}}]};
+renderAntigravityPanel();
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert "refreshProviderQuota('antigravity', this)" in data["html"], \
+        f"卡上没有刷新按钮: {data['html'][:400]}"
+
+
+def test_refresh_provider_quota_posts_and_force_reload():
+    """刷新流程：POST /ui/api/benefits/refresh 带 provider → force 重拉渲染；
+    在飞期间再点被忽略（按钮转圈中，不给上游连环打）。"""
+    out = _run_js("""
+let POSTS = [], REFRESHES = 0, LOADS = [];
+globalThis.loadData = async (keys, manual) => { LOADS.push({keys, manual}); };
+globalThis.api = async (path, opts) => {
+  if (path === '/ui/api/benefits/refresh') {
+    REFRESHES++;
+    if (REFRESHES === 1)   // 第一发挂起：模拟上游 8s 重查
+      return new Promise(res => { globalThis.__REL = () => res({ok: true}); });
+    POSTS.push(JSON.parse((opts || {}).body || '{}'));
+    return {ok: true};
+  }
+  return globalThis.__RESPONSE;
+};
+const btn = {innerHTML: '↻', disabled: false, classList: {_s: new Set(),
+  add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+  contains(c) { return this._s.has(c); }}};
+const p1 = refreshProviderQuota('antigravity', btn);
+await new Promise(r => setTimeout(r, 5));
+const spinning = btn.classList.contains('spinning') && btn.disabled;
+await refreshProviderQuota('antigravity', btn);   // 在飞：应立即返回、不发第二发
+globalThis.__REL();
+await p1;
+await new Promise(r => setTimeout(r, 5));
+console.log(JSON.stringify({
+  refreshes: REFRESHES,
+  spinning: spinning,
+  restored: !btn.disabled,
+  loads: LOADS,
+}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["refreshes"] == 1, f"在飞期间再点不应发第二发: {data}"
+    assert data["spinning"], "等待期间按钮该转圈+禁用"
+    assert data["restored"], "完成后按钮该恢复"
+    assert data["loads"] == [{"keys": ["benefits"], "manual": True}], \
+        f"完成后要 force 重拉 benefits: {data['loads']}"

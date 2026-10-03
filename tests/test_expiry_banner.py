@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import time
+from unittest import mock
 
 import pytest
 
@@ -539,3 +540,69 @@ def test_quota_low_bool_remaining_rejected_numeric_string_accepted():
     ])
     assert [e["provider"] for e in out] == ["strs"]
     assert out[0]["remaining"] == 250.0
+
+
+# ---------------------------------------------------------------------------
+# 卡片级刷新后端：invalidate_quota + POST /ui/api/benefits/refresh
+# ---------------------------------------------------------------------------
+
+def test_invalidate_quota_deletes_provider_prefix_only():
+    """按前缀删（键带 epoch 的通道键名不固定），不波及别的通道和 checkin 状态。"""
+    from buddy_proxy.benefits import BenefitsManager
+
+    m = BenefitsManager.__new__(BenefitsManager)  # 跳过 init：只测缓存字典操作
+    m._cache = {
+        "quota:antigravity:a#0": (1.0, {}),
+        "quota:antigravity:a#0,b#1": (2.0, {}),
+        "quota:antigravitory-x": (2.5, {}),   # 前缀相似但不是同一通道
+        "quota:qoder": (3.0, {}),
+        "checkin:antigravity": (4.0, {}),
+    }
+    assert m.invalidate_quota("antigravity") == 2
+    assert "quota:antigravitory-x" in m._cache, "前缀相似的其他通道不能误伤"
+    assert "quota:qoder" in m._cache
+    assert "checkin:antigravity" in m._cache, "签到状态有自己的翻转判定，不动"
+    assert m.invalidate_quota("never-cached") == 0
+
+
+def test_refresh_api_invalidates_and_returns_snapshot(monkeypatch):
+    """POST /ui/api/benefits/refresh：作废目标通道缓存并返回新快照。"""
+    import os
+    from types import SimpleNamespace
+
+    from buddy_proxy import __main__ as m
+    from buddy_proxy.core import state as st
+    from fastapi.testclient import TestClient
+
+    calls: list[str] = []
+
+    class FakeManager:
+        def invalidate_quota(self, pid):
+            calls.append(pid)
+            return 1
+
+        async def snapshot(self):
+            return {"providers": [], "refreshed": True}
+
+    monkeypatch.setattr(st, "proxy_state", SimpleNamespace(benefits=FakeManager()))
+    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")  # TestClient 来源不是 127.0.0.1
+    r = TestClient(m.app).post("/ui/api/benefits/refresh", json={"provider": "antigravity"})
+    assert r.status_code == 200
+    assert r.json()["refreshed"] is True
+    assert calls == ["antigravity"]
+
+
+def test_refresh_api_requires_provider(monkeypatch):
+    """缺 provider 一律 400，不打上游。"""
+    from types import SimpleNamespace
+
+    from buddy_proxy import __main__ as m
+    from buddy_proxy.core import state as st
+    from fastapi.testclient import TestClient
+
+    boom = mock.MagicMock(side_effect=AssertionError("不该触发作废"))
+    monkeypatch.setattr(st, "proxy_state",
+                        SimpleNamespace(benefits=SimpleNamespace(invalidate_quota=boom)))
+    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+    r = TestClient(m.app).post("/ui/api/benefits/refresh", json={})
+    assert r.status_code == 400

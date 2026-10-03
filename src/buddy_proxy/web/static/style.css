@@ -338,6 +338,12 @@
   .qitem { margin: 9px 0; }
   .qitem .qhead { display: flex; justify-content: space-between; gap: 8px; font-size: 12px;
                   color: var(--muted); margin-bottom: 4px; }
+  /* label 侧弹性收缩（超长省略号，全文进 title），数字侧永不折行——
+     antigravity 面板的窄卡里「剩 1,000 / 1,000 · 已用 0%」曾断成两截，
+     label 里塞长解释又把日期挤到第二行，两层夹击观感稀碎 */
+  .qitem .qhead .qlabel { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                          white-space: nowrap; }
+  .qitem .qhead .mono { white-space: nowrap; }
   .qbar { background: var(--bg); height: 8px; border-radius: 4px; overflow: hidden; }
   /* 额度条目区：默认只铺没消耗完的，整块超过最大高度就裁掉，按钮展开。
      裁剪用 max-height + overflow:hidden —— 展开态由 JS 摘掉这个类，高度自然
@@ -373,6 +379,9 @@
              opacity: .35; transition: opacity .12s; }
   .pat-pkg:hover .ag-move { opacity: 1; }
   .ag-move button { padding: 1px 5px; line-height: 1.2; font-size: 10px; color: var(--muted); }
+  /* ↻ 刷新在飞：转圈提示「正在重查」（重查一轮最长 8s，不能让用户干瞪按钮） */
+  .ag-move button.spinning { display: inline-block; animation: qspin 1s linear infinite; }
+  @keyframes qspin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   /* 删除 ✕ 常红（危险样式）——小尺寸按钮里颜色是唯一的危险提示；
      悬停再有 button.danger:hover 的描边加重 */
   .ag-move button.danger { color: #e5534b; }

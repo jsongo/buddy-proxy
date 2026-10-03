@@ -380,3 +380,29 @@ def test_banner_low_quota_without_percent_says_insufficient():
     assert '余额告急 · 剩 0 credits' in out, out
     assert '剩 —' not in out, f"不能渲染成「剩 —%」: {out}"
     assert '告急<' in out, f"右列该有兜底文案: {out}"
+
+
+def test_quota_item_note_goes_to_title_not_visible_text():
+    """后端的解释性附注（note）走 title 悬浮提示——塞 label 可见文本里会把
+    窄卡的日期和数字挤折行（antigravity 面板截图骂丑的根因）。"""
+    out = _run_fn(("quotaItemHtml",), """
+console.log(quotaItemHtml({
+  label: 'AG #1 · Gemini 组', note: '组内共享 weekly + 5h 双池，取组内最紧水位',
+  used: null, total: 1000, remaining: 1000, percent: 0,
+  reset_ts: 1791056048, expire_ts: null, unit: 'permille',
+}));
+""")
+    assert '<span class="qlabel" title="（组内共享 weekly + 5h 双池，取组内最紧水位）">' in out, out
+    assert 'AG #1 · Gemini 组 · 10/04 03:34 重置' in out, out
+
+
+def test_quota_item_without_note_has_no_title():
+    """没有 note 的条目（trae/zcode 等绝大多数）不渲染空 title。"""
+    out = _run_fn(("quotaItemHtml",), """
+console.log(quotaItemHtml({
+  label: '5 小时窗口', used: 10, total: 100, remaining: 90, percent: 10,
+  reset_ts: 1792692336, expire_ts: null, unit: 'count',
+}));
+""")
+    assert 'qlabel' in out, out
+    assert 'title=' not in out, f"不该有空的 title 属性: {out}"

@@ -506,6 +506,20 @@ class BenefitsManager:
         self._cache[key] = (now, data)
         return data
 
+    def invalidate_quota(self, provider_id: str) -> int:
+        """作废某通道的额度缓存（管理页卡片「刷新」按钮的后端）。
+
+        键带 ``quota_epoch`` 的通道（antigravity：账号列表指纹）键名不固定，
+        所以按前缀删而不是精确删。返回删掉的条数（0 = 本来就没有缓存，下一轮
+        查询照样真打上游，语义不变）。只动 quota，不动 checkin 状态——签到
+        状态有自己的翻转判定（``_state_flipped``），不需要手动作废。
+        """
+        prefix = f"quota:{provider_id}"
+        stale = [k for k in self._cache if k == prefix or k.startswith(prefix + ":")]
+        for k in stale:
+            del self._cache[k]
+        return len(stale)
+
     # ------------------------------------------------------------------
     # 手动 / 自动打卡
     # ------------------------------------------------------------------

@@ -891,7 +891,10 @@ Antigravity 面板每张账号卡片悬停出 ▲▼（多账号时），点按�
 账号 id 顺序到 `POST /ui/api/antigravity/accounts/order`，priority 重写为
 0..n-1——列表不全/重复一律 400，added_at 保留不动；quota 缓存键带
 priority，重排后旧额度快照自动失效换新顺位；界面随即换位——写后刷新会等
-在飞请求落定再补发真重取，不被写前的旧响应顶回旧顺序）。主账号撞 429（额度）/ 403 /
+在飞请求落定再补发真重取，不被写前的旧响应顶回旧顺序）。每张账号卡右上角
+还有 **↻ 刷新**（kimi 面板同款）：`POST /ui/api/benefits/refresh` 作废本通道
+额度缓存立即重查（`benefits.invalidate_quota`，按键前缀删、不波及他通道与
+签到状态），不用等 5 分钟 TTL。主账号撞 429（额度）/ 403 /
 凭据失效时进内存冷却（429 尊重 `Retry-After`，默认 5 分钟；普通 403/凭据问题
 60 秒；**403「Verify your account to continue.」= Google 风控拉黑**——账号
 能登录但上游一律拒，按 6 小时档冷却，面板副标题标注「疑似拉黑」）并

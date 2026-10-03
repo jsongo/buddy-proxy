@@ -117,6 +117,27 @@ async def ui_benefits(request: Request):
     return await manager.snapshot()
 
 
+@app.post("/ui/api/benefits/refresh")
+async def ui_benefits_refresh(request: Request):
+    """单通道额度刷新（管理页卡片「↻」按钮）：作废该通道缓存后重查快照。
+
+    只作废目标通道的 quota 缓存，其余通道照走各自的缓存——按钮要的是
+    「这一家的新数据」，没必要把所有通道的上游都打一遍。返回整份新快照，
+    前端渲染省一次 GET。
+    """
+    _ensure_local(request)
+    state = get_state()
+    manager = getattr(state, "benefits", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail={"error": {"message": "额度功能未初始化"}})
+    body = await request.json()
+    provider_id = (body.get("provider") or "").strip()
+    if not provider_id:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 provider"}})
+    manager.invalidate_quota(provider_id)
+    return await manager.snapshot()
+
+
 @app.post("/ui/api/checkin")
 async def ui_checkin(request: Request):
     """立即打卡：向上游领取今日签到积分并记录历史。"""

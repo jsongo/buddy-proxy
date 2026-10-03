@@ -568,7 +568,11 @@ class AntigravityProvider(BaseProvider):
             for fut in futures:  # 按 failover 顺位收集，UI 顺序稳定
                 try:
                     its, ok = fut.result(timeout=max(deadline - time.monotonic(), 0.05))
-                except Exception:  # noqa: BLE001 - 超时/异常账号都算失败
+                except Exception as exc:  # noqa: BLE001 - 超时/异常账号都算失败
+                    # 不能静默：2026-10-03 重启后「2/2 个账号查询失败」30s 自愈，
+                    # 日志里却一片空白（except 吞了），用户问起无从查起。
+                    log.warning("antigravity quota 账号采集失败: %s: %s",
+                                type(exc).__name__, exc)
                     its, ok = [], False
                 if ok:
                     items.extend(its)
@@ -614,7 +618,9 @@ class AntigravityProvider(BaseProvider):
         """单账号额度查询：成功返回 (items, True)，失败 ([], False)。"""
         try:
             data = _run_sync(lambda: self._fetch_available_models(acct.id))
-        except Exception:  # noqa: BLE001 - quota 展示失败不影响主链路
+        except Exception as exc:  # noqa: BLE001 - quota 展示失败不影响主链路
+            log.warning("antigravity quota 账号 %s（#%s）查询失败: %s: %s",
+                        getattr(acct, "id", "?"), index, type(exc).__name__, exc)
             return [], False
         if not (isinstance(data, dict) and isinstance(data.get("models"), dict)):
             return [], False
@@ -647,7 +653,13 @@ class AntigravityProvider(BaseProvider):
             worst = min(f for f, _ in fracs)
             reset = min((t for _, t in fracs if t > 0), default=0)
             items.append({
-                "label": f"{prefix}{label}（组内共享 weekly + 5h 双池，取组内最紧水位）",
+                # 解释性文字不塞 label（曾把「组内共享 weekly + 5h 双池，取组内
+                # 最紧水位」整句拼进来，面板窄卡里 label 挤得日期换行、右侧
+                # 「已用 0%」也断行——用户截图骂丑）。挪 note 字段给前端渲染
+                # 成 title 悬浮提示。
+                "label": f"{prefix}{label}",
+                "note": "组内共享 weekly + 5h 双池，取组内最紧水位；"
+                        "上游只在用量逼近池上限时才下调读数",
                 "used": None,
                 "total": 1000,
                 "remaining": round(worst * 1000, 1),

@@ -330,7 +330,12 @@ function quotaItemHtml(it) {
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
   const bar = hasVolume && hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
-  return `<div class="qitem"><div class="qhead"><span>${esc(it.label)}${expire}${reset}</span>${nums}</div>${bar}</div>`;
+  // note：后端的解释性附注（如 antigravity 的「组内共享双池」说明）走 title
+  // 悬浮提示，不占版面——塞 label 里会把窄卡的日期和数字全挤折行
+  const note = typeof it.note === 'string' && it.note ? `（${esc(it.note)}）` : '';
+  return `<div class="qitem"><div class="qhead">` +
+    `<span class="qlabel"${note ? ` title="${note}"` : ''}>${esc(it.label)}${expire}${reset}</span>` +
+    `${nums}</div>${bar}</div>`;
 }
 
 // ---- 额度条目分组：只铺没消耗完的 + 限高折叠 ----
@@ -695,6 +700,28 @@ async function agDeleteAccount(id) {
   }
 }
 
+// 卡片级「↻ 刷新」：只作废本通道的额度缓存并重查（POST 返回新快照），其余
+// 通道不打扰。antigravity / kimi 卡片共用；按钮自己转圈，完成后走 force 刷新
+// 渲染（写后刷新竞态已在 ensureData 修掉，这里必然读到刚返回的新数据）。
+const QREFRESH = {};  // pid -> 在飞标记：转圈期间忽略再点（整页 30s 重建 innerHTML，
+                      // 按钮态挂 DOM 会被刷掉，和 QUOTA_FOLD 同理放模块级）
+async function refreshProviderQuota(pid, btn) {
+  if (QREFRESH[pid]) return;
+  QREFRESH[pid] = true;
+  const prev = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '⟳'; btn.classList.add('spinning'); }
+  try {
+    await api('/ui/api/benefits/refresh', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider: pid})});
+    await loadData(['benefits'], true);
+  } catch (e) { toast('刷新失败: ' + e.message, true); }
+  finally {
+    QREFRESH[pid] = false;
+    if (btn) { btn.disabled = false; btn.innerHTML = prev; btn.classList.remove('spinning'); }
+  }
+}
+
 function renderAntigravityPanel() {
   const panel = document.getElementById('antigravity-panel');
   if (!panel) return;
@@ -737,11 +764,14 @@ function renderAntigravityPanel() {
     const delBtn = acct
       ? `<button class="ghost danger" title="删除该账号（被 Google 拉黑/不再使用时）" ` +
         `onclick="agDeleteAccount('${acct.id}')">✕</button>` : '';
-    // ▲▼ 顺位 + ✕ 删除合成一个右上角按钮组（用户视角=「账号名那一行」的行尾）。
+    // ↻ 刷新：作废本通道额度缓存重查（quota 缓存 TTL 5 分钟，等不及就用它）
+    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
+      `onclick="refreshProviderQuota('antigravity', this)">↻</button>`;
+    // ▲▼ 顺位 + ✕ 删除 + ↻ 刷新合成一个右上角按钮组（用户视角=「账号名那一行」的行尾）。
     // 仍放块尾、绝对定位到右上角——loadAntigravityAccounts 的就地回填靠
     // 「名字元素的下一个兄弟是副标题」定位，中间插任何元素都会让它错乱。
-    const rowBtns = (moveBtns || delBtn)
-      ? `<span class="ag-move">${moveBtns}${delBtn}</span>` : '';
+    // 刷新按钮无条件渲染（单账号没有 ▲▼✕ 也能刷）。
+    const rowBtns = `<span class="ag-move">${refreshBtn}${moveBtns}${delBtn}</span>`;
     return `
     <div class="pat-pkg">
       <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</span>
