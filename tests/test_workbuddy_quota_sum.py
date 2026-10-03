@@ -6,12 +6,19 @@
     used_sum += used; total_sum += total; remain_sum += remain
     packs.append({...})
     if len(packs) >= 4:
-        break          # ← 顺手把合计也截断了
+        break          # ← 顺手把明细也截断了
 
-于是标题行的「积分余额合计」只加了前 4 个包，显示的剩余比账号实际少一截，
-而界面上的明细也刚好在断点处结束，用户完全看不出还有包没算进去。这就是
+于是界面上的明细刚好在断点处结束，用户完全看不出还有包没算进去。这就是
 「额度剩余不对」这一类问题的同一个病因（Qoder 那条是只取第一份），只是
 触发条件是「包多到超过展示上限」。
+
+2026-10-03 起改法：后端不再造一条「积分余额合计」明细假条目（用户指正
+「其它的都没有」——别的通道都没有这种汇总行），而是给 ``quota`` 打
+``sum_items: True`` 标记，合计交给前端标题行（``benefits.js`` 的
+``quotaHeadSum``）去加。所以这里守两件事：
+
+1. **明细全给、不许截断**（后端砍掉的条目前端无从得知，会被永久藏起来）；
+2. **声明 sum_items**（否则前端标题行退回「只取第一条」，合计就没了）。
 
 本机账号当前只有 3 个包，所以线上没发作——正因为如此才更需要测试守住。
 
@@ -49,61 +56,58 @@ def _quota_with(monkeypatch, packages):
     return cbp.CodeBuddyProvider().quota()
 
 
-def test_headline_sums_every_pack_and_lists_them_all(monkeypatch):
-    """合计必须覆盖**全部**包，明细也要**全给**——展示条数由前端折叠管。
+def test_lists_every_pack_and_declares_sum_items(monkeypatch):
+    """明细必须**全给**（6 个包就是 6 条），且声明 ``sum_items`` 让前端合计。
 
-    6 个包：订阅 4000 + 5 个 1000 的资源包，真实总额 9000。老实现把 break
-    写在累加循环里，合计只到 7000（少 2000）。
+    明细原先有一条 ``len(packs) < 4`` 的截断。它比数字错更隐蔽：被砍掉的包
+    **后端不再提、前端无从得知**，界面上彻底消失且没有任何迹象。2026-10-03
+    起改由前端折叠（只铺没花完的 + 超限收起 + 展开看全），后端如实给全部条目。
 
-    明细原先还有一条 ``len(packs) < 4`` 的截断。它比合计那个 bug 更隐蔽：
-    合计错了至少能靠数字对不上发现，而被砍掉的包**后端不再提、前端无从得知**，
-    界面上彻底消失且没有任何迹象。2026-10-03 起改由前端折叠（只铺没花完的 +
-    超限收起 + 展开看全），后端如实给全部条目。
+    合计由标题行负责：去掉「积分余额合计」假条目后，唯一能让 ``quotaHeadSum``
+    把各包加起来的开关就是 ``sum_items``——漏了它就退回「只取第一条」，
+    账号总量被显示成第一个包的量。
     """
     packages = [_pack("SUB", 4000, 0, 4000)]
     packages += [_pack(f"PK{i}", 1000, 100, 900) for i in range(1, 6)]
 
     out = _quota_with(monkeypatch, packages)
-    head = out["items"][0]
-    assert head["label"] == "积分余额合计"
-    assert head["total"] == 9000.0, f"合计被截断了: {head}"
-    assert head["used"] == 500.0, head
-    assert head["remaining"] == 8500.0, head
-    assert len(out["items"]) == 1 + 6, [i["label"] for i in out["items"]]
+    assert out.get("sum_items") is True, "没声明 sum_items，前端标题行不会合计"
+    assert len(out["items"]) == 6, [i["label"] for i in out["items"]]
+    assert all(i["label"] != "积分余额合计" for i in out["items"]), \
+        "不该再有汇总假条目（用户指正别的通道都没有）"
 
 
-def test_headline_matches_the_sum_of_the_listed_details_when_under_the_cap(monkeypatch):
-    """不超过上限时，合计与列出的明细必须对得上（正常路径别被改坏）。"""
+def test_listed_details_sum_to_the_real_total(monkeypatch):
+    """不超过上限时，明细自己的加总就是账号真实总量（前端标题行据此显示）。
+
+    这等价于原先那条「合计与明细对得上」的断言——只是现在合计是前端算的，
+    后端要保证的是**明细本身完整且逐条准确**。
+    """
     packages = [_pack("SUB", 4000, 4000, 0), _pack("PK1", 4600, 2800, 1800),
                 _pack("PK2", 5000, 4938.12, 61.88)]
 
     out = _quota_with(monkeypatch, packages)
-    head, rest = out["items"][0], out["items"][1:]
-    assert len(rest) == 3
-    assert head["total"] == round(sum(i["total"] for i in rest), 2)
-    assert head["remaining"] == round(sum(i["remaining"] for i in rest), 2)
-    assert head["used"] == round(sum(i["used"] for i in rest), 2)
+    items = out["items"]
+    assert len(items) == 3
+    assert sum(i["total"] for i in items) == 13600.0
+    assert round(sum(i["remaining"] for i in items), 2) == 1861.88
+    assert round(sum(i["used"] for i in items), 2) == 11738.12
 
 
-def test_missing_remain_is_derived_and_still_counted(monkeypatch):
-    """包不给 CycleRemainCapacity 时按 total-used 补，且照样计进合计。
-
-    补 remain 与累计 sum 是同一步的两件事，改循环时容易漏掉一边。
-    """
+def test_missing_remain_is_derived(monkeypatch):
+    """包不给 CycleRemainCapacity 时按 total-used 补，明细里也要是补出来的值。"""
     packages = [_pack("SUB", 4000, 1000), _pack("PK1", 1000, 250, 750)]
 
     out = _quota_with(monkeypatch, packages)
-    head = out["items"][0]
-    assert head["total"] == 5000.0, head
-    assert head["used"] == 1250.0, head
-    assert head["remaining"] == 3750.0, head          # (4000-1000) + 750
-    assert out["items"][1]["remaining"] == 3000.0     # 订阅那条补出来的
+    by_total = {i["total"]: i for i in out["items"]}
+    assert by_total[4000.0]["remaining"] == 3000.0     # 补出来的
+    assert by_total[1000.0]["remaining"] == 750.0
 
 
 def test_packs_without_a_total_are_skipped_entirely(monkeypatch):
-    """total 为空的包既不该列进明细，也不该混进合计。"""
+    """total 为空的包不该列进明细（用不了，也不参与合计）。"""
     packages = [_pack("SUB", 4000, 1000, 3000), {"PackageCode": "JUNK"}]
 
     out = _quota_with(monkeypatch, packages)
-    assert out["items"][0]["total"] == 4000.0, out["items"][0]
-    assert len(out["items"]) == 2, [i["label"] for i in out["items"]]
+    assert len(out["items"]) == 1, [i["label"] for i in out["items"]]
+    assert out["items"][0]["total"] == 4000.0

@@ -273,18 +273,24 @@ function quotaHeadSum(q) {
     const rem = usable.reduce((a, it) => a + Number(it.remaining), 0);
     const total = usable.reduce((a, it) => a + Number(it.total), 0);
     const label = usable.length > 1 ? `${usable.length} 项合计` : '';
+    const used = total > 0 ? ` · 已用 ${Math.round((1 - rem / total) * 100)}%` : '';
     return `<span class="mono" style="margin-left:auto" title="${esc(label || '剩余 / 总额')}">
       <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(rem)}</span>
-      <span class="muted">/ ${fmtNum(total)}</span>
+      <span class="muted">/ ${fmtNum(total)}${used}</span>
       ${label ? `<span class="muted" style="font-size:11px"> · ${esc(label)}</span>` : ''}</span>`;
   }
   // 未声明可合计：取第一条有数的条目。此时**列表顺序就是语义**——各家自己
   // 决定先展示哪一档（ZCode 是「窗口由小到大」，5 小时档在前；Trae 是总额度
-  // 在前；CodeBuddy 是它自己算好的合计在前），前端不再自作主张挑「最紧的」。
+  // 在前），前端不再自作主张挑「最紧的」。
   const head = usable[0];
-  return head ? `<span class="mono" style="margin-left:auto">
+  if (!head) return '';
+  // 「已用 N%」放在总量后面（用户 2026-10-03：参考明细行的写法）——各条
+  // 量纲能否相加无所谓，这是单条自己的比例，永远成立
+  const hRem = Number(head.remaining), hTot = Number(head.total);
+  const hUsed = hTot > 0 ? ` · 已用 ${Math.round((1 - hRem / hTot) * 100)}%` : '';
+  return `<span class="mono" style="margin-left:auto">
       <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(head.remaining)}</span>
-      <span class="muted">/ ${fmtNum(head.total)}</span></span>` : '';
+      <span class="muted">/ ${fmtNum(head.total)}${hUsed}</span></span>`;
 }
 
 function quotaItemHtml(it) {

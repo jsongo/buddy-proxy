@@ -406,3 +406,24 @@ console.log(quotaItemHtml({
 """)
     assert 'qlabel' in out, out
     assert 'title=' not in out, f"不该有空的 title 属性: {out}"
+
+
+def test_headline_shows_used_percent_beside_the_total():
+    """标题行在「剩 X / Y」后带「已用 N%」（用户 2026-10-03：参考明细行写法）。
+
+    可合计通道用合计算比例，单条通道用那一条算——都能算，因为是比例不是量纲。
+    """
+    out = _run_js("""console.log(JSON.stringify({
+      summed: quotaHeadSum({sum_items: true, items: [
+        {label: 'A', remaining: 1621, total: 2000},
+        {label: 'B', remaining: 100, total: 400},
+        {label: 'C', remaining: 1030, total: 2000}]}),
+      single: quotaHeadSum({items: [
+        {label: '5 小时窗口', remaining: 652, total: 2000}]}),
+      no_total: quotaHeadSum({items: [{label: 'X', remaining: 100, total: 0}]}),
+    }));""")
+    data = json.loads(out.strip().splitlines()[-1])
+    # 合计 2751/4400 → 已用 37.48% → 四舍五入 37%
+    assert '2,751' in data["summed"] and '已用 37%' in data["summed"], data["summed"]
+    assert '已用 67%' in data["single"], f"652/2000 → 67%: {data['single']}"
+    assert '已用' not in data["no_total"], f"total=0 不能算出比例: {data['no_total']}"
