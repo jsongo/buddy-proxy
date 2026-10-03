@@ -33,7 +33,7 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # + 豆包（CDP 直连）+ MiMo（小米桌面登录态）+ Qoder（千问/GLM/Kimi 等）+
 # Antigravity（Google 免费额度，Gemini 3.x / Claude / GPT-OSS）；
 # 可用 PROXY_EXTRA_ARGS 覆盖，或命令行追加参数（如 --default-provider codebuddy）
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --zcode --mimo --qoder --antigravity --default-provider trae}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --zcode --mimo --qoder --antigravity --kimi --default-provider trae}"
 
 # 优先使用项目自带 .venv（uv 已装好依赖），否则退回系统 python
 if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
@@ -246,7 +246,7 @@ cmd_login() {
     local extra=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|trae|zcode|doubao|mimo|qoder|gemini|gemini-cli|antigravity)
+            codebuddy|trae|zcode|doubao|mimo|qoder|gemini|gemini-cli|antigravity|kimi)
                 provider="$1" ;;
             workbuddy)
                 # workbuddy 是 codebuddy 的别名（登录模块内同样会归一）

@@ -187,6 +187,95 @@ async def ui_antigravity_accounts_delete(request: Request):
     return await asyncio.to_thread(failover.accounts_status)
 
 
+@app.get("/ui/api/kimi/accounts")
+async def ui_kimi_accounts(request: Request):
+    """kimi 各账号本地凭证/冷却状态（纯本地，不触网，不含秘密）。"""
+    _ensure_local(request)
+    try:
+        from ...kimi import failover
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "kimi 通道不可用"}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/kimi/accounts/order")
+async def ui_kimi_accounts_order(request: Request):
+    """调整 kimi 账号的 failover 顺位（管理页上移/下移按钮）。
+
+    与 antigravity 同款：提交完整账号 id 顺序列表，重写 index.json 的
+    priority；返回重排后的账号状态（与 GET 同构）。quota 缓存键带 priority
+    （``quota_epoch``），重排后旧额度快照自动失效。
+    """
+    _ensure_local(request)
+    try:
+        from ...kimi import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "kimi 通道不可用"}})
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 ids（账号 id 的完整顺序列表）"}})
+    try:
+        await asyncio.to_thread(creds.reorder_accounts, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    from ...kimi import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/kimi/accounts/delete")
+async def ui_kimi_accounts_delete(request: Request):
+    """删除一个 kimi 账号（索引条目 + cred 文件 + 冷却标记）。
+
+    refresh_token 作废/不再使用的账号从轮换里摘掉——留着每轮 failover 白打
+    一次上游。返回删除后的账号状态（与 GET 同构，前端直接重渲染）。
+    """
+    _ensure_local(request)
+    try:
+        from ...kimi import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "kimi 通道不可用"}})
+    body = await request.json()
+    aid = body.get("id")
+    if not isinstance(aid, str) or not aid.strip():
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（要删除的账号 id）"}})
+    aid = aid.strip()
+    removed = await asyncio.to_thread(creds.delete_account, aid)
+    if not removed:
+        raise HTTPException(status_code=404,
+                            detail={"error": {"message": f"账号不存在: {aid}"}})
+    from ...kimi import failover
+    await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/kimi/accounts/import")
+async def ui_kimi_accounts_import(request: Request):
+    """导入 kimi cli 导出的 token JSON（面板「导入账号」入口，CLI 共用）。
+
+    body ``{"payload": <str|dict>}``：粘贴的 JSON 文本或已解析对象。同
+    refresh_token 更新原账号（顺位不变），新的追加为备用号。补充信息
+    （/v1/me）失败不白费导入。返回导入后的账号状态（与 GET 同构）。
+    """
+    _ensure_local(request)
+    try:
+        from ...kimi import failover, login
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "kimi 通道不可用"}})
+    body = await request.json()
+    payload = body.get("payload")
+    if payload is None:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 payload（kimi cli 导出的 token JSON）"}})
+    try:
+        await asyncio.to_thread(login.import_cred_payload, payload)
+    except login.LoginError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.post("/ui/api/traepat/refresh-tokens")
 async def ui_traepat_refresh_tokens(request: Request):
     """立即补签 traepat 缺失/临期 Token；健康账号不强刷。"""

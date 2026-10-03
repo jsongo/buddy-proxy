@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "Kimi Code 通道模型表。id 是对外模型名，也是上游原 id（不改写，与 kimi cli 的 /v1/models 输出一致）。",
+    "4 个模型全是 thinking-only（上游关不掉思考，supports_thinking_type=only），思考力度经 extra body {\"thinking\":{\"type\":\"enabled\",\"effort\":...}} 控制；不传时上游默认 max。",
+    "2026-10-03 用真实账号从 /v1/models 实测核对。"
+  ],
+  "models": [
+    {"id": "kimi-for-coding", "description": "Kimi K2.8 Preview (1M)", "default": true, "verified": true},
+    {"id": "kimi-for-coding-highspeed", "description": "Kimi K2.7 Code Highspeed (256K)", "verified": true},
+    {"id": "k3", "description": "Kimi K3 (1M)", "verified": true},
+    {"id": "k3-256k", "description": "Kimi K3 (256K)", "verified": true}
+  ]
+}

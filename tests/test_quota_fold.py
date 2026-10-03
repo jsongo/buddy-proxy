@@ -401,14 +401,14 @@ console.log(JSON.stringify({clipped: box._cls.has('clipped'),
 # ---------------------------------------------------------------------------
 
 def test_all_three_panels_use_the_fold_helper():
-    """主列表 / PAT 面板 / antigravity 面板都要走 quotaItemsHtml。
+    """主列表 / PAT / antigravity / kimi 面板都要走 quotaItemsHtml。
 
     只改主列表的话，PAT 和 antigravity 还是老样子——用户看到的仍是「其它通道
-    没变」，等于没修。"""
+    没变」，等于没修。kimi 面板（复用 antigravity 的分组结构）也要跟上。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
     assert "quotaItemsHtml(q.items || [], p.id)" in text, "主额度列表没接上折叠"
     calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", text)
-    assert sorted(calls) == ["ag", "pat"], f"PAT/AG 面板没接上折叠: {calls}"
+    assert sorted(calls) == ["ag", "kimi", "pat"], f"各面板没接上折叠: {calls}"
 
 
 def test_render_benefits_syncs_after_rebuild():
