@@ -52,13 +52,21 @@ copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影
   0..n-1，added_at 保留（登录事实不动）。quota 缓存键带 priority
   （`quota_epoch`），重排后旧额度快照自动失效、下一轮即换新顺位。
 - **换号条件**：HTTP 429（额度）/ 403 / 401 强刷后仍拒 / 凭据层 AuthError /
-  缺 project_id → 冷却当前账号换下一个；业务 4xx（模型名等）原样透传不换号。
-- **冷却时长**：429 尊重 `Retry-After`（钳 1s~7d），默认 5 分钟；403/凭据
-  问题 60 秒；403 文案是「Verify your account to continue.」= Google 风控
+  缺 project_id / 上游超时或网络错（`_UpstreamUnavailable`，两 endpoint 都
+  拿不到 HTTP 响应）→ 冷却当前账号换下一个；业务 4xx（模型名等）原样透传
+  不换号。
+- **冷却时长**：429 尊重 `Retry-After`（钳 1s~7d），默认 5 分钟；403/凭据/
+  超时 60 秒；403 文案是「Verify your account to continue.」= Google 风控
   拉黑（能登录但上游一律拒），6 小时档 + `blacklist` 类别（面板标「疑似
   拉黑」，管理页 ✕ 删除）。只放内存不落盘——重启清零，代价只是每账号重探
   一次。全账号冷却时转发直接 429（通道级快速失败），全部试败时报错带
   `cooldown_report()` 逐账号画像（谁在冷却剩多久/疑似拉黑）。
+- **超时分级**（2026-10-03 实测驱动）：流式 read 90s（相邻两次读上限——
+  首事件前卡死在闸门抛 TimeoutException、`_Gate.timed_out` 短冷却换号；流中
+  卡死在转换器断）；非流式 read 120s（一次读拿全响应=总上限，实测成功最长
+  16s）；connect 15s。旧值 600s 曾让挂死调用白等 10 分钟（5 单 504 实录）。
+  failover 循环带 180s 尝试期预算（`_ATTEMPT_DEADLINE_S`，首个账号不受挡）：
+  防超时换号把 N 个账号串成分钟级等待。
 - **删除账号**：`POST /ui/api/antigravity/accounts/delete`（管理页 ✕，
   confirm 确认）→ `delete_account`（索引 + cred 文件）+ `clear_cooldown`
   （防内存残留）。

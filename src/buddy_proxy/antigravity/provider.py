@@ -50,7 +50,21 @@ ENDPOINTS = (
     "https://daily-cloudcode-pa.googleapis.com",
     "https://cloudcode-pa.googleapis.com",
 )
-_TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=15.0)
+#: 流式：read 是「相邻两次读」的上限——首事件前（闸门在等）与流中卡死都按它断。
+#: 实测（2026-10-03，266 条 gemini-3.8-flash）：首事件 p50 4.8s / p90 13s /
+#: p99 57s（额度风暴窗口上游排队的怪胎，dur=240s 只吐 7 个 chunk），90s
+#: 放过正常慢、掐掉排队怪胎换号重试。旧值 600s：一次挂死白等 10 分钟。
+_TIMEOUT_STREAM = httpx.Timeout(connect=15.0, read=90.0, write=60.0, pool=15.0)
+#: 非流式：一次 read 拿到全部响应 = 总时长上限。实测成功请求最长 16s，
+#: 120s 已 7 倍余量；客户端（claude code 的小工具调用）挂死时 504 换号
+#: 而不是干等 600s。
+_TIMEOUT_NONSTREAM = httpx.Timeout(connect=15.0, read=120.0, write=60.0, pool=15.0)
+#: 兼容旧名（health/一次性 client 等处仍引用）。
+_TIMEOUT = _TIMEOUT_NONSTREAM
+#: failover 循环的**尝试期**总预算（从进循环到每次尝试开始前检查）：超时
+#: 换号后最坏 90s/账号，预算防 3 个账号串成 4 分半。只挡「还没开始试」的
+#: 尝试——已提交的流想跑多久跑多久（流中卡死由 read 超时管）。
+_ATTEMPT_DEADLINE_S = 180.0
 #: 流式首事件闸门的缓冲行上限（防异常上游无界攒内存，见 _gate_first_event）。
 _GATE_BUFFER_MAX_LINES = 256
 
@@ -125,6 +139,19 @@ def _upstream_error_response(resp: httpx.Response) -> JSONResponse:
     except Exception:
         payload = {"error": {"message": resp.text[:500], "type": "upstream_error"}}
     return JSONResponse(status_code=resp.status_code, content=payload)
+
+
+class _UpstreamUnavailable(RuntimeError):
+    """两个 endpoint 都没给出 HTTP 响应（超时/网络错）。
+
+    过去这里直接抛 HTTPException(504/502)，会**打断整个账号 failover 循环**
+    ——客户端按 read 超时干等后收一只写死状态的错误，哪怕后面还有两个健康
+    账号。改为抛本异常由 forward 循环捕获：短冷却当前账号、换下一个重试。
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
 def _iso_to_epoch(value: Any) -> float:
@@ -205,10 +232,20 @@ class AntigravityProvider(BaseProvider):
         meta = ACCOUNT_META.get()  # metrics 账号归属（_instrument 放入的 dict）
         client = await self._get_client()
         method = "streamGenerateContent" if stream else "generateContent"
+        started = time.monotonic()
+        tried = 0
         last_status = 0
         last_detail = ""
 
         for acct in accounts:
+            # 尝试期预算：前面账号的超时/失败把时间烧完后不再开新尝试，
+            # 直接带已有错误收场（防 N 个账号 × 90s 串成 分钟级等待）。
+            # 首个账号不受预算挡（预算是给「换号重试」踩刹车的）。
+            if tried and time.monotonic() - started > _ATTEMPT_DEADLINE_S:
+                last_status = last_status or 504
+                last_detail = last_detail or "尝试预算用尽（上游持续无响应）"
+                break
+            tried += 1
             # token 刷新是同步 urllib；丢线程池避免卡事件循环。
             # token 与 cred 同源返回：project_id 从同一份 cred 取，多账号不串号。
             try:
@@ -226,10 +263,19 @@ class AntigravityProvider(BaseProvider):
             upstream_body = chat_to_antigravity_request(
                 body, project_id=project_id, model=upstream_model
             )
-            resp = await self._send_with_fallback(
-                client, method, upstream_body,
-                auth_headers(access_token, upstream_model, stream), stream,
-            )
+            try:
+                resp = await self._send_with_fallback(
+                    client, method, upstream_body,
+                    auth_headers(access_token, upstream_model, stream), stream,
+                )
+            except _UpstreamUnavailable as exc:
+                # 两个 endpoint 都没给出 HTTP 响应（超时/网络错）：过去直接 504
+                # 打断整个 failover 循环（客户端干等满 read 超时）——现在换号重试。
+                # 短冷却防「挂死账号每轮都被首选」；机器级断网时全账号一起进
+                # 60s 冷却 = 通道级快速失败，到点自动重探。
+                last_status, last_detail = 504, exc.message
+                failover.mark_cooldown(acct.id, reason=exc.message)
+                continue
 
             # 401：token 被上游拒（比如文件被手工改过）——强刷一次重试同账号；
             # 仍拒说明凭据层面失效，冷却换号
@@ -241,10 +287,15 @@ class AntigravityProvider(BaseProvider):
                 except AuthError as exc:
                     failover.mark_cooldown(acct.id, reason=f"强刷失败: {exc}")
                     continue
-                resp = await self._send_with_fallback(
-                    client, method, upstream_body,
-                    auth_headers(access_token, upstream_model, stream), stream,
-                )
+                try:
+                    resp = await self._send_with_fallback(
+                        client, method, upstream_body,
+                        auth_headers(access_token, upstream_model, stream), stream,
+                    )
+                except _UpstreamUnavailable as exc:
+                    last_status, last_detail = 504, exc.message
+                    failover.mark_cooldown(acct.id, reason=exc.message)
+                    continue
                 if resp.status_code == 401:
                     last_status, last_detail = 401, await _error_detail(resp, stream)
                     await _drain_and_close(resp, stream)
@@ -288,7 +339,12 @@ class AntigravityProvider(BaseProvider):
                 await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
             if gate.eof:
-                # 语义事件之前断流/空流：没向客户端吐过字节，换下一个账号
+                # 语义事件之前断流/空流：没向客户端吐过字节，换下一个账号。
+                # 读超时（首事件前卡死）额外短冷却——挂死账号别每轮都被首选；
+                # 干净 EOF 不冷却（可能只是网络抖动，与 trae/model_order 同思路）。
+                if gate.timed_out:
+                    last_status, last_detail = 504, "首事件前读超时"
+                    failover.mark_cooldown(acct.id, reason="首事件前读超时")
                 await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
 
@@ -329,11 +385,13 @@ class AntigravityProvider(BaseProvider):
         report = failover.cooldown_report()
         tail = f"最后错误 HTTP {last_status or 'n/a'}{(': ' + last_detail) if last_detail else ''}"
         raise HTTPException(
-            status_code=last_status if last_status in (401, 403, 429) else 502,
+            status_code=last_status if last_status in (401, 403, 429, 504) else 502,
             detail={"error": {
                 "message": (f"antigravity 所有账号均不可用（{report}；{tail}）" if report
                             else f"antigravity 所有账号均不可用（{tail}）"),
-                "type": "rate_limit_error" if last_status in (403, 429) else "bad_gateway",
+                "type": ("timeout" if last_status == 504
+                         else "rate_limit_error" if last_status in (403, 429)
+                         else "bad_gateway"),
             }},
         )
 
@@ -397,6 +455,10 @@ class AntigravityProvider(BaseProvider):
                 if inner.get("candidates"):
                     return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
                 # 仅 usageMetadata 等非语义事件：继续等下一条
+        except httpx.TimeoutException:
+            # 首事件前读超时（上游排队/挂死）：与 EOF 同为「没出字节可换号」，
+            # 但带 timed_out 标记让调用方短冷却——挂死账号别每轮都被首选。
+            return _Gate(resp=resp, eof=True, timed_out=True, lines=lines)
         except httpx.HTTPError:
             return _Gate(resp=resp, eof=True, lines=lines)
         return _Gate(resp=resp, eof=True, lines=lines)  # 语义事件前 EOF：假成功，换号
@@ -411,29 +473,32 @@ class AntigravityProvider(BaseProvider):
         headers: dict[str, str],
         stream: bool,
     ) -> httpx.Response:
-        """请求级 fallback：daily 失败（网络/5xx/404）换 prod；业务 4xx 不换。"""
+        """请求级 fallback：daily 失败（网络/超时/5xx/404）换 prod；业务 4xx 不换。
+
+        超时按请求形态分级（``_TIMEOUT_STREAM``/``_TIMEOUT_NONSTREAM``），
+        全部 endpoint 都拿不到 HTTP 响应时抛 :class:`_UpstreamUnavailable`
+        让账号循环换号——不在这里直接对客户端收场。
+        """
         last: httpx.Response | None = None
+        timeout = _TIMEOUT_STREAM if stream else _TIMEOUT_NONSTREAM
         for i, base in enumerate(ENDPOINTS):
             url = f"{base}/v1internal:{method}"
             if stream:
                 url += "?alt=sse"
-            req = client.build_request("POST", url, json=body, headers=headers)
+            req = client.build_request("POST", url, json=body, headers=headers,
+                                       timeout=timeout)
             try:
                 resp = await client.send(req, stream=stream)
             except httpx.TimeoutException as exc:
                 log.warning("antigravity upstream timeout (%s): %s", base, exc)
-                raise HTTPException(
-                    status_code=504,
-                    detail={"error": {"message": "antigravity upstream timeout", "type": "timeout"}},
-                ) from exc
+                if i + 1 < len(ENDPOINTS):
+                    continue
+                raise _UpstreamUnavailable(f"upstream timeout（{base.rsplit('//', 1)[-1].split('.')[0]}）") from exc
             except httpx.HTTPError as exc:
                 log.warning("antigravity upstream error (%s): %s", base, exc)
                 if i + 1 < len(ENDPOINTS):
                     continue
-                raise HTTPException(
-                    status_code=502,
-                    detail={"error": {"message": "antigravity upstream error", "type": "bad_gateway"}},
-                ) from exc
+                raise _UpstreamUnavailable(f"upstream error: {exc}") from exc
             # 5xx/404：端点侧问题，试下一个；其余（401/429/4xx）直接返回
             if resp.status_code in (404, 500, 502, 503, 504) and i + 1 < len(ENDPOINTS):
                 if stream:
@@ -652,6 +717,7 @@ class _Gate:
     code: int = 0
     message: str = ""
     eof: bool = False  # 语义事件前断流/EOF：假成功，换号
+    timed_out: bool = False  # eof 的细分：读超时（区别于干净 EOF，调用方要短冷却）
 
 
 class _ReplayStream:

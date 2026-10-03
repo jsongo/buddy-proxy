@@ -61,6 +61,17 @@ class _ChunkedBody(httpx.AsyncByteStream):
             yield chunk
 
 
+class _RaisingStream(httpx.AsyncByteStream):
+    """迭代即抛超时的流：模拟「响应头已到、首事件前卡死」（闸门路径超时）。"""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def __aiter__(self):
+        raise self._exc
+        yield b""  # pragma: no cover - 仅为了成为 async generator
+
+
 class _Upstream:
     """按 Bearer token（=账号）路由 canned 响应，记录调用顺序。"""
 
@@ -72,6 +83,8 @@ class _Upstream:
         tok = request.headers.get("authorization", "").removeprefix("Bearer ")
         self.calls.append(tok)
         status, payload, headers = self.plan[tok]
+        if isinstance(payload, Exception):
+            raise payload  # 超时/网络错：client.send 或闸门迭代时抛出
         if isinstance(payload, httpx.AsyncByteStream):
             return httpx.Response(status, stream=payload, headers=headers)
         if isinstance(payload, (bytes, str)):
@@ -282,6 +295,99 @@ def test_account_meta_records_selected_account(two_accounts, monkeypatch):
         ACCOUNT_META.reset(token)
     assert resp.status_code == 200
     assert meta["account"] == "v@y.com"  # metrics 落库的是实际服务的账号
+
+
+# ---------------------------------------------------------------------------
+# 上游超时：换号不再被打断 + 尝试期预算（2026-10-03 实测 600s read 挂死 5 单）
+# ---------------------------------------------------------------------------
+
+def test_nonstream_timeout_switches_account_and_cools(two_accounts, monkeypatch):
+    """非流式超时：过去直接 504 打断 failover（客户端干等满 read 超时），
+    现在短冷却换号重试。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (0, httpx.ReadTimeout("read timed out"), {})
+    up.plan["tok-v@y.com"] = (200, _gemini_ok(), {})
+    _patch_token(monkeypatch)
+
+    resp = _run(provider)
+    assert resp.status_code == 200 and b"pong" in resp.body
+    # u 在两个 endpoint（daily/prod）上各超时一次才判不可用，然后换 v
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com", "tok-v@y.com"]
+    left, kind = failover.cooldown_left("u@x.com")
+    assert 0 < left <= failover._ACCOUNT_COOLDOWN_S and kind == "account"
+
+
+def test_timeout_on_all_accounts_maps_504_with_report(two_accounts, monkeypatch):
+    """全部账号超时：504 + 逐账号画像（不再是打断循环的一只 504）。"""
+    from fastapi import HTTPException
+
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (0, httpx.ReadTimeout("slow"), {})
+    up.plan["tok-v@y.com"] = (0, httpx.ReadTimeout("slow"), {})
+    _patch_token(monkeypatch)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(provider)
+    assert ei.value.status_code == 504
+    msg = ei.value.detail["error"]["message"]
+    assert "所有账号均不可用" in msg and "504" in msg
+    assert ei.value.detail["error"]["type"] == "timeout"
+    assert failover.cooldown_left("u@x.com")[0] > 0  # 两个账号都进了短冷却
+    assert failover.cooldown_left("v@y.com")[0] > 0
+
+
+def test_stream_gate_read_timeout_switches_and_cools(two_accounts, monkeypatch):
+    """流式首事件前卡死（头已到、读超时）：eof 换号 + timed_out 短冷却。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, _RaisingStream(httpx.ReadTimeout("stalled")), {})
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    sr = _run(provider, stream=True)
+    assert sr.status_code == 200
+    assert "pong" in _stream_text(sr)
+    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+    left, kind = failover.cooldown_left("u@x.com")
+    assert 0 < left <= failover._ACCOUNT_COOLDOWN_S and kind == "account"
+
+
+def test_stream_clean_eof_does_not_cool(two_accounts, monkeypatch):
+    """干净 EOF（假成功）换号但**不**冷却——只有读超时才冷却（既有语义保持）。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, b"", {})
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    sr = _run(provider, stream=True)
+    assert sr.status_code == 200
+    assert failover.cooldown_left("u@x.com") == (0.0, "")
+
+
+def test_attempt_deadline_caps_chain(two_accounts, monkeypatch):
+    """尝试期预算：前面的账号把时间烧完后不再开新尝试。"""
+    import buddy_proxy.antigravity.provider as prov
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (0, httpx.ReadTimeout("slow"), {})
+    up.plan["tok-v@y.com"] = (200, _gemini_ok(), {})
+    _patch_token(monkeypatch)
+    monkeypatch.setattr(prov, "_ATTEMPT_DEADLINE_S", -1.0)  # 立刻超预算
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as ei:
+        _run(provider)
+    assert ei.value.status_code == 504
+    # 首个账号不受预算挡（打满两个 endpoint），第二个账号被预算拦下
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com"], "预算用尽后不得再开第二个账号的尝试"
 
 
 # ---------------------------------------------------------------------------
