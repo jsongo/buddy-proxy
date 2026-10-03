@@ -278,7 +278,9 @@ class GeminiProvider(BaseProvider):
                     "total": None,
                     "remaining": None,
                     "percent": None,
-                    "reset_ts": None,
+                    "reset_ts": None,   # 免费层按天/分钟限流，与权益到期无关
+                    "expire_ts": None,
+                    "unit": None,
                 }
             ],
             "level": str(cred.get("tier_name") or cred.get("tier") or "free-tier"),

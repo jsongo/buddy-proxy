@@ -199,7 +199,10 @@ def _record_standard_pool_4031(profile: PatProfile, extra: Any) -> None:
             "total": round(float(quota), 2),
             "remaining": round(float(quota) - float(used), 2),
             "percent": round(float(used) / float(quota) * 100),
+            # ``next_flash`` 是池的重置时刻（真·重置），不是权益到期
             "reset_ts": int(reset) if reset else None,
+            "expire_ts": None,
+            "unit": "credit",
             "source": "4031",
         }
 

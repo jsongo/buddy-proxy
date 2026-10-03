@@ -210,7 +210,13 @@ class CodeBuddyProvider(BaseProvider):
                     "label": "订阅套餐" if p.get("PackageCode") == sub_code else "资源包",
                     "used": used, "total": total, "remaining": remain,
                     "percent": round(used / total * 100) if total else 0,
+                    # 上游 ``Packages[]`` 只有周期容量字段（CycleUsed/Total/
+                    # Remain/CapacityUnit），**没有任何日期字段**（2026-10-03
+                    # 实测），所以到期/重置都无从谈起，恒 None——本通道不会
+                    # 出现在到期横幅里，除非上游换接口。
                     "reset_ts": None,
+                    "expire_ts": None,
+                    "unit": "credit",
                 })
         items = [{
             "label": "积分余额合计",
@@ -218,6 +224,8 @@ class CodeBuddyProvider(BaseProvider):
             "remaining": round(remain_sum, 2),
             "percent": round(used_sum / total_sum * 100) if total_sum else 0,
             "reset_ts": None,
+            "expire_ts": None,
+            "unit": "credit",
         }]
         items.extend(packs)
         return {"items": items, "level": "pro" if data.get("IsPaidUser") else "free"}

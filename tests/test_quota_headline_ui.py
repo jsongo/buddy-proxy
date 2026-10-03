@@ -168,3 +168,147 @@ def test_the_render_path_uses_the_helper_not_a_bare_find():
     assert "quotaHeadSum(q)" in render, "渲染处没有调用 quotaHeadSum"
     assert ".find(it => it.remaining" not in render, \
         "渲染处仍留着直接 find 第一条的写法（helper 没接上）"
+
+
+# ---------------------------------------------------------------------------
+# 到期告警横幅（2026-10-03）
+# ---------------------------------------------------------------------------
+
+#: 横幅渲染要碰 DOM（读 #expirybar、写 className/innerHTML），这里用最小桩
+#: 顶上。桩把每次写入记下来，跑完 console.log 出去供断言——这样测的是
+#: 「renderExpiryBanner 到底往元素上写了什么」，而不是「函数内部长什么样」。
+_DOM_STUB = """
+globalThis.__el = {className: '', innerHTML: '', open: false};
+globalThis.__writes = [];
+globalThis.document = {getElementById: id => id === 'expirybar' ? globalThis.__el : null};
+function __snap() {
+  globalThis.__writes.push({className: globalThis.__el.className,
+                            innerHTML: globalThis.__el.innerHTML});
+  return globalThis.__el.className + '\\u0000' + globalThis.__el.innerHTML;
+}
+"""
+
+_EXPIRY_FNS = ("fmtExpireDate", "fmtDaysLeft", "renderExpiryBanner")
+
+
+def _extract_fn(text: str, name: str) -> str:
+    match = re.search(rf"^function {name}\(.*?\n\}}\n", text, re.S | re.M)
+    assert match, f"benefits.js 里找不到 {name}（被改名/挪走了？）"
+    return match.group(0)
+
+
+def _run_fn(names: tuple[str, ...], body: str) -> str:
+    """抽若干顶层函数在 node 里跑一段脚本（附 DOM 桩）。"""
+    text = BENEFITS_JS.read_text(encoding="utf-8")
+    src = "".join(_extract_fn(text, n) for n in names)
+    # 横幅文案引用的天数常量也一并带上（改后端阈值时前端要同步，这条从源码
+    # 抓而不是在桩里另写一份死值，否则改漏了测试还是绿的）
+    const = re.search(r"^const EXPIRY_WARN_DAYS = \d+;$", text, re.M)
+    assert const, "benefits.js 里找不到 EXPIRY_WARN_DAYS"
+    src = const.group(0) + "\n" + src
+    stub = """
+globalThis.esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+globalThis.fmtNum = n => {
+  if (n == null) return '—';
+  const x = Number(n);
+  if (!isFinite(x)) return String(n);
+  return x >= 100 ? Math.round(x).toLocaleString() : String(Math.round(x * 10) / 10);
+};
+"""
+    proc = subprocess.run(
+        ["node", "-e", stub + _DOM_STUB + src + "\n" + body],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"node 执行失败:\n{proc.stderr}"
+    return proc.stdout
+
+
+def _render_banner(benefits_js: str) -> str:
+    return _run_fn(_EXPIRY_FNS, f"""
+globalThis.BENEFITS = {benefits_js};
+renderExpiryBanner();
+console.log(__snap());
+""")
+
+
+def test_expiry_banner_renders_summary_and_rows():
+    """有告警时：横幅显示、汇总行说清有几项、明细列出通道/名称/日期/天数。"""
+    out = _render_banner("""{
+      expiring: [
+        {provider: 'trae', provider_name: 'trae', label: '会员 Pro 连续包月',
+         expire_ts: 1792692336, days_left: 1.2, remaining: 4000, unit: 'credit'},
+        {provider: 'qoder', provider_name: 'qoder', label: '加油包',
+         expire_ts: 1793212321, days_left: -2.0, remaining: 950, unit: 'credit'},
+      ],
+    }""")
+    assert 'expirybar show expired' in out, f"含已过期项该转红: {out}"
+    assert '有 2 项权益已过期或即将到期' in out, out
+    assert '会员 Pro 连续包月' in out and '加油包' in out, out
+    assert '剩 1 天' in out, out
+    assert '已过期 2 天' in out, out
+    assert '剩 4,000' in out, f"积分类该带余量: {out}"
+
+
+def test_expiry_banner_warns_without_expired_items():
+    """都是临期、没有已过期时用黄档（不带 expired 类），文案也不说「已过期」。"""
+    out = _render_banner("""{
+      expiring: [{provider: 'trae', provider_name: 'trae', label: '签到奖励',
+                  expire_ts: 1792692336, days_left: 2.0, remaining: 500, unit: 'credit'}],
+    }""")
+    assert 'expirybar show' in out and 'expired' not in out, f"该是黄档: {out}"
+    assert '将在 7 天内到期' in out, out
+
+
+def test_expiry_banner_hides_when_no_alerts():
+    """expiring 为空 → 横幅隐藏且清空内容（不留上一次的残留）。"""
+    out = _render_banner("{expiring: []}")
+    assert 'expirybar' in out and 'show' not in out, f"该隐藏: {out}"
+    assert '⏳' not in out, f"内容该清空（上次的告警不能留在页面上）: {out}"
+
+
+def test_expiry_banner_survives_missing_field():
+    """响应里没有 expiring 字段时不能炸（前端先于后端更新的场景）。"""
+    out = _render_banner("{}")
+    assert 'show' not in out, out
+
+
+def test_expiry_banner_non_credit_hides_amount():
+    """非积分类不铺余量：mimo 的 19.5 是「还剩几天」，跟 300 积分门槛无关，
+    铺出来会让人以为那是积分。"""
+    out = _render_banner("""{
+      expiring: [{provider: 'mimo', provider_name: 'mimo',
+                  label: '套餐有效期（天）', expire_ts: 1792692336,
+                  days_left: 3.0, remaining: 19.5, unit: 'day'}],
+    }""")
+    assert '套餐有效期（天）' in out, out
+    assert '19.5' not in out, f"非积分类不该显示余量: {out}"
+
+
+def test_quota_item_renders_expire_not_reset():
+    """条目上的日期后缀要分「到期」与「重置」，不能一律说成重置。
+
+    这条盯的正是用户报的问题：Qoder 的 ``expiresAt`` 被塞进 ``reset_ts``，
+    界面上显示成「10-30 重置」，用户以为到期日没被记录。
+    """
+    out = _run_fn(("quotaItemHtml",), """
+console.log(quotaItemHtml({
+  label: '订阅额度', used: 100, total: 2000, remaining: 1900, percent: 5,
+  reset_ts: null, expire_ts: 1793289600, unit: 'credit',
+}) + '|' + quotaItemHtml({
+  label: '5 小时窗口', used: 10, total: 100, remaining: 90, percent: 10,
+  reset_ts: 1792692336, expire_ts: null, unit: 'count',
+}));
+""")
+    expire_part, reset_part = out.split('|')
+    assert '到期' in expire_part and '重置' not in expire_part, expire_part
+    assert '重置' in reset_part and '到期' not in reset_part, reset_part
+
+
+def test_render_benefits_calls_the_banner():
+    """renderBenefits 必须真的调 renderExpiryBanner——helper 写得再对，
+    没接上去界面就还是老样子（横幅永远不出现）。"""
+    text = BENEFITS_JS.read_text(encoding="utf-8")
+    body = text[text.index("function renderBenefits()"):]
+    body = body[:body.index("\n}\n")]
+    assert "renderExpiryBanner()" in body, "renderBenefits 没调用横幅渲染"

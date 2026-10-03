@@ -166,25 +166,59 @@ class TraeProvider(BaseProvider):
             if isinstance(total, (int, float)) and isinstance(consumed, (int, float)):
                 remaining = round(total - consumed, 2)
             items.append({"label": "总额度", "used": consumed, "total": total,
-                          "remaining": remaining, "percent": percent, "reset_ts": None})
-        # 权益包列表可能带几十条历史"签到奖励"空记录，只保留有到期时间的前几个
+                          "remaining": remaining, "percent": percent,
+                          # 总额度是所有包的合计，没有单一到期日——到期告警
+                          # 由下面各权益包自己承担，合计行不参与
+                          "reset_ts": None, "expire_ts": None, "unit": "credit"})
+        # 权益包：每条都有额度与到期时间，全部展示（各条**不能相加**——它们
+        # 是上面「总额度」的明细，加了就重复计算，故本通道不给 sum_items）。
         packs: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        seen: set[tuple] = set()
         for p in data.get("user_entitlement_pack_list", []):
             eb = p.get("entitlement_base_info") or {}
-            if not eb.get("end_time"):
+            end_time = eb.get("end_time")
+            if not end_time:
                 continue
             desc = p.get("display_desc") or "权益包"
-            if desc in seen:
+            limit = (eb.get("quota") or {}).get("credits_limit")
+            # 去重按「名字 + 权益 id + 到期日」三元组，只防上游返回重复行。
+            # **不能**只按名字去重：那样 25 条「签到奖励」会被合并成 1 条，
+            # 12 条尚未消费的额度直接从界面上消失（2026-10-03 实测：升级前
+            # 只显示前 3 条，其余 24 个包全被 `desc in seen` 加 `len>=3` 截掉）。
+            key = (desc, str(eb.get("entitlement_id") or ""), int(end_time))
+            if key in seen:
                 continue
-            seen.add(desc)
+            seen.add(key)
+            used: float | None = None
+            limit_v: float | None = None
+            if isinstance(limit, (int, float)) and limit > 0:
+                limit_v = float(limit)
+                amount = (p.get("usage") or {}).get("credits_amount")
+                # ``credits_amount`` 是**已用**不是剩余——2026-10-03 实测交叉
+                # 校验：Σlimit=9500.0、Σamount=6257.1772，Σlimit-Σamount 与
+                # 接口自报 remaining（3242.82）差 0.00，而「amount=剩余」的
+                # 假设差 3014.36。算反会把「剩 3242」显示成「剩 6257」。
+                #
+                # ``usage`` 缺失按 0 已用算（= 没花），**不是**「未知」：有
+                # 记录的包已用合计 6257.1772 恰好等于 usage_summary 的
+                # consumed_amount，且消耗严格按到期日 FIFO（先扣 4000 的会员
+                # 包、再扣最早到期的签到包），未出现的包都是到期更晚、还没轮到
+                # 的——真·满额。这与 ``trae/pat/quota.py`` 的相反先例不是一回
+                # 事：那里是网关偶发只回半拉数据（包容量回来了、用量没回来），
+                # 按 0 算会把未知说成满血；这里是接口语义，值为 0 就是没消费。
+                used = round(float(amount), 2) if isinstance(amount, (int, float)) else 0.0
             packs.append({
                 "label": desc,
-                "used": None, "total": None, "percent": None,
-                "reset_ts": eb.get("end_time"),
+                "used": used,
+                "total": round(limit_v, 2) if limit_v else None,
+                "percent": round(used / limit_v * 100) if used is not None and limit_v else None,
+                "remaining": round(limit_v - used, 2) if used is not None and limit_v else None,
+                # 权益包只有到期、没有周期性重置，故 reset_ts 恒 None
+                "reset_ts": None,
+                "expire_ts": int(end_time),
+                "unit": "credit",
             })
-            if len(packs) >= 3:
-                break
+        packs.sort(key=lambda it: it["expire_ts"] or 0)  # 先到期的排前面
         items.extend(packs)
         return {"items": items, "level": None}
 

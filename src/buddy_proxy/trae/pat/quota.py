@@ -184,7 +184,12 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
         items.append({"label": label, "used": used, "total": limit,
                       "remaining": remaining,
                       "percent": percent,
-                      "reset_ts": int(end_time) if end_time else None})
+                      # PAT 包的 ``end_time`` 是**到期**（包作废），不是周期
+                      # 重置——先送 reset_ts 是历史误投，界面会显示成
+                      # 「… 重置」；现按到期走 expire_ts，前端渲染「· 到期」。
+                      "reset_ts": None,
+                      "expire_ts": int(end_time) if end_time else None,
+                      "unit": "credit"})
     return items
 
 

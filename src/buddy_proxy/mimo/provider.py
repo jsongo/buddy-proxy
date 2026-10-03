@@ -244,6 +244,9 @@ def _usage_item(udata: dict[str, Any], subscribed: bool) -> dict[str, Any]:
         "remaining": remaining,
         "percent": used_pct,
         "reset_ts": reset_ts,
+        # 百分比口径（0~100 的相对水位），不是积分也不是天数
+        "expire_ts": None,
+        "unit": None,
     }
 
 
@@ -261,16 +264,21 @@ def _period_item(current: dict[str, Any]) -> list[dict[str, Any]]:
     used_days = round(used_s / 86400, 1)
     total_days = round(total_s / 86400, 1)
     left_days = round(max(total_days - used_days, 0.0), 1)
-    end_label = datetime.fromtimestamp(end_ts).strftime("%m-%d") if end_ts else "—"
     return [
         {
-            "label": f"套餐有效期至 {end_label}（天）",
+            # 日期不再拼进 label：到期时刻改走 expire_ts 结构化字段，前端
+            # 统一渲染成「· MM-DD 到期」。早先拼在文案里（「套餐有效期至
+            # 10-23（天）」），前端拿不到结构化值，做不了到期告警；横幅列
+            # 明细时也会和 expire_ts 渲染出的日期重复。
+            "label": "套餐有效期（天）",
             "used": used_days,
             "total": total_days,
             "remaining": left_days,
             "percent": round(used_s / total_s * 100, 1) if total_s else None,
             # 到期不是「重置」，故不给 reset_ts——前端就不会拼「… 重置」后缀
             "reset_ts": None,
+            "expire_ts": int(end_ts),  # 契约是整数秒（_to_ts 返回 float）
+            "unit": "day",
         }
     ]
 

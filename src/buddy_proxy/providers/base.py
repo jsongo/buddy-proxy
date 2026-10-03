@@ -126,8 +126,26 @@ class BaseProvider(abc.ABC):
 
     def quota(self) -> dict[str, Any] | None:
         """查询套餐额度。返回 ``{"items": [{label, used, total, remaining,
-        percent, reset_ts}], "level": str|None}``（remaining/percent 无法
-        计算时为 None）；不支持时返回 None。
+        percent, reset_ts, expire_ts, unit}], "level": str|None}``
+        （remaining/percent 无法计算时为 None）；不支持时返回 None。
+
+        ``reset_ts`` 与 ``expire_ts`` 是**两个不同的东西**，别混：
+
+        - ``reset_ts``：**周期性重置**时刻，到了这天额度回满、周期重来
+          （ZCode 的 5 小时窗口、antigravity 的 weekly 池、MiMo 的周额）。
+        - ``expire_ts``：**权益到期**时刻，到了这天这份额度就作废、不会回来
+          （Qoder 的套餐/加油包、Trae 的权益包、MiMo 的套餐有效期）。
+
+        早先两种语义都塞在 ``reset_ts`` 里，前端一律渲染成「… 重置」——
+        Qoder 的「10-30 到期」在界面上就显示成「10-30 重置」，用户以为到期日
+        没被记录。现在按字段分开渲染（「到期」/「重置」），到期告警横幅
+        （见 :mod:`buddy_proxy.benefits` 的 ``_expiring``）只认 ``expire_ts``。
+        拿不准是哪种就别填——填错会误报「快到期了」。
+
+        ``unit``（可选）：``remaining`` 的量纲，到期告警据它决定要不要做
+        额度量过滤（``"credit"`` 且剩余 ≤ ``EXPIRY_WARN_MIN_CREDITS`` 时不
+        提醒，避免为一点零头刷屏；``"day"`` / ``"count"`` / ``"permille"``
+        等只看天数）。不填（``None``）＝不做量过滤。
 
         ``sum_items``（可选，默认 ``False``）：置 ``True`` 表示 ``items``
         各项是**并存的份额**，管理页标题行应把它们相加作为账号总量。
