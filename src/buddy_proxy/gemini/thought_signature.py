@@ -51,7 +51,8 @@ from collections import OrderedDict
 #: 哨兵：告知上游跳过签名校验（官方给无状态客户端的逃生门，实测 200）。
 SENTINEL = "skip_thought_signature_validator"
 
-#: LRU 上限：一条签名 ~1KB，2048 条约 2MB 封顶；对话工具调用远低于此。
+#: LRU 上限：实测签名 140B~4KB（gemini-3.1-pro-low 见过 3976B），
+#: 2048 条最坏 ~8MB 封顶；对话工具调用数远低于此。
 MAX_ENTRIES = 2048
 
 _CACHE: OrderedDict[str, tuple[str, str]] = OrderedDict()

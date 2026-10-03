@@ -93,10 +93,13 @@ def test_tool_round_trip_shape():
     req = chat_to_gemini_request(body, project_id="p", model="m", stream=False)
     contents = req["request"]["contents"]
     assert contents[1]["parts"][0]["functionCall"]["name"] == "get_weather"
+    # fc.id 与 fr.id 成对回传（claude/gpt-oss 硬要求，缺 → 400；gemini 同收）
+    assert contents[1]["parts"][0]["functionCall"]["id"] == "c1"
     resp_content = contents[2]
     assert resp_content["role"] == "user"
     fr = resp_content["parts"][0]["functionResponse"]
     assert fr["name"] == "get_weather"
+    assert fr["id"] == "c1"
     assert fr["response"]["content"] == {"temp": 20}
     decls = req["request"]["tools"][0]["function_declarations"]
     assert decls[0]["name"] == "get_weather"
