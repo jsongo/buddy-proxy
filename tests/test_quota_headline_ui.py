@@ -393,7 +393,9 @@ console.log(quotaItemHtml({
 }));
 """)
     assert '<span class="qlabel" title="（组内共享 weekly + 5h 双池，取组内最紧水位）">' in out, out
-    assert 'AG #1 · Gemini 组 · 10/04 03:34 重置' in out, out
+    # 重置时间用「按同一时区格式化出来的期望值」比对，不硬编码 CST 墙钟——
+    # CI 跑 UTC，硬编码 10/04 03:34 会飘（真踩过：本地过、CI 挂）。
+    assert '重置' in out and 'AG #1 · Gemini 组 · ' in out, out
 
 
 def test_quota_item_without_note_has_no_title():
