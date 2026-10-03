@@ -169,7 +169,11 @@ class TraeProvider(BaseProvider):
                           "remaining": remaining, "percent": percent,
                           # 总额度是所有包的合计，没有单一到期日——到期告警
                           # 由下面各权益包自己承担，合计行不参与
-                          "reset_ts": None, "expire_ts": None, "unit": "credit"})
+                          "reset_ts": None, "expire_ts": None, "unit": "credit",
+                          # head_only：只在标题行「剩 X / Y」用它的数字，明细
+                          # 列表不单列这一条（它是下面各权益包的合计，再铺一条
+                          # 带进度条的明细行是重复——用户 2026-10-04 反馈）。
+                          "head_only": True})
         # 权益包：每条都有额度与到期时间，全部展示（各条**不能相加**——它们
         # 是上面「总额度」的明细，加了就重复计算，故本通道不给 sum_items）。
         packs: list[dict[str, Any]] = []

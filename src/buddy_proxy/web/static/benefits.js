@@ -323,7 +323,12 @@ function quotaItemHtml(it) {
   // 用警告色区分于正常额度，并说明「是网络问题、已缓存、无需反复刷新」——
   // 以前这种情况页面只是转圈没有任何解释，用户不知道卡在哪。
   const noticeText = (!hasNums && !pending && typeof it.remaining === 'string') ? it.remaining : '';
-  const notice = it.unreachable === true || it.query_failed === true;
+  // 三类说明条分开配色：unreachable=红（网关不可达）、query_failed=黄（账号
+  // 取不到额度，要动手查/删号）、query_empty=灰（账号是好的，只是 Free 层没
+  // 分桶额度——不该当告警，否则用户会以为通道坏了）
+  const notice = it.unreachable === true || it.query_failed === true || it.query_empty === true;
+  const noticeColor = it.unreachable ? 'var(--err)'
+    : (it.query_failed ? 'var(--warn)' : 'var(--muted)');
   const nums = hasNums
     ? (hasVolume
         ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
@@ -331,7 +336,7 @@ function quotaItemHtml(it) {
     : (pending
         ? `<span class="mono muted" title="standard 池无主动查询接口，用量仅在账号撞 4031 时被动采集；重置后成功请求不带账单事件，故用量待下次撞码确认">已于 ${fmtReset || '—'} 重置 · 用量待确认</span>`
         : (notice
-            ? `<span class="mono" style="color:${it.unreachable ? 'var(--err)' : 'var(--warn)'}">${esc(noticeText)}</span>`
+            ? `<span class="mono" style="color:${noticeColor}">${esc(noticeText)}</span>`
             : '<span class="mono"></span>'));
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
@@ -373,8 +378,13 @@ function quotaSpent(it) {
 // 用来记住展开状态；同 key 在两次渲染之间保持展开。
 function quotaItemsHtml(items, key) {
   if (!items.length) return '';
+  // head_only：这条只为标题行「剩 X / Y」提供数字（Trae 的「总额度」——它是
+  // 下面各权益包的合计，再单列一条带进度条的明细就是重复）。明细列表跳过它，
+  // 标题行（quotaHeadSum）与余额告警仍照取 items[0]。
+  const shown = items.filter(it => !it.head_only);
+  if (!shown.length) return '';
   const act = [], spent = [];
-  for (const it of items) (quotaSpent(it) ? spent : act).push(it);
+  for (const it of shown) (quotaSpent(it) ? spent : act).push(it);
   const open = !!QUOTA_FOLD.open[key];
   const spentHtml = spent.length
     ? `<div class="qspent"${open ? '' : ' hidden'}>` +
@@ -387,7 +397,7 @@ function quotaItemsHtml(items, key) {
   return `<div class="qbody${open ? ' open' : ''}" data-qfold="${esc(key)}">` +
       act.map(quotaItemHtml).join('') + empty + spentHtml + '</div>' +
     `<button class="qmore" data-qfold="${esc(key)}" data-act="${act.length}" ` +
-      `data-spent="${spent.length}" data-total="${items.length}" ` +
+      `data-spent="${spent.length}" data-total="${shown.length}" ` +
       `onclick="quotaFoldToggle(this)" hidden></button>`;
 }
 

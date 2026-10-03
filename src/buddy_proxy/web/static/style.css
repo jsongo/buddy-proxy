@@ -383,7 +383,11 @@
   .ag-move { position: absolute; top: 8px; right: 10px; display: inline-flex; gap: 2px;
              opacity: .35; transition: opacity .12s; }
   .pat-pkg:hover .ag-move { opacity: 1; }
-  .ag-move button { padding: 1px 5px; line-height: 1.2; font-size: 10px; color: var(--muted); }
+  /* 小尺寸按钮：padding/font 压到 10px 档后，全局 button 的 border-radius:8px
+     会把窄按钮撑成椭圆药丸（↻ 单字最明显，实测截图里就是扁的）。这里收成
+     4px 方正小圆角——顺带把 box-sizing 兜住，免得内容撑出意料宽度。 */
+  .ag-move button { padding: 1px 5px; line-height: 1.2; font-size: 10px;
+                    color: var(--muted); border-radius: 4px; box-sizing: border-box; }
   /* ↻ 刷新在飞：转圈提示「正在重查」（重查一轮最长 8s，不能让用户干瞪按钮） */
   .ag-move button.spinning { display: inline-block; animation: qspin 1s linear infinite; }
   @keyframes qspin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

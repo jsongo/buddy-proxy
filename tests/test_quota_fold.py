@@ -226,6 +226,37 @@ console.log(JSON.stringify({empty: html.includes('权益已全部用完')}));
     assert _last(out) == {"empty": True}, out
 
 
+def test_head_only_item_not_listed_but_kept_for_headline():
+    """head_only（Trae「总额度」）只供标题行数字，明细列表不单列。
+
+    总额度是各权益包的合计，再有自己一条带进度条的明细就是重复
+    （用户 2026-10-04 反馈）。明细里不该出现它，但标题行仍要用它的数字——
+    这里只锁「明细不渲染 + 不参与折叠计数」，标题行口径见 test_quota_headline_ui。
+    """
+    items = [dict(_item("总额度", 4000.0, 9500), head_only=True),
+             _item("会员 Pro 连续包月", 4000.0, 4000.0),
+             _item("签到奖励", 0.0, 200.0, 200.0)]
+    out = _run("""
+const html = quotaItemsHtml(%s, 'trae');
+console.log(JSON.stringify({
+  hasTotal: html.includes('总额度'),
+  hasPack: html.includes('会员 Pro 连续包月'),
+  spentCount: (html.match(/已用完 (\\d+) 项/) || [])[1],
+  total: (html.match(/data-total="(\\d+)"/) || [])[1],
+}));
+""" % _js(items))
+    assert _last(out) == {"hasTotal": False, "hasPack": True,
+                          "spentCount": "1", "total": "2"}, out
+
+
+def test_only_head_only_items_renders_nothing():
+    """整组只有 head_only 条（不该发生，但空 render 好过渲染个空壳）。"""
+    out = _run("""
+console.log(JSON.stringify({html: quotaItemsHtml(%s, 'x')}));
+""" % _js([dict(_item("总额度", 4000.0, 9500), head_only=True)]))
+    assert _last(out) == {"html": ""}, out
+
+
 def test_unknown_items_stay_visible_not_folded():
     """端到端守住「未知不折叠」：说明条留在可见区、不进已用完区块。"""
     items = [{"label": "PAT 额度网关不可达", "remaining": "10/10 个账号查询失败",
