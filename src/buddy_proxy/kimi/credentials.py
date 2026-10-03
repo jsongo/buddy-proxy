@@ -289,6 +289,16 @@ def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
         return None
 
     target = _find_existing()
+    if target is None and not _ID_RE.fullmatch(aid):
+        # cred 没带 account_id（cli 导出 JSON 就是这种）时现场派生。派生用的是
+        # device_id 等稳定字段，**可能得到与既有账号相同的 id**——导入同一份
+        # 导出的最新 token（refresh_token 已滚动、匹配不上旧 RT）正好走这条：
+        # _find_existing 用空 aid 查不到，派生出的 id 却和索引里那条一模一样。
+        # 这里补一次按派生 id 的查找，否则同一 account_id 会被追加成第二个顺位
+        # （真机踩过：面板同一个号显示 Kimi #1 和 Kimi #3）。
+        cred["account_id"] = derive_account_id(cred)  # 就地写回，调用方可见
+        aid = str(cred["account_id"])
+        target = next((e for e in entries if str(e.get("id") or "") == aid), None)
     if target is not None:
         aid = str(target["id"])
         cred["account_id"] = aid

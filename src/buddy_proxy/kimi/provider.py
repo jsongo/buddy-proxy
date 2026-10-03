@@ -111,16 +111,45 @@ def _quota_executor() -> "concurrent.futures.ThreadPoolExecutor":
         return _quota_pool
 
 
-def _quota_failure_notice(failed: int, total: int) -> dict[str, Any]:
-    """部分账号额度查询失败时的说明条（UI 警告色展示；benefits 认 query_failed 走短缓存）。"""
+def _quota_failure_notice(failed: list[str], total: int) -> dict[str, Any]:
+    """部分账号额度**查不通**时的说明条（UI 警告色；benefits 认 query_failed 走短缓存）。
+
+    ``failed`` 是失败账号的展示名（顺位标号或 nickname），列出来而不是只给
+    个「N/M」——用户得知道是哪个号、去删还是去重登。措辞只说「取不到额度」，
+    不写「网络或凭据问题」：这里分不清是 401 凭据失效还是真的断网，笼统断言
+    反而把人支向错的方向；前面的分诊（401 强刷）已经试过了。
+    """
+    who = "、".join(failed)
     return {
         "label": "Kimi 额度查询失败",
         "used": None,
         "total": None,
-        "remaining": f"{failed}/{total} 个账号查询失败（网络或凭据问题；其余账号数据照常展示）",
+        "remaining": f"{len(failed)}/{total} 个账号取不到额度（{who}）",
         "percent": None,
         "reset_ts": None,
         "query_failed": True,
+    }
+
+
+def _quota_empty_notice(multi: bool, names: list[str]) -> dict[str, Any]:
+    """账号查通但 ``/usages`` 无分桶数据时的说明条（**不是失败**，走 info 色）。
+
+    实测 Free 层（``user_level_name: "Free"``）就是这个形态：OAuth/me/usages
+    全 200，但 usages 返回空 ``{}``——账号没坏，只是这个账号没有可展示的额度
+    分桶。原先把这种情况直接吞掉（无条目、无提示），用户只能看到额度区空着，
+    分不清是「账号好但没额度」还是「整个通道挂了」。
+    """
+    who = "、".join(names)
+    return {
+        "label": "Kimi 暂无额度数据",
+        "used": None,
+        "total": None,
+        "remaining": (f"{who} 无得分桶额度（多为 Free 层账号：无 Kimi Code 权限，"
+                      f"订阅后才有 5 小时/7 天池）" if multi else
+                      "该账号无得分桶额度（多为 Free 层：无 Kimi Code 权限，订阅后才有）"),
+        "percent": None,
+        "reset_ts": None,
+        "query_empty": True,
     }
 
 
@@ -435,23 +464,37 @@ class KimiProvider(BaseProvider):
                        for i, a in enumerate(accounts)]
             deadline = time.monotonic() + _QUOTA_ROUND_DEADLINE_S
             items: list[dict[str, Any]] = []
-            failures = 0
-            for fut in futures:  # 按 failover 顺位收集，UI 顺序稳定
+            failed: list[str] = []
+            empty: list[str] = []
+            for acct, fut in zip(accounts, futures):  # 按 failover 顺位收集，UI 顺序稳定
+                name = f"#{acct.priority + 1}"
                 try:
-                    its, ok = fut.result(timeout=max(deadline - time.monotonic(), 0.05))
+                    its, ok, had_data = fut.result(
+                        timeout=max(deadline - time.monotonic(), 0.05))
                 except Exception:  # noqa: BLE001 - 超时/异常账号都算失败
-                    its, ok = [], False
-                if ok:
+                    its, ok, had_data = [], False, False
+                if not ok:
+                    failed.append(name)
+                elif had_data:
                     items.extend(its)
                 else:
-                    failures += 1
-            if failures:
-                items.insert(0, _quota_failure_notice(failures, len(accounts)))
+                    empty.append(name)
+            # 查不通（凭据/网络）才是告警；账号好但没分桶数据只是 info——
+            # 两者分开计数，别让 Free 层健康号被折进「N/M 失败」里。
+            if failed:
+                items.insert(0, _quota_failure_notice(failed, len(accounts)))
+            if empty:
+                items.insert(0, _quota_empty_notice(multi=True, names=empty))
             if not items:
                 items = [_static_notice("Kimi", _QUOTA_NOTE)]
         else:
-            its, ok = self._quota_one(accounts[0], 1, multi=False)
-            items = its if (ok and its) else [_static_notice("Kimi", _QUOTA_NOTE)]
+            its, ok, had_data = self._quota_one(accounts[0], 1, multi=False)
+            if ok and had_data:
+                items = its
+            elif ok:
+                items = [_quota_empty_notice(multi=False, names=[])]
+            else:
+                items = [_static_notice("Kimi", _QUOTA_NOTE)]
         cred = (load_account_cred(accounts[0].id) if accounts else None) or {}
         level = str(cred.get("user_level_name") or "").strip()
         return {
@@ -474,8 +517,14 @@ class KimiProvider(BaseProvider):
 
     def _quota_one(
         self, acct: Any, index: int, *, multi: bool
-    ) -> tuple[list[dict[str, Any]], bool]:
-        """单账号额度查询：成功返回 (items, True)，失败 ([], False)。
+    ) -> tuple[list[dict[str, Any]], bool, bool]:
+        """单账号额度查询：``(items, ok, had_data)``。
+
+        - ``ok=False``：**查不通**（ensure 失败 / 网络错误）——该账号告警；
+        - ``ok=True, had_data=False``：查通了但 ``/usages`` 没分桶数据
+          （实测 Free 层返回空 ``{}``）——账号是好的，只是没额度可展示，
+          由调用方给 info 说明条，**不算失败**（真机踩过：健康号被标失败，
+          和真死号一起显示 2/2）。
 
         同步 urllib 直接跑在常驻线程池里（不走 _run_sync——那是给 asyncio
         上游用的；这里 fetch_usages 本来就是同步调用）。
@@ -484,13 +533,10 @@ class KimiProvider(BaseProvider):
             token, cred = ensure_account_token(acct.id)
             data = fetch_usages(str(cred.get("base_url") or ""), token)
         except Exception:  # noqa: BLE001 - quota 展示失败不影响主链路
-            return [], False
+            return [], False, False
         prefix = f"Kimi #{index} · " if multi else ""
         items = usages_to_items(data, prefix=prefix)
-        # 查通了但没分桶数据（实测 Free 层 /usages 返回 {}）：这是「暂无数据」
-        # 不是「查询失败」——把它算失败会误报「N/M 个账号查询失败」（真机踩过：
-        # 健康账号被标失败，和真死号 #1 一起显示 2/2）。
-        return items, True
+        return items, True, bool(items)
 
 
 # ---------------------------------------------------------------------------

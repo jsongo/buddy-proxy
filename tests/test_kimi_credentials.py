@@ -316,6 +316,31 @@ def test_relikey_mismatch_makes_new_account():
     assert [r.id for r in list_accounts()] == ["u1", "u2"]
 
 
+def test_reimport_export_json_without_account_id_reuses_slot():
+    """cli 导出 JSON 不带 account_id，重导入同一账号不得复制成两份。
+
+    真机踩过：Downloads 里这份导出没有 account_id 字段（只有 device_id/
+    refresh_token 等），导入后 old cred 的 RT 已被后续刷新滚动，_find_existing
+    用空 aid 查不到、RT 又对不上——但它现场用 device_id 派生出的 id 和索引里
+    那条**一模一样**（kimi-<device_id>）。没补按派生 id 的二次查找时，同一
+    account_id 被追加成第二个顺位：面板显示 Kimi #1 与 Kimi #3 各一条。
+    """
+    dev = "98c7f045-7754-4ade-8f6e-1cc1c8fada76"
+    # 首导（无 account_id，落成 kimi-<device_id>）
+    first = {k: v for k, v in _cred("x", device_id=dev).items() if k != "account_id"}
+    ref1 = save_account_cred(dict(first))
+    assert ref1.id == f"kimi-{dev}"
+    time.sleep(0.01)
+    # 重导：RT 已滚动、仍无 account_id、device_id 不变
+    again = {k: v for k, v in _cred("y", device_id=dev,
+                                    refresh_token="rt-rolled").items()
+             if k != "account_id"}
+    ref2 = save_account_cred(dict(again))
+    assert ref2.id == ref1.id, "派生出的 id 与既有账号相同，必须复用顺位"
+    assert [r.id for r in list_accounts()] == [f"kimi-{dev}"], "同一账号不能占两个顺位"
+    assert load_account_cred(ref1.id)["refresh_token"] == "rt-rolled"
+
+
 def test_slow_refresh_does_not_revive_deleted_account(monkeypatch):
     """刷新往返期间账号被删：回写不能让它复活。
 
