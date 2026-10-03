@@ -236,7 +236,7 @@ class KimiProvider(BaseProvider):
             if meta is not None:
                 meta["account"] = acct.id
 
-            upstream_body = build_upstream_body(body, model=upstream_model)
+            upstream_body = build_upstream_body(body, model=upstream_model, stream=stream)
             headers = device_headers(cred, access_token=access_token)
             if stream:
                 headers["Accept"] = "text/event-stream"
@@ -259,7 +259,7 @@ class KimiProvider(BaseProvider):
             # 401：token 被上游拒（refresh_token 被轮换/作废等）——强刷一次重试
             # 同账号；仍拒说明凭据层面失效，冷却换号
             if resp.status_code == 401:
-                last_detail = await _error_detail(resp, stream)
+                last_status, last_detail = 401, await _error_detail(resp, stream)
                 await _drain_and_close(resp, stream)
                 try:
                     access_token, cred = await asyncio.to_thread(
@@ -330,6 +330,10 @@ class KimiProvider(BaseProvider):
                 if gate.timed_out:
                     last_status, last_detail = 504, "首事件前读超时"
                     failover.mark_cooldown(acct.id, reason="首事件前读超时")
+                else:
+                    # 不设的话会落到「最后错误 HTTP n/a」的 502——用户看不出是
+                    # 上游断流还是网关坏了（token 过期这类可行动信息全被吞）。
+                    last_status, last_detail = 502, "首事件前断流（上游空响应）"
                 await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
 
@@ -515,6 +519,22 @@ class _Gate:
     timed_out: bool = False  # eof 的细分：读超时（区别于干净 EOF，调用方要短冷却）
 
 
+def _is_account_error(err: dict[str, Any]) -> bool:
+    """带内 error 是否属于「账号级」——按 ``type`` 判定，不只看 code。
+
+    真机实测：kimi 的订阅失效是
+    ``{"error":{"message":"...access_terminated_error...","type":"access_terminated_error"}}``
+    ——**没有 code 字段**（code 恒 0）。只看 code 的话这种带内 403 会被当成
+    「已 committed」直接透传给客户端，既不冷却也不换号：每轮 failover 仍先
+    选中这个死账号，白付一次完整往返。type 里的 account/subscription/
+    permission/terminated 语义都是账号级，请求级错误（模型名不合法、tool
+    schema 错）不在此列。
+    """
+    etype = str(err.get("type") or "").strip().lower()
+    return any(k in etype for k in (
+        "access_terminated", "account", "subscription", "permission", "quota"))
+
+
 def _gate_semantic(payload: dict[str, Any]) -> str:
     """OpenAI SSE chunk 定性：``account_error`` / ``semantic`` / ``wait``。
 
@@ -529,7 +549,7 @@ def _gate_semantic(payload: dict[str, Any]) -> str:
             code = int(err.get("code") or 0)
         except (TypeError, ValueError):
             code = 0
-        if code in (429, 403):
+        if code in (429, 403) or _is_account_error(err):
             return "account_error"
         return "semantic"  # 其它带内错误：换号没意义，缓冲行随透传交给转换器
     choices = payload.get("choices")

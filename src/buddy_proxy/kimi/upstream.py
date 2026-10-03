@@ -116,9 +116,16 @@ _PASSTHROUGH_FIELDS = (
 )
 
 
-def build_upstream_body(body: dict[str, Any], *, model: str) -> dict[str, Any]:
-    """入站 chat 请求体 → 上游请求体（白名单透传 + thinking 注入）。"""
-    upstream: dict[str, Any] = {"model": model}
+def build_upstream_body(body: dict[str, Any], *, model: str,
+                        stream: bool = False) -> dict[str, Any]:
+    """入站 chat 请求体 → 上游请求体（白名单透传 + thinking 注入）。
+
+    ``stream`` 由调用方（provider.forward 已算好的本地判定）显式传入，**不**
+    走白名单：OpenAI 兼容上游按**请求体**这个字段决定返回 SSE 还是整块 JSON，
+    漏了它上游会回非流式 JSON，而本地按 SSE 逐行解析——解析不出 ``data:``
+    事件直接判成「首事件前空流」换号，客户端拿到的是 502（真机/契约实证）。
+    """
+    upstream: dict[str, Any] = {"model": model, "stream": stream}
     for field in _PASSTHROUGH_FIELDS:
         value = body.get(field)
         if value is not None:

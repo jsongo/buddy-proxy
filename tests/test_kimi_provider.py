@@ -60,16 +60,20 @@ def test_build_upstream_body_whitelist_and_thinking():
         "tools": [{"type": "function", "function": {"name": "f"}}],
         "reasoning_effort": "low",  # 不透传，被 map_thinking 消费
         "top_k": 5,                 # 白名单外：丢弃
-        "stream": True,             # 白名单外：由 forward 决定，不进上游 body
     }
-    up = build_upstream_body(body, model="k3")
+    up = build_upstream_body(body, model="k3", stream=True)
     assert up["model"] == "k3"
     assert up["messages"] == body["messages"]
     assert up["temperature"] == 0.5
     assert up["tools"] == body["tools"]
     assert up["thinking"] == {"type": "enabled", "effort": "low"}
-    for absent in ("reasoning_effort", "top_k", "stream"):
+    for absent in ("reasoning_effort", "top_k"):
         assert absent not in up
+    # stream 必须显式带给上游：OpenAI 兼容上游按**请求体**这个字段决定返 SSE
+    # 还是整块 JSON。漏了它上游回非流式 JSON，本地按 SSE 逐行解析不出 data:
+    # 事件 → 判成「首事件前空流」换号 → 客户端拿 502（review 实证）。
+    assert up["stream"] is True
+    assert build_upstream_body(body, model="k3", stream=False)["stream"] is False
 
 
 def test_device_headers_shape():
