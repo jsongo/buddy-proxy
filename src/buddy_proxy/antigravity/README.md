@@ -56,7 +56,9 @@ copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影
 - **流式防重复计费**：首事件闸门（`_gate_first_event`）压住第一个上游事件
   再定性——带内 429/403 error（一个字节没出网）冷却换号；语义事件
   （candidates）出现即 committed，缓冲行经 `_ReplayStream` 补放、绝不重放；
-  语义前 EOF 视为假成功换号（不冷却）。
+  语义前 EOF 视为假成功换号（不冷却）。闸门只创建一次 `resp.aiter_lines()`
+  并把它（`_Gate.lines`）传下去：httpx 响应流一次性消费，重开必抛
+  StreamConsumed 静默丢光剩余事件（claude 流式曾因此完全空流）。
 - **可观测**：每次转发把实际服务的账号写入 `ACCOUNT_META`（metrics 落库可
   归属）；管理页有独立 Antigravity 面板（各账号额度左右分栏 + 账号状态行，
   数据来自 `failover.accounts_status()`，纯本地不触网）。
