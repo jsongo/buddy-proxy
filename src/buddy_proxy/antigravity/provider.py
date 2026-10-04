@@ -652,9 +652,11 @@ class AntigravityProvider(BaseProvider):
 
         * 组内取**最紧水位**（min）作为该组读数，并把「谁最紧」记进 note——
           满额时全组都是 1，此时不点名也无妨；
-        * ``reset_ts`` 取**那个最紧模型自己的** resetTime（不是组内任意最小值）：
-          它只是下一个 5 小时窗口的滚动刷新点，不代表整组重置、更不代表每周池。
-        * ``used`` 由 ``1 - worst`` 反推成千分制，与 ``remaining/total`` 同量纲：
+        * ``reset_ts`` 取组内任一**带 resetTime** 的模型的值（它只是下一个 5 小时
+          窗口的滚动刷新点，不代表整组重置、更不代表每周池）——**不强制取最紧那个**：
+          resetTime 在做标题行信息展示，因为「最紧的那个恰好没带 resetTime」就让
+          整组不显示，是信息损失。
+        * ``used`` 由 ``1 - frac`` 反推成千分制，与 ``remaining/total`` 同量纲：
           上游只给剩余，这是唯一诚实的「已用」口径（此前留 None，前端走「已用未知」
           分支，满额被渲染成空进度条，用户读成「额度是 0」）。
         """
@@ -680,13 +682,24 @@ class AntigravityProvider(BaseProvider):
         for group, fracs in by_group.items():
             label = "Gemini 组" if group == "gemini" else "Claude/GPT 组"
             worst_frac, worst_reset, worst_model = min(fracs, key=lambda t: t[0])
+            # worst_frac 钳到 [0,1]：上游理论上只发 0~1，但发过 >1（观察到的余量）
+            # 会让 remaining>total、used 为负、percent 负值，前端渲染成「剩 1,500 /
+            # 1,000 · 已用 -50%」。钳一下，让越界值退化成满额/用尽两端。
+            frac = min(max(worst_frac, 0.0), 1.0)
             # 组内模型清单（upstream 变体名去 effort 后缀去重），供面板展示「这组管着谁」
             names = sorted({_strip_effort_suffix(n) for _, _, n in fracs})
-            remaining = round(worst_frac * 1000, 1)
-            # 满额措辞与收紧措辞分开：满了就直说「满额」，别让「取最紧水位」看着像有损耗
-            full = worst_frac >= 1.0
+            # 满额判定与展示口径**同源**：拿 round 后的 remaining 判，别拿原始 frac——
+            # 否则 0.99995 会一边显示「剩 1000 / 1000 · 已用 0%」一边说「组内最紧的是 X」，
+            # 同一行自相矛盾。比的是「看起来满没满」，所以按看起来的数判。
+            remaining = round(frac * 1000, 1)
+            full = remaining >= 1000
             tightness = ("满额（组内各模型均为 100%）" if full
                          else f"组内最紧的是 {worst_model}")
+            # resetTime 取**该组任意一个带 resetTime 的模型**的值（resetTime 是
+            # 「下一个 5 小时窗口刷新点」这类被 UI 当标题行信息展示的东西，用它做
+            # 兜底比因为最紧那个恰好没带就让整组不显示更可靠）；再退一步取组内
+            # 最紧模型的 resetTime，都没有才 None。
+            reset = next((t for _, t, _ in fracs if t > 0), 0) or worst_reset
             items.append({
                 # 解释性文字不塞 label（曾把整句塞进来，面板窄卡里 label 挤得日期
                 # 换行、右侧「已用 0%」也断行——用户截图骂丑）。挪 note 字段给前端
@@ -696,13 +709,13 @@ class AntigravityProvider(BaseProvider):
                          f"按 token 成本比例消耗；上游只在逼近池上限时才下调读数，"
                          f"此处取组内最紧水位，{tightness}"),
                 "models_in_group": names,
-                "used": round((1 - worst_frac) * 1000, 1),
+                "used": round((1 - frac) * 1000, 1),
                 "total": 1000,
                 "remaining": remaining,
-                "percent": round((1 - worst_frac) * 100, 2),  # 前端 percent=已用
+                "percent": round((1 - frac) * 100, 2),  # 前端 percent=已用
                 # weekly/5h 是周期重置，不是权益到期：不给 expire_ts，
                 # 否则「5 小时后重置」会被到期横幅误报成「5 小时后到期」
-                "reset_ts": worst_reset or None,
+                "reset_ts": reset or None,
                 # resetTime 只是下一个 5 小时窗口的滚动刷新点——前端把它拼进
                 # reset 文案的 title，免得用户当成「整个池子到此重置」
                 "reset_note": "下一个 5 小时窗口刷新点（滚动），不代表每周池重置",

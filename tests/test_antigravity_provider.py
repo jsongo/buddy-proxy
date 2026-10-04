@@ -85,7 +85,8 @@ def test_quota_falls_back_to_note_on_fetch_failure(provider, tmp_path, monkeypat
 def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
     """fetchAvailableModels 有数据 → 按组聚合（upstream 前缀匹配变体名，组内取最小）。
 
-    percent=已用（前端进度条语义），remaining/total 千分制，reset_ts 取最早刷新点。
+    percent=已用（前端进度条语义），remaining/total 千分制；reset_ts 取组内**任一
+    带 resetTime** 的模型的值（不强制最紧那个，见下方断言）。
     """
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
     from buddy_proxy.antigravity import credentials as creds
@@ -130,11 +131,12 @@ def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
     assert gemini["used"] == 500.0    # 已用千分制（与 remaining 同量纲，1-worst 反推）
     assert cgpt["remaining"] == 990.0 and cgpt["percent"] == 1.0
     assert cgpt["used"] == 10.0
-    # reset_ts = **最紧那个模型自己的** resetTime（不是组内任意最小值）：
-    # gemini 组最紧是 3.6-flash-medium(0.5) → 19:00Z；claude-gpt 最紧是 gpt-oss(0.99)
-    # 但它没有 resetTime，回落到 0 → None。这跟旧语义（组内最早）不同，是本次修正点。
-    assert gemini["reset_ts"] == prov._iso_to_epoch("2026-10-02T19:00:00Z")
-    assert cgpt["reset_ts"] is None
+    # reset_ts = 组内**任一带 resetTime** 的模型的值（不强制最紧那个）：
+    # gemini 组首个带 resetTime 的是 3.1-pro-low(0.9) → 20:28:46Z（不是组内最早的 19:00Z）。
+    # claude-gpt 组最紧的 gpt-oss(0.99) 没带 resetTime，兜底到别的模型（20:30:52Z）——
+    # 旧实现会在「最紧的恰好没带」时整组不显示 reset，正是本次要修掉的损失。
+    assert gemini["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:28:46Z")
+    assert cgpt["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:30:52Z")
     # reset_note 讲清「这只是 5 小时窗口滚动刷新点」
     assert "5 小时" in gemini["reset_note"]
     # note 里点名最紧模型 + 列出组内模型清单
@@ -178,6 +180,63 @@ def test_quota_full_quota_reads_as_full_not_zero(provider, tmp_path, monkeypatch
         assert it["used"] == 0.0 and it["percent"] == 0.0
         assert "满额" in it["note"]
     assert quota["level"] == "free-tier"  # 凭据没写 tier_name 时的兜底
+
+
+def test_quota_reset_falls_back_when_tightest_has_no_resettime(provider, tmp_path, monkeypatch):
+    """最紧的那个模型恰好没带 resetTime 时，仍用组内别的模型补上——不整组丢 reset。
+
+    上游可以只给部分变体回 resetTime（实测内部条目 chat_*/tab_* 就没有）。若
+    reset_ts 硬取「最紧那个」，而它恰好没带，整组就不显示重置时间——信息白丢。
+    """
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            # 最紧的（0.5）没有 resetTime，另一个有
+            "gemini-3.6-flash-medium": {"quotaInfo": {"remainingFraction": 0.5}},
+            "gemini-3.1-pro-low": {"quotaInfo": {"remainingFraction": 0.9,
+                                                 "resetTime": "2026-10-02T20:28:46Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+
+    quota = provider.quota()
+    it = next(i for i in quota["items"] if i["label"] == "Gemini 组")
+    assert it["remaining"] == 500.0          # 水位仍按最紧的算
+    assert it["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:28:46Z")  # 但 reset 没丢
+
+
+def test_quota_clamps_out_of_range_fraction(provider, tmp_path, monkeypatch):
+    """上游发 >1 的 remainingFraction（余量）时钳到 100%，不渲染「剩 1,500 / 1,000」。"""
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            "gemini-3.1-pro-low": {"quotaInfo": {"remainingFraction": 1.5,
+                                                 "resetTime": "2026-10-02T20:28:46Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+
+    it = next(i for i in provider.quota()["items"] if i["label"] == "Gemini 组")
+    assert it["remaining"] == 1000.0 and it["used"] == 0.0 and it["percent"] == 0.0
+    assert "满额" in it["note"]
 
 
 def test_models_json_load_fallback(tmp_path, monkeypatch):
