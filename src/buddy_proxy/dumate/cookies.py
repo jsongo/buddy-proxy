@@ -256,11 +256,15 @@ def resolve_bceconsole_auth() -> BceConsoleAuth | None:
         return None
     pairs: list[str] = []
     csrf = ""
+    seen: set[str] = set()
     for c in cookies:
         name, value = c.get("name"), c.get("value")
-        if not name or value is None:
-            continue
-        pairs.append(f"{name}={value}")
+        if not name or value is None or name in seen:
+            continue  # 去重：auth.json 里同名 cookie 会出现多次（hostOnly 变体）
+        seen.add(name)
+        # 值里的 ; 会截断 Cookie 头，按规范转义成 %3B（服务器端取用时再解码）
+        safe = str(value).replace(";", "%3B")
+        pairs.append(f"{name}={safe}")
         if name == "bce-user-info":
             csrf = str(value).strip("'\"")
     if not pairs:
