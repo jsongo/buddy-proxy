@@ -130,3 +130,52 @@ console.log(JSON.stringify({fetches: statsFetches}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["fetches"] == 1, f"非 force 并发要去重成单发: {data}"
+
+
+# --- api() 错误消息提取：FastAPI 嵌套 detail 不能变成 [object Object] --------
+
+API_SLICE_RE = re.compile(
+    r"function errMessage\(body, status\).*?(?=\nlet OVERVIEW)", re.S
+)
+
+
+def _run_api_js(body: str) -> str:
+    """抽取 errMessage + api() 两段跑断言（避开大切片里其它 DOM 依赖）。"""
+    text = APP_JS.read_text(encoding="utf-8")
+    m = API_SLICE_RE.search(text)
+    assert m, "app.js 里找不到 errMessage/api 切片（边界注释被改了？）"
+    script = m.group(0) + "\n(async () => {\n" + body + \
+        "\n})().catch(e => { console.error(e); process.exit(1); });\n"
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node 执行失败:\n{proc.stderr}"
+    return proc.stdout
+
+
+def test_api_error_message_unwraps_nested_fastapi_detail():
+    """回归：``HTTPException(detail={"error":{"message":...}})`` 要报出人话。
+
+    2026-10-05 实测：/ui/api/model-order 保存含旧 qoder 模型的条目时，后端
+    返回 ``{"detail":{"error":{"message":"模型 kimi-k3 不在 qoder 通道的模型
+    列表中"}}}``，而前端只取了 ``body.detail``（对象）→ ``new Error(对象)``
+    → toast 显示「保存失败: [object Object]」。修复是逐层剥出 message。
+    """
+    out = _run_api_js("""
+const cases = [
+  [{detail:{error:{message:'模型 kimi-k3 不在 qoder 通道的模型列表中'}}}, 400],
+  [{error:{message:'flat'}}, 502],
+  [{detail:'字符串 detail'}, 400],
+  [{detail:{message:'detail.message'}}, 400],
+  [{}, 500],
+];
+globalThis.fetch = async () => ({ok:false, status:400, json: async () => ({})});
+const msgs = [];
+for (const [b, s] of cases) msgs.push(errMessage(b, s));
+console.log(JSON.stringify(msgs));
+""")
+    msgs = json.loads(out.strip().splitlines()[-1])
+    assert msgs[0] == "模型 kimi-k3 不在 qoder 通道的模型列表中", f"嵌套 detail 要解开: {msgs[0]}"
+    assert msgs[1] == "flat"
+    assert msgs[2] == "字符串 detail"
+    assert msgs[3] == "detail.message"
+    assert msgs[4] == "500 error"
+    assert all("[object Object]" not in m for m in msgs), f"绝不能出现 [object Object]: {msgs}"
