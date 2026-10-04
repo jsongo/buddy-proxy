@@ -382,24 +382,49 @@ def test_banner_low_quota_without_percent_says_insufficient():
     assert '告急<' in out, f"右列该有兜底文案: {out}"
 
 
-def test_quota_item_note_goes_to_title_not_visible_text():
-    """后端的解释性附注（note）走 title 悬浮提示——塞 label 可见文本里会把
-    窄卡的日期和数字挤折行（antigravity 面板截图骂丑的根因）。"""
+def test_quota_item_note_renders_as_visible_line_not_label_title():
+    """后端的解释性附注（note）渲染成 label 下方一行小字，**不塞进 label 文本**。
+
+    演进：早先 note 只挂 label 的 title（怕挤折行），但面板是窄卡、悬停提示基本
+    看不到——antigravity 用户实际反馈「额度都是 0、看不明白」就是因为没看到这层
+    解释。现在改成独立一行 `.muted` 小字：既不挤 label 标题行（日期/数字不被
+    挤折行），又能真正被读到。
+    """
     out = _run_fn(("quotaItemHtml",), """
 console.log(quotaItemHtml({
   label: 'AG #1 · Gemini 组', note: '组内共享 weekly + 5h 双池，取组内最紧水位',
-  used: null, total: 1000, remaining: 1000, percent: 0,
+  used: 0, total: 1000, remaining: 1000, percent: 0,
   reset_ts: 1791056048, expire_ts: null, unit: 'permille',
 }));
 """)
-    assert '<span class="qlabel" title="（组内共享 weekly + 5h 双池，取组内最紧水位）">' in out, out
+    # note 作为可见文本出现（独立说明行）
+    assert '组内共享 weekly + 5h 双池，取组内最紧水位' in out, out
+    # 但**不**拼进 label 标题行——label span 里只该有标签本身
+    assert '<span class="qlabel">AG #1 · Gemini 组' in out, out
     # 重置时间用「按同一时区格式化出来的期望值」比对，不硬编码 CST 墙钟——
     # CI 跑 UTC，硬编码 10/04 03:34 会飘（真踩过：本地过、CI 挂）。
-    assert '重置' in out and 'AG #1 · Gemini 组 · ' in out, out
+    assert '重置' in out, out
+
+
+def test_quota_item_reset_note_goes_to_title():
+    """reset_note 挂 reset 的 title（解释这个时间点是什么），不进正文。
+
+    antigravity 的 resetTime 只是下一个 5 小时窗口的滚动刷新点，不是整组/每周池
+    重置——这句解释走 title，正文只留「MM-DD HH:MM 重置」。
+    """
+    out = _run_fn(("quotaItemHtml",), """
+console.log(quotaItemHtml({
+  label: 'Gemini 组', used: 0, total: 1000, remaining: 1000, percent: 0,
+  reset_ts: 1791056048, reset_note: '下一个 5 小时窗口刷新点（滚动），不代表每周池重置',
+  expire_ts: null, unit: 'permille',
+}));
+""")
+    assert 'title="（下一个 5 小时窗口刷新点（滚动），不代表每周池重置）"' in out, out
+    assert '重置</span>' in out, out
 
 
 def test_quota_item_without_note_has_no_title():
-    """没有 note 的条目（trae/zcode 等绝大多数）不渲染空 title。"""
+    """没有 note 的条目（trae/zcode 等绝大多数）不渲染空 title、不渲染空说明行。"""
     out = _run_fn(("quotaItemHtml",), """
 console.log(quotaItemHtml({
   label: '5 小时窗口', used: 10, total: 100, remaining: 90, percent: 10,
@@ -408,6 +433,8 @@ console.log(quotaItemHtml({
 """)
     assert 'qlabel' in out, out
     assert 'title=' not in out, f"不该有空的 title 属性: {out}"
+    # 没有 note 就只该有一层 qhead + bar，不该多出说明行
+    assert out.count('<div class="qitem">') == 1
 
 
 def test_headline_shows_used_percent_beside_the_total():

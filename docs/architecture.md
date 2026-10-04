@@ -241,6 +241,15 @@ silent:
   banner's amount filter — a 200-credit check-in pack expiring in 7 days is
   noise, a 4000-credit plan is not; days and counts are not comparable to a
   credit threshold and are filtered by time alone.
+- **A quota reading's sign convention is part of its meaning.** Antigravity
+  reports *remaining* (`remainingFraction=1` means full) and has no interface
+  that exposes the weekly pool at all; CLIProxyAPI shows `100%` for the same
+  accounts, which is also *remaining*. buddy renders both `remaining`/`total`
+  and `percent`/`used` (progress-bar semantics), so a full allowance shows as
+  "剩 1000 / 1000 · 已用 0%" — correct, but it read as "quota is 0" until the
+  item also spelled out "满额" and listed `models_in_group`. When one upstream
+  hands the same single value to two UIs, a discrepancy is a sign convention,
+  not a data difference; say so in the item's `note` rather than guessing.
 - **Providers report every quota item; the frontend decides what to show.**
   `quota()` must not truncate `items` for display. CodeBuddy used to return
   only the first 4 packs (`if len(packs) < 4`) and the cut was invisible in a

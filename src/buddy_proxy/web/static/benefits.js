@@ -311,7 +311,14 @@ function quotaItemHtml(it) {
   // 满额，池重置后不会有新数据来覆盖），这里明确说明「待下一次撞码确认」，
   // 免得看起来像池没被重置或卡在 100%。
   const pending = !hasNums && it.reset_pending;
-  const reset = fmtReset && !pending ? ` · ${fmtReset} 重置` : '';
+  // reset_note：说明「这个时间点到底是什么」——如 antigravity 的 resetTime 只是
+  // 下一个 5 小时窗口的滚动刷新点，不代表整组/每周池重置。拼进 title 而不是
+  // 正文，免得窄卡更挤。
+  const resetNote = typeof it.reset_note === 'string' && it.reset_note ? `（${esc(it.reset_note)}）` : '';
+  const reset = fmtReset && !pending
+    ? (resetNote ? `<span title="${resetNote}"> · ${fmtReset} 重置</span>`
+                 : ` · ${fmtReset} 重置`)
+    : '';
   // 到期时间（expire_ts）与重置时间是两回事：到期是这份权益作废、不再回来，
   // 重置是周期回满。早先 Qoder 的 expiresAt 被塞进 reset_ts，界面上显示成
   // 「10-30 重置」——用户以为到期日没被记录。这里分开渲染，措辞也分开。
@@ -341,12 +348,17 @@ function quotaItemHtml(it) {
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
   const bar = hasVolume && hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
-  // note：后端的解释性附注（如 antigravity 的「组内共享双池」说明）走 title
-  // 悬浮提示，不占版面——塞 label 里会把窄卡的日期和数字全挤折行
-  const note = typeof it.note === 'string' && it.note ? `（${esc(it.note)}）` : '';
+  // note：后端的解释性附注（如 antigravity 的「组内包含哪些模型 / 满额含义」）。
+  // 以前只挂 label 的 title，但面板是窄卡、悬停提示基本看不到——用户实际反馈
+  // 「额度都是 0、看不明白」就是没看到这层解释。改为正文一行小号 muted 展示：
+  // 塞进 label 会把日期和数字挤折行，单独一行则不影响标题行布局。
+  const note = typeof it.note === 'string' && it.note ? String(it.note) : '';
+  const noteHtml = note
+    ? `<div class="muted" style="font-size:11px;line-height:1.45;margin:2px 0 0">${esc(note)}</div>`
+    : '';
   return `<div class="qitem"><div class="qhead">` +
-    `<span class="qlabel"${note ? ` title="${note}"` : ''}>${esc(it.label)}${expire}${reset}</span>` +
-    `${nums}</div>${bar}</div>`;
+    `<span class="qlabel">${esc(it.label)}${expire}${reset}</span>` +
+    `${nums}</div>${bar}${noteHtml}</div>`;
 }
 
 // ---- 额度条目分组：只铺没消耗完的 + 限高折叠 ----

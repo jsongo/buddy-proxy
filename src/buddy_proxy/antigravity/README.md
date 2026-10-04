@@ -163,7 +163,7 @@ yes）：access token 过期自动用同一 OAuth client 刷新、onboarding 自
 | CLIENT_METADATA | 数字枚举 `{ideType: 9, platform: 1-5, pluginType: 2}` | agy 是数字枚举（与 gemini 通道的字符串枚举不同） |
 | redirect path | `/oauth-callback`（PKCE S256 + state） | agy strings |
 
-## 配额结构（/usage 与 fetchAvailableModels 实测）
+## 配额结构（2026-10-04 实测，两个 g1-pro-tier 账号）
 
 agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h 滚动双池，
 按 token 成本比例消耗：
@@ -171,12 +171,29 @@ agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h �
 - **GEMINI MODELS**：gemini-3.x 系（`group: "gemini"`）
 - **CLAUDE AND GPT MODELS**：claude-sonnet/opus、gpt-oss（`group: "claude-gpt"`）
 
-但上游 API 只给单值：`fetchAvailableModels` 每个模型变体带
-`quotaInfo.remainingFraction`（0~1）+ `resetTime`（下一个刷新点，实测对应
-5h 池），**没有 weekly/5h 分池字段**（`fetchUserStatus`/`quotaStatus` 均
-404，/usage 的双池分解是 CLI 本地推算的）。管理面板按 upstream 名前缀归
-模型、按组聚合（组内取最小剩余代表水位），展示用千分制
-（0.9987 → `989.9 / 1000`），前端 `percent` 给的是已用比例（进度条约定）。
+**上游只给单值，且只在逼近池上限时才下调**：`fetchAvailableModels` 每个模型变体带
+`quotaInfo.remainingFraction`（0~1）+ `resetTime`（下一个 5 小时窗口的滚动刷新点），
+**没有 weekly/5h 分池字段**。实测两个账号：
+
+- `fetchAvailableModels` 与 `retrieveUserQuota` 返回**同一份**数据（每个模型都
+  `remainingFraction: 1`，`resetTime` = 当下 +5h）；`retrieveUserQuota` 的 bucket
+  字段只有 `modelId` / `tokenType` / `remainingFraction` / `resetTime`，没有分池。
+- `fetchUserStatus` / `fetchCredits` / `getUserQuota` 均 **404**。
+- `loadCodeAssist` 的 `paidTier.availableCredits` 只有 `creditType` /
+  `minimumCreditAmountForUsage`，**没有 `creditAmount`**（拿不到余额数字）。
+- 所以 **weekly 池的剩余根本没有接口可查**——CLIProxyAPI 那种「Five Hour /
+  Weekly Limit」两条是它自己把两个字段本地推算出来的，不是上游真有两条。
+
+管理面板按 upstream 名前缀归模型、按组聚合（**组内取最小剩余**代表水位；满额时
+全组都是 1，退化为「满额」），展示用千分制（0.9987 → `989.9 / 1000`）。
+`percent` / `used` 是**已用**（进度条约定，由 `1 - worst` 反推）。
+
+**读数的坑（用户实际反馈过）**：满额时 `used=0`、进度条是空的，容易被读成
+「额度是 0」。要清楚这是**剩余**语义：CLIProxyAPI 显示 `100%` 是剩余比例，
+buddy 显示「剩 1000 / 1000 · 已用 0%」是同一份数据的另一种口径，不是数据不一致。
+因此 `remainingFraction=1` 时面板文案显式写「满额（组内各模型均为 100%）」，
+并列出组内包含哪些模型（`models_in_group`）、说明 `resetTime` 只是 5 小时窗口的
+滚动刷新点（`reset_note`，不代表整组/每周池重置）。
 
 ## 模型名与 effort 后缀（实测坑）
 
