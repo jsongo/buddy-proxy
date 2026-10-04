@@ -106,7 +106,11 @@ def _unwrap(payload: str) -> tuple[str | None, str | None, bool]:
         return None, None, False
     body = frame.get("body")
     if not isinstance(body, str):
-        # 尾帧（计时统计）等：无 body，直接忽略
+        # 顶层带 code 的错误帧（真实权益门帧：
+        # ``{"code":"112","message":…}`` 没有 body）——不能当尾帧忽略。
+        if frame.get("code") is not None:
+            return None, _describe_upstream_error(frame), False
+        # 尾帧（计时统计）等：无 body 无 code，直接忽略
         return None, None, False
     if body == "[DONE]":
         return None, None, True

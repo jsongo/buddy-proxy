@@ -1,4 +1,4 @@
-"""Qoder provider：COSY 面聊天转发 + 额度查询。
+"""Qoder provider：COSY 面聊天转发（多账号 failover）+ 额度查询。
 
 Qoder 的聊天面（``/algo/.../agent_chat_generation``）与 OpenAI 线缆的差别
 只在**外壳**：
@@ -12,16 +12,20 @@ Qoder 的聊天面（``/algo/.../agent_chat_generation``）与 OpenAI 线缆的�
   内层才是标准 OpenAI ``chat.completion.chunk``。另有 ``event:finish``
   尾帧（无 body）与带内错误帧（HTTP 200 但 body 里是 ``{code,message}``）。
 
-本 provider 把信封拆掉，把内层 chunk 原样下游——增量/tool_calls/finish/usage
-全是标准 OpenAI 形态，无需二次翻译。
+多账号 failover 照抄 kimi/antigravity：按登录顺序主备降级，401 强刷、
+403（权益门/额度）/429 冷却换号；首个语义事件到达后绝不重放（防重复计费）。
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import logging
+import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
 
 import httpx
@@ -29,14 +33,24 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.core.checkin import SOURCE_UPSTREAM, next_from_window
+from buddy_proxy.core.metrics import ACCOUNT_META
 from buddy_proxy.providers.base import BaseProvider
 
+from . import failover
 from .campaigns import CLAIM_ACTION, CampaignClient
 from .catalog import Catalog, is_enabled, is_hidden, public_model_id, to_openai_model
-from .config import COSY_VERSION, Region, resolve_region, with_cached_endpoints
+from .config import COSY_VERSION, REGIONS, Region, resolve_region, with_cached_endpoints
 from .convert import _normalize_message, _to_anthropic_stream, _unwrap
 from .cosy import sign
-from .credentials import AuthError, Credential, ensure_credential
+from .credentials import (
+    AccountRef,
+    AuthError,
+    Credential,
+    cred_to_credential,
+    ensure_account_token,
+    list_accounts,
+    load_account_cred,
+)
 from .errors import _last_user_text, _sse_error, _upstream_error
 from .quota import _expire_ts, _pkg_active, _pkg_label, _used_percent
 
@@ -89,11 +103,31 @@ _PASSTHROUGH_FIELDS = (
     "system",
 )
 
-#: 上游首字节超时（边缘「收下不回应」时快速失败）。
-FIRST_BYTE_TIMEOUT_S = 60.0
-
+#: 流式：read 是「相邻两次读」的上限——首字节前（边缘收下不回应）与流中卡死都按它断。
+_TIMEOUT_STREAM = httpx.Timeout(connect=15.0, read=60.0, write=60.0, pool=15.0)
 #: 整轮流式上限（防止挂死连接长期占用）。
 STREAM_TIMEOUT_S = 600.0
+#: failover 循环的**尝试期**总预算（从进循环到每次尝试开始前检查）：只挡
+#: 「还没开始试」的尝试——已提交的流想跑多久跑多久（流中卡死由 read 超时管）。
+_ATTEMPT_DEADLINE_S = 300.0
+#: 流式首事件闸门的缓冲行上限（防异常上游无界攒内存）。
+_GATE_BUFFER_MAX_LINES = 256
+
+#: 多账号额度并发查询：整轮 deadline + 常驻线程池（kimi 同款，理由见
+#: trae/pat/quota.py：每轮新建池会让慢轮线程后台累积；常驻池上限封顶自然排队）。
+_QUOTA_ROUND_DEADLINE_S = 8.0
+_QUOTA_WORKERS = 4
+_quota_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
+_quota_pool_lock = threading.Lock()
+
+
+def _quota_executor() -> "concurrent.futures.ThreadPoolExecutor":
+    global _quota_pool
+    with _quota_pool_lock:
+        if _quota_pool is None:
+            _quota_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_QUOTA_WORKERS, thread_name_prefix="qoder-quota")
+        return _quota_pool
 
 
 class QoderProvider(BaseProvider):
@@ -105,35 +139,41 @@ class QoderProvider(BaseProvider):
     supports_checkin = True
 
     def __init__(self, region: Region | None = None) -> None:
+        # 主区域（顶层 health / 无账号时的兜底语义）；实际转发/额度按每账号
+        # 自己的 region 取 catalog。
         self._region = with_cached_endpoints(region or resolve_region())
-        self._catalog = Catalog(self._region)
-        self._cred: Credential | None = None
+        self._catalogs: dict[str, Catalog] = {}
+        self._catalog_lock = threading.Lock()
+
+    # -- catalog ------------------------------------------------------------
+
+    def _catalog_for(self, region_key: str) -> Catalog:
+        """按 region key 取（惰性建）模型目录。"""
+        with self._catalog_lock:
+            cat = self._catalogs.get(region_key)
+            if cat is None:
+                reg = REGIONS.get(region_key) or self._region
+                cat = Catalog(with_cached_endpoints(reg))
+                self._catalogs[region_key] = cat
+            return cat
 
     # -- 认证 ---------------------------------------------------------------
 
     def region(self) -> Region:
-        """当前区域（含从桌面端缓存覆盖的端点）。"""
+        """主区域（含从桌面端缓存覆盖的端点）。"""
         return self._region
 
     def ensure_auth(self) -> None:
-        """启动时校验凭证；缺失/不可用抛 401。"""
-        try:
-            self._cred = ensure_credential_sync(self._region)
-        except AuthError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-
-    async def _credential(self) -> Credential:
-        """取（必要时刷新的）凭据。"""
-        try:
-            self._cred = await ensure_credential(self._region)
-        except AuthError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-        return self._cred
+        """启动时校验至少有一个账号；缺失抛 401。"""
+        if not list_accounts():
+            raise HTTPException(
+                status_code=401,
+                detail=("qoder 未登录：请先跑 `buddy login qoder`（浏览器授权）"))
 
     # -- 模型 ---------------------------------------------------------------
 
     def models(self) -> Sequence[dict[str, Any]]:
-        """同步返回模型列表（用兜底目录；异步刷新见 ``refresh_models``）。
+        """同步返回模型列表（用主区域兜底目录；异步刷新见 ``refresh_models``）。
 
         两类条目不展示：旧模型（:data:`catalog.HIDDEN_KEYS`）和上游已停用的
         （``enable=false``，:func:`catalog.is_enabled`）。隐藏 ≠ 停用：两类
@@ -141,26 +181,31 @@ class QoderProvider(BaseProvider):
         摆着调不通的模型只会让客户端白白选到它（2026-10-03 三方模型整批
         被收回后，/v1/models 仍虚报 7 个 403 模型的教训）。
         """
-        entries = self._catalog._models or Catalog.fallback()
+        entries = self._catalog_for(self._region.key)._models or Catalog.fallback()
         return [to_openai_model(e, self.id)
                 for e in entries if not is_hidden(e) and is_enabled(e)]
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
-        """从上游刷新目录（供管理页「刷新模型」与转发前预热用）。"""
-        try:
-            cred = await self._credential()
-        except HTTPException as exc:
-            # 未登录时不该让管理页整体 500：回落到本地目录，把原因带回去。
-            log.warning("qoder 目录刷新跳过（认证未就绪）: %s", exc.detail)
+        """从上游刷新主区域目录（供管理页「刷新模型」与转发前预热用）。"""
+        accounts = failover.available_accounts(self._region.key) or failover.available_accounts()
+        cred: Credential | None = None
+        if accounts:
+            try:
+                _, cred_dict = await asyncio.to_thread(ensure_account_token, accounts[0].id)
+                cred = cred_to_credential(cred_dict)
+            except AuthError as exc:
+                log.warning("qoder 目录刷新跳过（凭据未就绪）: %s", exc)
+        entries: list[dict[str, Any]]
+        if cred is None:
             entries = Catalog.fallback()
         else:
-            entries = await self._catalog.fetch(cred, force=force)
+            entries = await self._catalog_for(cred.region).fetch(cred, force=force)
         return [to_openai_model(e, self.id)
                 for e in entries if not is_hidden(e) and is_enabled(e)]
 
     def resolve_model(self, model: str) -> str:
         """把显示名/大小写变体归一成上游 key。"""
-        return self._catalog.resolve_key(model)
+        return self._catalog_for(self._region.key).resolve_key(model)
 
     def accepts_model(self, model: str, aliases: bool = True) -> bool:
         """目录别名（显示名/大小写变体）也要能被自动路由命中。
@@ -184,18 +229,9 @@ class QoderProvider(BaseProvider):
         if not want:
             return False
         # 名字若同时属于 CodeBuddy 静态表（如 ``auto``），**两个轮次都让开**。
-        # 别名轮那道 ``_is_codebuddy_model`` 守卫管不到精确轮，而基类会把
-        # ``qoder/auto`` 剥前缀后当成精确命中；Qoder 的档位 id 恰好就是 ``auto``，
-        # 于是 ``auto``（CodeBuddy 的默认模型）被静默改道到本通道（实测确实发生
-        # 了：provider_route 显示 qoder 服务了 auto）。文件名式判断统一走
-        # ``_is_codebuddy_model``，静态表变了不用两边同步。
-        # 大小写变体（``Auto`` / ``AUTO``）也一并让开：``auto`` 这个档位名本来
-        # 就没有大小写语义，而 ``_is_codebuddy_model`` 是精确比对的（它必须如此，
-        # 免得 ``Qwen3.8-Max`` 这类官方显示名被误挡）。显式 ``qoder/auto`` 走
-        # 前缀路由，不经过本方法。
         if _is_codebuddy_owned(want):
             return False
-        entries = self._catalog._models or Catalog.fallback()
+        entries = self._catalog_for(self._region.key)._models or Catalog.fallback()
         # 隐藏模型（旧模型）也放进精确集合：它们只是不出现在列表里，点名仍可调。
         exact_ids = {(public_model_id(e) or "").strip() for e in entries}
         exact_ids.discard("")
@@ -206,15 +242,24 @@ class QoderProvider(BaseProvider):
         # ``resolve_key`` 对「已经是上游 key」与「认不出」两种输入都原样返回，
         # 单看 ``key == want`` 无法区分——只能直接查目录：归一结果确实存在，
         # 才认领；否则（真正的未知模型）放行给别人。
-        key = self._catalog.resolve_key(want)
+        key = self._catalog_for(self._region.key).resolve_key(want)
         return any(str(m.get("key") or "") == key for m in entries)
 
     # -- 每日活动权益（打卡） ------------------------------------------------
 
     async def _campaigns(self) -> CampaignClient:
-        """构造活动面客户端（复用当前凭据）。"""
-        cred = await self._credential()
-        return CampaignClient(self._region, cred)
+        """构造活动面客户端（复用第一个可用账号的凭据）。
+
+        打卡/额度默认只用首个可用账号（= 额度大、正常打卡的那个）；不跨账号
+        failover——打卡是「每天每账号一次」的语义，叠加没有意义。
+        """
+        accounts = failover.available_accounts(self._region.key) or failover.available_accounts()
+        if not accounts:
+            raise AuthError("qoder 没有可用账号（未登录或全部冷却中）")
+        _, cred_dict = await asyncio.to_thread(ensure_account_token, accounts[0].id)
+        cred = cred_to_credential(cred_dict)
+        reg = with_cached_endpoints(resolve_region(cred.region))
+        return CampaignClient(reg, cred)
 
     async def checkin_status(self) -> dict[str, Any] | None:
         """查今日「活动权益」领取状态（``/sash/api/v1/me/campaigns``）。
@@ -327,61 +372,132 @@ class QoderProvider(BaseProvider):
     # -- 额度 ---------------------------------------------------------------
 
     async def quota(self) -> dict[str, Any] | None:
-        """查额度（``/api/v2/quota/usage``）。
+        """查额度（``/api/v2/quota/usage``），多账号并发。
 
         Qoder 的 ``userQuota`` 在部分账号（个人版）恒为 0，真实余额在
-        ``addOnQuota``——因此取「total 更大的一侧」作为展示口径。
+        ``addOnQuota``——因此取「total 更大的一侧」作为展示口径。多账号时
+        各账号条目带 ``Qoder #N · `` 前缀供前端分组；个别账号失败插
+        ``query_failed`` 说明条（benefits 层认这个标记走短缓存）。
         """
-        cred = await self._credential()
+        accounts = failover.available_accounts(self._region.key) or failover.available_accounts()
+        if not accounts:
+            return None
+        multi = len(accounts) > 1
+
+        if multi:
+            pool = _quota_executor()
+            futures = [pool.submit(self._quota_one, a, i + 1, multi=True)
+                       for i, a in enumerate(accounts)]
+            deadline = time.monotonic() + _QUOTA_ROUND_DEADLINE_S
+            items: list[dict[str, Any]] = []
+            failed: list[str] = []
+            for acct, fut in zip(accounts, futures):  # 按 failover 顺位收集，UI 顺序稳定
+                name = f"#{acct.priority + 1}"
+                try:
+                    its, ok = fut.result(timeout=max(deadline - time.monotonic(), 0.05))
+                except Exception:  # noqa: BLE001 - 超时/异常账号都算失败
+                    its, ok = [], False
+                if not ok:
+                    failed.append(name)
+                else:
+                    items.extend(its)
+            if failed:
+                items.insert(0, {
+                    "label": "Qoder 额度查询失败",
+                    "used": None, "total": None,
+                    "remaining": f"{len(failed)}/{len(accounts)} 个账号取不到额度"
+                                 f"（{'、'.join(failed)}）",
+                    "percent": None, "reset_ts": None,
+                    "query_failed": True,
+                })
+        else:
+            its, ok = self._quota_one(accounts[0], 1, multi=False)
+            items = its if ok else []
+
+        # level / account 取首个可用账号的（标题行展示用）。
+        _, first_cred = await asyncio.to_thread(ensure_account_token, accounts[0].id)
+        first = cred_to_credential(first_cred)
+        return {
+            "items": items,
+            "level": first.plan or None,
+        }
+
+    def quota_epoch(self) -> str:
+        """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。"""
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(
-                    self._region.quota_url(),
-                    headers={
-                        "Authorization": f"Bearer {cred.token}",
-                        "Accept": "application/json",
-                    },
-                )
+            accts = list_accounts()
+        except Exception:  # noqa: BLE001 - 拿不到就退回常量键
+            return "unknown"
+        return ",".join(f"{a.id}#{a.priority}" for a in accts) or "empty"
+
+    def _quota_one(self, acct: AccountRef, index: int, *, multi: bool
+                   ) -> tuple[list[dict[str, Any]], bool]:
+        """单账号额度查询：``(items, ok)``。
+
+        同步 httpx 直接跑在常驻线程池里（kimi 同款：fetch 本来就是同步调用）。
+        """
+        try:
+            token, cred_dict = ensure_account_token(acct.id)
+        except AuthError:
+            return [], False
+        cred = cred_to_credential(cred_dict)
+        reg = with_cached_endpoints(resolve_region(cred.region))
+        try:
+            resp = httpx.get(reg.quota_url(),
+                             headers={"Authorization": f"Bearer {token}",
+                                      "Accept": "application/json"},
+                             timeout=20)
         except httpx.HTTPError as exc:
-            log.warning("qoder 额度查询失败: %s", exc)
-            return None
+            log.warning("qoder 额度查询失败（%s）: %s", acct.id, exc)
+            return [], False
         if resp.status_code != 200:
-            log.warning("qoder 额度查询 HTTP %s: %s", resp.status_code, resp.text[:160])
-            return None
+            log.warning("qoder 额度查询 HTTP %s（%s）: %s",
+                        resp.status_code, acct.id, resp.text[:160])
+            return [], False
         try:
             data = resp.json()
         except ValueError:
-            return None
-        out = self._format_quota(data, cred)
-        # 账号套餐名来自额度接口（``userType``），顺手回填到内存凭据与状态文件，
-        # 让 /health、鉴权面板不必再单独查一次。
+            return [], False
+        prefix = f"Qoder #{index} · " if multi else ""
+        out = self._format_quota(data, cred, label_prefix=prefix)
+        # 账号套餐名来自额度接口（``userType``），顺手回填到 cred 文件，让
+        # /health、鉴权面板不必再单独查一次。**必须读最新盘再改 plan**：
+        # cred_dict 是 ensure_account_token 返回时的快照，若期间有并发请求
+        # 触发刷新（RT 滚动、token 已更新），拿旧快照整份覆盖会把新 token
+        # 回滚回去——下一个请求拿着被回滚的旧 token 就 401 了。
         tier = str(data.get("userType") or "")
         if tier and cred.plan != tier:
-            cred.plan = tier
             try:
-                from .credentials import _persist
+                from .credentials import (
+                    _atomic_write_json,
+                    _index_file_lock,
+                    _index_lock,
+                    account_cred_path,
+                    load_account_cred,
+                )
 
-                _persist(cred)
+                with _index_lock, _index_file_lock():
+                    current = load_account_cred(acct.id)
+                    if current is not None and current.get("plan") != tier:
+                        current["plan"] = tier
+                        _atomic_write_json(account_cred_path(acct.id), current)
             except Exception as exc:  # noqa: BLE001 - 回填失败不影响额度展示
                 log.debug("qoder 套餐名回填失败: %s", exc)
-        return out
+        return out["items"], True
 
-    def _account_info(self) -> dict[str, Any]:
-        cred = self._cred
-        if cred is None:
-            return {}
+    def _account_info(self, cred: Credential) -> dict[str, Any]:
         return {
             "uid": cred.uid,
             "name": cred.name,
             "email": cred.email,
-            "region": self._region.key,
-            "region_label": self._region.label,
+            "region": cred.region,
             "plan": cred.plan,
             "source": cred.source,
             "expires_at_ms": cred.expires_at_ms,
         }
 
-    def _format_quota(self, data: dict[str, Any], cred: Credential) -> dict[str, Any]:
+    def _format_quota(self, data: dict[str, Any], cred: Credential,
+                      label_prefix: str = "") -> dict[str, Any]:
         """上游额度 -> 管理页统一结构。"""
         user_q = data.get("userQuota") or {}
         addon_q = data.get("addOnQuota") or {}
@@ -416,7 +532,7 @@ class QoderProvider(BaseProvider):
             except (TypeError, ValueError):
                 remain_v = max(total_v - used_v, 0.0)
             return {
-                "label": name,
+                "label": label_prefix + name,
                 "used": round(used_v, 4),
                 "total": round(total_v, 4),
                 "remaining": round(remain_v, 4),
@@ -455,7 +571,7 @@ class QoderProvider(BaseProvider):
             "quota_exceeded": bool(data.get("isQuotaExceeded")),
             "total_percent": data.get("totalUsagePercentage"),
             "upgrade_url": data.get("upgradeUrl"),
-            "region": self._region.key,
+            "region": cred.region,
             "items": items,
             # 上面三项（订阅额度 / 加油包 / 专属积分，各自又是列表里的一条）是
             # **并存的份额**，加起来才是账号剩余总量——管理页标题行据此求和，
@@ -463,13 +579,13 @@ class QoderProvider(BaseProvider):
             # 用户看到的就是比实际少的数）。上游自己也这么算：实测三项合计
             # 已用 37.5%，上游 totalUsagePercentage 正好是 0.38。
             "sum_items": True,
-            "account": self._account_info(),
+            "account": self._account_info(cred),
         }
 
     # -- 健康 ---------------------------------------------------------------
 
     def health(self) -> dict[str, Any]:
-        cred = self._cred
+        accounts = list_accounts()
         info: dict[str, Any] = {
             "provider": self.id,
             "region": self._region.key,
@@ -478,20 +594,30 @@ class QoderProvider(BaseProvider):
             "endpoint_type": "cosy",
             "protocol": "openai-envelope",
             "cosy_version": COSY_VERSION,
-            "models": len(self._catalog._models or Catalog.fallback()),
+            "models": len(self._catalog_for(self._region.key)._models or Catalog.fallback()),
+            "authenticated": bool(accounts),
+            "accounts": [
+                {
+                    "id": a.id,
+                    "email": a.email,
+                    "name": a.name or a.email or a.id,
+                    "region": a.region,
+                }
+                for a in accounts
+            ],
         }
-        if cred is not None:
+        # 顶层字段保持主账号（#1）语义兼容旧前端。
+        if accounts:
+            first = load_account_cred(accounts[0].id) or {}
+            first_cred = cred_to_credential(first)
             info.update(
                 {
-                    "authenticated": True,
-                    "account": cred.uid,
-                    "plan": cred.plan or None,
-                    "auth_source": cred.source,
-                    "expires_at_ms": cred.expires_at_ms or None,
+                    "account": first_cred.uid,
+                    "plan": first_cred.plan or None,
+                    "auth_source": first_cred.source,
+                    "expires_at_ms": first_cred.expires_at_ms or None,
                 }
             )
-        else:
-            info["authenticated"] = False
         return info
 
     # -- 转发 ---------------------------------------------------------------
@@ -502,75 +628,216 @@ class QoderProvider(BaseProvider):
         protocol: str,
         original: dict[str, Any] | None = None,
     ) -> StreamingResponse | JSONResponse:
-        """把 OpenAI chat 请求转发到 Qoder COSY 面。"""
-        cred = await self._credential()
-        want_stream = bool(body.get("stream", True))
+        """把 OpenAI chat 请求转发到 Qoder COSY 面（多账号 failover）。"""
+        stream = bool(body.get("stream", True))
         model = self.resolve_model(str(body.get("model") or "auto"))
 
-        upstream = self._build_upstream(body, model)
-        body_json = json.dumps(upstream, ensure_ascii=False, separators=(",", ":"))
-        url = self._region.chat_url()
-        enc_body, headers = sign(
-            url,
-            body_json,
-            cred.uid,
-            cred.token,
-            cred.machine_id,
-            name=cred.name,
-            email=cred.email,
-            model_key=model,
-        )
-        headers["Accept"] = "text/event-stream"
-
-        client = httpx.AsyncClient(timeout=httpx.Timeout(STREAM_TIMEOUT_S, connect=20))
-        try:
-            req = client.build_request("POST", url, headers=headers, content=enc_body.encode())
-            resp = await client.send(req, stream=True)
-        except httpx.HTTPError as exc:
-            await client.aclose()
-            raise _upstream_error(f"上游连接失败: {exc}") from exc
-
-        if resp.status_code != 200:
-            text = (await resp.aread()).decode("utf-8", "replace")[:300]
-            await resp.aclose()
-            await client.aclose()
-            message = f"HTTP {resp.status_code}: {text}"
-            if resp.status_code in (401, 429):
-                # 鉴权/限流是明确的、客户端可自行判断的错误，保持原样与状态码
+        accounts = failover.available_accounts(self._region.key)
+        if not accounts:
+            other = failover.available_accounts()
+            if other:
                 raise HTTPException(
-                    status_code=resp.status_code,
-                    detail=f"qoder 上游 HTTP {resp.status_code}: {text}",
+                    status_code=401,
+                    detail={"error": {
+                        "message": (f"qoder 无 {self._region.label} 区域的可用账号"
+                                    f"（已有 {len(other)} 个账号属于其它区域，"
+                                    f"跨区账号间不自动切换）"),
+                        "type": "authentication_error"}},
                 )
-            raise _upstream_error(message)
-
-        if want_stream:
-            # Anthropic 客户端（Claude Code 的 /v1/messages）不能收 OpenAI chunk：
-            # 上游没有 Anthropic 原生端点，必须在这里把 OpenAI SSE 转成
-            # message_start / content_block_delta / message_stop 事件流。
-            # 不转的话 Claude Code 收到 200 却拿不到事件，报
-            # 「Streaming response ended before any complete data was received」。
-            if protocol == "anthropic":
-                from ..protocols.anthropic_adapter import AnthropicStreamConverter
-                stream: AsyncIterator[bytes] = _to_anthropic_stream(
-                    self._stream(resp, client, model), model, AnthropicStreamConverter,
-                )
-            else:
-                stream = self._stream(resp, client, model)
-            return StreamingResponse(
-                stream,
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            raise HTTPException(
+                status_code=429,
+                detail={"error": {
+                    "message": (f"qoder 所有账号均在冷却中：{failover.cooldown_report()}"
+                                "；额度冷却到点自动恢复"),
+                    "type": "rate_limit_error"}},
             )
-        payload = await self._collect(resp, client, model)
-        if protocol == "anthropic":
-            from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
-            return JSONResponse(chat_completion_to_anthropic_message(payload, original))
-        return JSONResponse(payload)
+
+        meta = ACCOUNT_META.get()  # metrics 账号归属
+        started = time.monotonic()
+        tried = 0
+        last_status = 0
+        last_detail = ""
+
+        for acct in accounts:
+            if tried and time.monotonic() - started > _ATTEMPT_DEADLINE_S:
+                last_status = last_status or 504
+                last_detail = last_detail or "尝试预算用尽（上游持续无响应）"
+                break
+            tried += 1
+            try:
+                token, cred_dict = await asyncio.to_thread(ensure_account_token, acct.id)
+            except AuthError as exc:
+                failover.mark_cooldown(acct.id, reason=f"凭据不可用: {exc}")
+                continue
+            cred = cred_to_credential(cred_dict)
+            if meta is not None:
+                meta["account"] = acct.id
+
+            reg = with_cached_endpoints(resolve_region(cred.region))
+            catalog = self._catalog_for(reg.key)
+            upstream = self._build_upstream(body, model, catalog)
+            body_json = json.dumps(upstream, ensure_ascii=False, separators=(",", ":"))
+            url = reg.chat_url()
+            enc_body, headers = sign(
+                url, body_json,
+                cred.uid, token, cred.machine_id,
+                name=cred.name, email=cred.email,
+                model_key=model,
+            )
+            headers["Accept"] = "text/event-stream"
+
+            client = httpx.AsyncClient(timeout=_TIMEOUT_STREAM)
+            try:
+                req = client.build_request("POST", url, headers=headers, content=enc_body.encode())
+                resp = await client.send(req, stream=True)
+            except httpx.HTTPError as exc:
+                await client.aclose()
+                last_status, last_detail = 502, f"上游连接失败: {exc}"
+                failover.mark_cooldown(acct.id, reason=f"网络错误: {exc}")
+                continue
+
+            if resp.status_code != 200:
+                text = (await resp.aread()).decode("utf-8", "replace")[:300]
+                await resp.aclose()
+                if resp.status_code == 401:
+                    # token 被上游拒（refresh_token 被轮换/作废等）——强刷一次重试同
+                    # 账号。401 分支**不关 client**：强刷重试复用同连接。
+                    last_status, last_detail = 401, text
+                    try:
+                        token, cred_dict = await asyncio.to_thread(
+                            ensure_account_token, acct.id, force_refresh=True)
+                    except AuthError as exc:
+                        await client.aclose()
+                        failover.mark_cooldown(acct.id, reason=f"强刷失败: {exc}")
+                        continue
+                    cred = cred_to_credential(cred_dict)
+                    enc_body, headers = sign(
+                        url, body_json,
+                        cred.uid, token, cred.machine_id,
+                        name=cred.name, email=cred.email,
+                        model_key=model,
+                    )
+                    headers["Accept"] = "text/event-stream"
+                    try:
+                        req = client.build_request("POST", url, headers=headers,
+                                                   content=enc_body.encode())
+                        resp = await client.send(req, stream=True)
+                    except httpx.HTTPError as exc:
+                        await client.aclose()
+                        last_status, last_detail = 502, f"上游连接失败（强刷重试）: {exc}"
+                        failover.mark_cooldown(acct.id, reason="强刷重试网络错误")
+                        continue
+                    if resp.status_code == 401:
+                        text = (await resp.aread()).decode("utf-8", "replace")[:300]
+                        await resp.aclose()
+                        await client.aclose()
+                        last_status, last_detail = 401, text
+                        failover.mark_cooldown(acct.id, reason="401 强刷后仍被拒")
+                        continue
+                    if resp.status_code != 200:
+                        # 强刷后变成别的错误码（401 已在上方 continue）：按新状态码处理。
+                        text = (await resp.aread()).decode("utf-8", "replace")[:300]
+                        await resp.aclose()
+                        await client.aclose()
+                        if resp.status_code == 429:
+                            failover.mark_cooldown(acct.id, quota=True,
+                                                   retry_after=resp.headers.get("Retry-After"),
+                                                   reason=f"HTTP 429（强刷后）: {text[:120]}")
+                            continue
+                        if resp.status_code == 403 and ("112" in text or "pricing" in text.lower()):
+                            failover.mark_cooldown(acct.id, quota=True,
+                                                   reason=f"HTTP 403 权益门（强刷后）: {text[:120]}")
+                            continue
+                        raise HTTPException(status_code=resp.status_code,
+                                            detail=f"qoder 上游 HTTP {resp.status_code}: {text}")
+                else:
+                    await client.aclose()
+                if resp.status_code == 429:
+                    last_status, last_detail = 429, text
+                    failover.mark_cooldown(acct.id, quota=True,
+                                           retry_after=resp.headers.get("Retry-After"),
+                                           reason=f"HTTP 429: {text}")
+                    continue
+                if resp.status_code == 403:
+                    # 403 可能是账号级（额度尽、权益收回 code 112）也可能是请求级
+                    # （模型不存在）。带 112/pricing 的按账号冷却换号；其余透传。
+                    if "112" in text or "pricing" in text.lower():
+                        last_status, last_detail = 403, text
+                        failover.mark_cooldown(acct.id, quota=True,
+                                               reason=f"HTTP 403 权益门: {text[:120]}")
+                        continue
+                    await client.aclose()
+                    raise HTTPException(status_code=403, detail=f"qoder 上游 HTTP 403: {text}")
+                # 其余业务 4xx（模型名不合法等）：换号没意义，原样透传
+                await client.aclose()
+                raise HTTPException(status_code=resp.status_code,
+                                    detail=f"qoder 上游 HTTP {resp.status_code}: {text}")
+
+            # 200：过首事件闸门——首个内层 chunk / 带内错误帧到达前，没向客户端
+            # 吐过任何字节，可以安全冷却换号；见到语义事件后绝不重放（防重复计费）。
+            gate = await _gate_first_event(resp, stream)
+            if gate.account_error:
+                last_status, last_detail = gate.code, gate.message
+                failover.mark_cooldown(
+                    acct.id, quota=gate.code in (112, 429),
+                    reason=f"带内 error {gate.code}: {gate.message[:120]}")
+                await _drain_and_close(gate.resp, client, gate.lines)
+                continue
+            if gate.eof:
+                last_status, last_detail = 502, "首事件前断流（上游空响应）"
+                await _drain_and_close(gate.resp, client, gate.lines)
+                continue
+
+            if stream:
+                inner = _ReplayStream(gate.resp, gate.buffered, gate.lines, client)
+                if protocol == "anthropic":
+                    from ..protocols.anthropic_adapter import AnthropicStreamConverter
+
+                    return StreamingResponse(
+                        _to_anthropic_stream(
+                            _stream_inner(inner, model), model, AnthropicStreamConverter),
+                        media_type="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                    )
+                return StreamingResponse(
+                    _stream_inner(inner, model),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
+            payload = await _collect_inner(gate.resp, client, gate.lines, gate.buffered, model)
+            if payload is None:
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": {"message": "qoder upstream returned non-JSON",
+                                      "type": "bad_gateway"}},
+                )
+            if protocol == "anthropic":
+                from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
+                return JSONResponse(chat_completion_to_anthropic_message(payload, original))
+            return JSONResponse(payload)
+
+        # 全部账号失败
+        report = failover.cooldown_report()
+        tail = f"最后错误 HTTP {last_status or 'n/a'}{(': ' + last_detail) if last_detail else ''}"
+        raise HTTPException(
+            status_code=last_status if last_status in (401, 403, 429, 504) else 502,
+            detail={"error": {
+                "message": (f"qoder 所有账号均不可用（{report}；{tail}）" if report
+                            else f"qoder 所有账号均不可用（{tail}）"),
+                "type": ("timeout" if last_status == 504
+                         else "rate_limit_error" if last_status in (403, 429)
+                         else "bad_gateway"),
+            }},
+        )
 
     # -- 出站体构造 ---------------------------------------------------------
 
-    def _build_upstream(self, body: dict[str, Any], model: str) -> dict[str, Any]:
-        """组装带归因信封的上游 body（明文）。"""
+    def _build_upstream(self, body: dict[str, Any], model: str,
+                        catalog: Catalog | None = None) -> dict[str, Any]:
+        """组装带归因信封的上游 body（明文）。
+
+        ``catalog`` 缺省用主区域目录（测试与单区域调用方常见形态）。
+        """
         upstream: dict[str, Any] = {
             "model": model,
             "stream": True,
@@ -591,7 +858,9 @@ class QoderProvider(BaseProvider):
         request_set_id = str(uuid.uuid4())
         session_id = str(uuid.uuid4())
         prompt_text = _last_user_text(upstream.get("messages") or [])
-        entry = self._catalog.entry(model)
+        if catalog is None:
+            catalog = self._catalog_for(self._region.key)
+        entry = catalog.entry(model)
 
         upstream.update(
             {
@@ -647,136 +916,287 @@ class QoderProvider(BaseProvider):
         )
         return upstream
 
-    # -- 入站解析 -----------------------------------------------------------
 
-    async def _stream(
-        self,
-        resp: httpx.Response,
-        client: httpx.AsyncClient,
-        model: str,
-    ) -> AsyncIterator[bytes]:
-        """拆 SSE 信封，把内层 OpenAI chunk 原样下游。"""
-        started = time.time()
-        try:
-            async for line in resp.aiter_lines():
-                if time.time() - started > STREAM_TIMEOUT_S:
-                    log.warning("qoder 流超时（%.0fs），中止", STREAM_TIMEOUT_S)
-                    break
-                raw = line.strip()
-                if not raw or raw.startswith("event:"):
-                    continue
-                if not raw.startswith("data:"):
-                    continue
-                payload = raw[5:].strip()
-                inner, error, done = _unwrap(payload)
-                if error is not None:
-                    log.warning("qoder 上游带内错误 (%s): %s", model, error)
-                    yield _sse_error(error)
-                    yield b"data: [DONE]\n\n"
-                    return
-                if done:
-                    yield b"data: [DONE]\n\n"
-                    return
-                if inner is not None:
-                    yield f"data: {inner}\n\n".encode()
-        except httpx.HTTPError as exc:
-            log.warning("qoder 流中断: %s", exc)
-            yield _sse_error(f"上游流中断: {exc}")
-            yield b"data: [DONE]\n\n"
-        finally:
-            await resp.aclose()
-            await client.aclose()
+# ---------------------------------------------------------------------------
+# 首事件闸门 / 重放流 / 内层流拆解
+# ---------------------------------------------------------------------------
 
-    async def _collect(
-        self,
-        resp: httpx.Response,
-        client: httpx.AsyncClient,
-        model: str,
-    ) -> dict[str, Any]:
-        """非流式：聚合内层 chunk 成一个 ``chat.completion``。"""
-        created = int(time.time())
-        content: list[str] = []
-        reasoning: list[str] = []
-        finish_reason: str | None = None
-        usage: dict[str, Any] | None = None
-        tool_calls: dict[int, dict[str, Any]] = {}
-        error: str | None = None
+@dataclass
+class _Gate:
+    """首事件闸门的判定结果（qoder 上游是 SSE 信封，闸门按**信封帧**消费）。"""
+    resp: httpx.Response
+    committed: bool = False
+    buffered: list[str] = field(default_factory=list)  # 闸门期间缓冲的原始 SSE 行
+    lines: Any = None  # 在途行迭代器（续跑/排空都用它，不重开 aiter_lines）
+    account_error: bool = False
+    code: int = 0
+    message: str = ""
+    eof: bool = False
+
+
+def _classify_frame(payload: str) -> str:
+    """单个上游信封帧定性：``account_error`` / ``semantic`` / ``wait``。
+
+    - 带内错误（:func:`_unwrap` 给出 error——含 envelope 顶层带 code 的权益门
+      帧）→ 挖 ``code``：112/429/401 是账号级（权益门/额度/token 失效）冷却换号；
+      其余请求级错误原样透传。
+    - 内层 chunk 带 ``choices``/``usage`` → 语义已至（committed）。
+    - 尾帧/心跳（无 body 无 code）→ 继续等。
+    """
+    inner, error, _done = _unwrap(payload)
+    if error is not None:
+        code = 0
         try:
-            async for line in resp.aiter_lines():
-                raw = line.strip()
-                if not raw.startswith("data:"):
-                    continue
-                inner, err, done = _unwrap(raw[5:].strip())
-                if err is not None:
-                    error = err
-                    break
-                if done:
-                    break
-                if inner is None:
-                    continue
+            frame = json.loads(payload)
+            code = int((frame or {}).get("code") or 0)
+        except (ValueError, TypeError):
+            pass
+        if code in (112, 429, 401):
+            return f"account_error:{code}:{error}"
+        # 请求级错误：交给后续拆解当语义透传（转换器会发 error 事件收尾）
+        return "semantic"
+    if inner is not None:
+        return "semantic"
+    return "wait"
+
+
+async def _gate_first_event(resp: httpx.Response, stream: bool) -> _Gate:
+    """压住第一个上游事件再决定透传还是换号。
+
+    流式：缓冲原始 SSE 行直到第一条能定性的信封帧——内层 chunk（语义已至）
+    即 committed（缓冲行随透传补放）；带内错误帧按 code 分类；尾帧/心跳继续等；
+    语义事件前断流/EOF 按 eof 处理（换号，防「200 空流假成功」）。非流式：COSY
+    面恒为 SSE 信封，``stream=False`` 也走同一套行缓冲（由调用方聚合）。
+    """
+    buffered: list[str] = []
+    lines = resp.aiter_lines()
+    try:
+        async for line in lines:
+            buffered.append(line)
+            if len(buffered) > _GATE_BUFFER_MAX_LINES:
+                return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
+            stripped = line.strip()
+            if not stripped.startswith("data:"):
+                continue
+            payload = stripped[5:].strip()
+            if not payload:
+                continue
+            verdict = _classify_frame(payload)
+            if verdict.startswith("account_error:"):
+                _, _, rest = verdict.partition("account_error:")
+                code_s, _, message = rest.partition(":")
                 try:
-                    chunk = json.loads(inner)
+                    code = int(code_s)
                 except ValueError:
-                    continue
-                choices = chunk.get("choices") or []
-                if choices:
-                    choice = choices[0] or {}
-                    delta = choice.get("delta") or {}
-                    if delta.get("content"):
-                        content.append(str(delta["content"]))
-                    if delta.get("reasoning_content"):
-                        reasoning.append(str(delta["reasoning_content"]))
-                    for call in delta.get("tool_calls") or []:
-                        idx = int(call.get("index") or 0)
-                        slot = tool_calls.setdefault(
-                            idx, {"id": "", "type": "function",
-                                  "function": {"name": "", "arguments": ""}}
-                        )
-                        if call.get("id"):
-                            slot["id"] = call["id"]
-                        fn = call.get("function") or {}
-                        if fn.get("name"):
-                            slot["function"]["name"] = fn["name"]
-                        if fn.get("arguments"):
-                            slot["function"]["arguments"] += str(fn["arguments"])
-                    if choice.get("finish_reason"):
-                        finish_reason = choice["finish_reason"]
-                if chunk.get("usage"):
-                    usage = chunk["usage"]
-        except httpx.HTTPError as exc:
-            error = f"上游流中断: {exc}"
-        finally:
-            await resp.aclose()
-            await client.aclose()
-
-        if error is not None:
-            raise _upstream_error(error)
-
-        message: dict[str, Any] = {"role": "assistant", "content": "".join(content) or None}
-        if tool_calls:
-            message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-        if reasoning:
-            message["reasoning_content"] = "".join(reasoning)
-
-        return {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
-            "object": "chat.completion",
-            "created": created,
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": finish_reason or "stop",
-                }
-            ],
-            "usage": usage
-            or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        }
+                    code = 0
+                return _Gate(resp=resp, account_error=True, code=code,
+                             message=message, lines=lines)
+            if verdict == "semantic":
+                return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
+            # 尾帧/心跳：继续等下一条
+    except httpx.TimeoutException:
+        return _Gate(resp=resp, eof=True, lines=lines)
+    except httpx.HTTPError:
+        return _Gate(resp=resp, eof=True, lines=lines)
+    return _Gate(resp=resp, eof=True, lines=lines)
 
 
-def ensure_credential_sync(region: Region) -> Credential:
-    """同步取凭据（只读，不刷新）——供 ``ensure_auth`` 启动校验用。"""
-    from .credentials import resolve_credential
+class _ReplayStream:
+    """闸门缓冲行 → 真实流的适配器（先补放缓冲，再接原流）。
 
-    return resolve_credential(region)
+    下游只用 ``aiter_lines()``/``aclose()``。``lines`` 为闸门的在途迭代器：
+    续跑它而不是重开 ``resp.aiter_lines()``，否则会被 httpx 判为二次消费
+    （kimi #72 同坑：claude 流式因此完全空流）。
+    """
+
+    def __init__(self, resp: httpx.Response, buffered: list[str], lines: Any,
+                 client: httpx.AsyncClient) -> None:
+        self._resp = resp
+        self._buffered = list(buffered)
+        self._lines = lines
+        self._client = client
+
+    async def aiter_lines(self) -> AsyncIterator[str]:
+        for line in self._buffered:
+            yield line
+        if self._lines is not None:
+            async for line in self._lines:
+                yield line
+        else:  # pragma: no cover - 闸门路径必然带 lines
+            async for line in self._resp.aiter_lines():
+                yield line
+
+    async def aclose(self) -> None:
+        await self._resp.aclose()
+        await self._client.aclose()
+
+
+async def _drain_and_close(resp: httpx.Response, client: httpx.AsyncClient,
+                           lines: Any = None) -> None:
+    """读完丢弃响应体并关闭（换号前必须回收连接，别挂着半开流）。"""
+    try:
+        if lines is not None:
+            try:
+                async for _ in lines:
+                    pass
+            except (httpx.HTTPError, httpx.StreamError):
+                pass
+        elif not resp.is_stream_consumed:
+            await resp.aread()
+    finally:
+        await resp.aclose()
+        await client.aclose()
+
+
+async def _stream_inner(replay: _ReplayStream, model: str) -> AsyncIterator[bytes]:
+    """拆 COSY 信封，把内层 OpenAI chunk 原样下游（带内错误转 OpenAI error 帧）。"""
+    started = time.time()
+    try:
+        async for line in replay.aiter_lines():
+            if time.time() - started > STREAM_TIMEOUT_S:
+                log.warning("qoder 流超时（%.0fs），中止", STREAM_TIMEOUT_S)
+                break
+            raw = line.strip()
+            if not raw or raw.startswith("event:"):
+                continue
+            if not raw.startswith("data:"):
+                continue
+            payload = raw[5:].strip()
+            inner, error, done = _unwrap(payload)
+            if error is not None:
+                log.warning("qoder 上游带内错误 (%s): %s", model, error)
+                yield _sse_error(error)
+                yield b"data: [DONE]\n\n"
+                return
+            if done:
+                yield b"data: [DONE]\n\n"
+                return
+            if inner is not None:
+                yield f"data: {inner}\n\n".encode()
+    except httpx.HTTPError as exc:
+        log.warning("qoder 流中断: %s", exc)
+        yield _sse_error(f"上游流中断: {exc}")
+        yield b"data: [DONE]\n\n"
+    finally:
+        await replay.aclose()
+
+
+async def _collect_inner(resp: httpx.Response, client: httpx.AsyncClient,
+                         lines: Any, buffered: list[str],
+                         model: str) -> dict[str, Any] | None:
+    """非流式：聚合内层 chunk 成一个 ``chat.completion``。"""
+    created = int(time.time())
+    content: list[str] = []
+    reasoning: list[str] = []
+    finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
+    tool_calls: dict[int, dict[str, Any]] = {}
+    error: str | None = None
+
+    async def _lines() -> AsyncIterator[str]:
+        for line in buffered:
+            yield line
+        if lines is not None:
+            async for line in lines:
+                yield line
+        else:  # pragma: no cover
+            async for line in resp.aiter_lines():
+                yield line
+
+    try:
+        async for line in _lines():
+            raw = line.strip()
+            if not raw.startswith("data:"):
+                continue
+            inner, err, done = _unwrap(raw[5:].strip())
+            if err is not None:
+                error = err
+                break
+            if done:
+                break
+            if inner is None:
+                continue
+            try:
+                chunk = json.loads(inner)
+            except ValueError:
+                continue
+            choices = chunk.get("choices") or []
+            if choices:
+                choice = choices[0] or {}
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    content.append(str(delta["content"]))
+                if delta.get("reasoning_content"):
+                    reasoning.append(str(delta["reasoning_content"]))
+                for call in delta.get("tool_calls") or []:
+                    idx = int(call.get("index") or 0)
+                    slot = tool_calls.setdefault(
+                        idx, {"id": "", "type": "function",
+                              "function": {"name": "", "arguments": ""}}
+                    )
+                    if call.get("id"):
+                        slot["id"] = call["id"]
+                    fn = call.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += str(fn["arguments"])
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+    except httpx.HTTPError as exc:
+        error = f"上游流中断: {exc}"
+    finally:
+        await resp.aclose()
+        await client.aclose()
+
+    if error is not None:
+        raise _upstream_error(error)
+
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(content) or None}
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    if reasoning:
+        message["reasoning_content"] = "".join(reasoning)
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason or "stop",
+            }
+        ],
+        "usage": usage
+        or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+# ---------------------------------------------------------------------------
+# 冒烟自测：python -m buddy_proxy.qoder.provider
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":  # pragma: no cover
+    from .config import REGIONS
+
+    p = QoderProvider()
+    print("health:", json.dumps(p.health(), ensure_ascii=False))
+    accounts = list_accounts()
+    if not accounts:
+        print("未登录：先跑 buddy login qoder（浏览器授权）")
+        raise SystemExit(1)
+    resp = asyncio.run(p.forward(
+        {
+            "model": "qwen3.8-flash",
+            "messages": [{"role": "user", "content": "只回复两个字：pong"}],
+            "stream": False,
+        },
+        "openai",
+    ))
+    print("status:", resp.status_code)
+    print(str(resp.body)[:400])

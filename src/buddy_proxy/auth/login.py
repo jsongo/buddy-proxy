@@ -337,24 +337,22 @@ def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
     """Qoder 登录：官方 device flow（PKCE），全球版/CN 版通用。
 
     流程：打印（并尝试打开）授权链接 → 用户在浏览器里确认 → 轮询换回
-    ``dt-`` device token，写入 ``~/.buddy-proxy/qoder_auth.json``。
+    ``dt-`` device token，作为**新账号**落盘（按 email/refresh_token 命中
+    时更新原账号顺位）。
 
     区域由 ``QODER_REGION`` 决定（``cn`` 默认 / ``global``），CN 与全球版
     账号不通用，连错域会 401。
     """
-    import asyncio
-
     from buddy_proxy.qoder.config import REGIONS, resolve_region
     from buddy_proxy.qoder.credentials import (
         AuthError,
-        auth_state_path,
+        account_cred_path,
+        credential_to_cred,
+        list_accounts,
         poll_device_flow,
+        save_account_cred,
         start_device_flow,
     )
-
-    if os.environ.get("QODER_TOKEN", "").strip():
-        print("[!] 检测到环境变量 QODER_TOKEN 已设置——它会优先于登录结果生效。")
-        print("    如需改用登录态，请先 unset QODER_TOKEN。")
 
     region = resolve_region()
     print(f"[Qoder] 区域: {region.label} ({region.key})  端点: {region.infer_base}")
@@ -384,7 +382,7 @@ def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
             print(f"    …仍在等待授权（已等待约 {ticks['n'] * 5} 秒）")
 
     try:
-        cred = asyncio.run(poll_device_flow(flow, on_tick=_tick))
+        cred = poll_device_flow(flow, on_tick=_tick)
     except KeyboardInterrupt:
         print("\n[Qoder] 已取消。")
         return 1
@@ -392,9 +390,16 @@ def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
         print(f"\n[X] Qoder 登录失败: {exc}")
         return 1
 
+    ref = save_account_cred(credential_to_cred(cred))
     print()
-    print(f"[OK] Qoder 登录成功：{cred.describe()}")
-    print(f"     状态文件: {auth_state_path()}")
+    who = cred.email or cred.name or ref.id
+    print(f"[OK] Qoder 登录成功：{who}（{cred.describe()}）")
+    print(f"     凭据文件: {account_cred_path(ref.id)}")
+    accounts = list_accounts()
+    if len(accounts) > 1:
+        mine = next((i for i, a in enumerate(accounts) if a.id == ref.id), None)
+        if mine is not None:
+            print(f"     账号顺位: #{mine + 1}（共 {len(accounts)} 个账号，403/额度尽自动切换下一个）")
     print("     启动代理时加 --qoder（或 QODER_ENABLED=1）即可启用该通道。")
     return 0
 

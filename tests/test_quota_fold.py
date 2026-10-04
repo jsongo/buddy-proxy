@@ -439,7 +439,7 @@ def test_all_three_panels_use_the_fold_helper():
     text = BENEFITS_JS.read_text(encoding="utf-8")
     assert "quotaItemsHtml(q.items || [], p.id)" in text, "主额度列表没接上折叠"
     calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", text)
-    assert sorted(calls) == ["ag", "kimi", "pat"], f"各面板没接上折叠: {calls}"
+    assert sorted(calls) == ["ag", "kimi", "pat", "qoder"], f"各面板没接上折叠: {calls}"
 
 
 def test_render_benefits_syncs_after_rebuild():

@@ -1,48 +1,57 @@
-"""Qoder 凭据：持久化、解析、刷新、登录（device flow）。
+"""Qoder 凭据：多账号存储、刷新、登录（device flow）。
 
-凭证来源优先级：
+结构照抄 kimi/antigravity（多账号 index + 每账号一份 cred 文件）::
 
-1. 环境变量 ``QODER_TOKEN``（临时覆盖，便于排查）
-2. 状态文件 ``~/.buddy-proxy/qoder_auth.json``（``buddy login qoder`` 写入）
-3. 复用 **Qoder 桌面端**已登录的 ``dt-`` device token
-   （解密 Electron safeStorage 的 ``auth.v1.dat``）
+    ~/.buddy-proxy/qoder/
+    ├── index.json              # 账号清单：[{id, email, name, region, priority, added_at}]
+    ├── index.lock              # fcntl 跨进程锁
+    └── <account_id>.json       # 每账号一份 cred（0600）
 
-device token（``dt-``）有效期约 30 天，配 ``drt-`` refresh token 可续；
-本模块在 token 临近过期时自动刷新并回写状态文件。
+``QODER_STATE_DIR`` 可覆盖状态目录（测试隔离点）。
 
-登录走官方 device flow（PKCE S256）：生成 verifier/challenge → 用户在浏览器
-授权 → 轮询 ``/api/v1/deviceToken/poll``（404 = 等待中，200 = 成功）。
+device token（``dt-``）有效期约 30 天，配 ``drt-`` refresh token 可续；本模块
+在 token 临近过期时自动刷新并回写该账号的文件。
 
 > 为什么不去偷读 CN 版桌面的 ``auth.v1.dat``：新版 Electron safeStorage
 > 在本机推不出密钥（PBKDF2 的 password 已非空串），而 device flow 对
 > 全球版/CN 版通用、且不依赖桌面端在跑。safeStorage 只作为**尽力而为**的
-> 便捷路径保留。
+> 便捷路径保留（历史单账号迁移来源之一）。
+
+**多账号与区域**：qoder 的 CN / 全球版账号**不通用**（连错域 401），所以
+多账号只做**同区** failover——混域账号登录进来可以用（转发/额度按账号自己
+的 region 打），但请求级 failover 只在同区账号间轮转。
 """
 
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 import httpx
 
-from buddy_proxy.core.paths import state_file
+from buddy_proxy.core.paths import state_dir
 
 from .config import CLIENT_ID, Region, resolve_region, with_cached_endpoints
 
 log = logging.getLogger(__name__)
 
-#: 状态文件名。
-AUTH_STATE_NAME = "qoder_auth.json"
+#: 状态目录名。
+STATE_DIR_NAME = "qoder"
+
+#: 历史单账号状态文件（迁移源；新装不再创建）。
+LEGACY_AUTH_STATE_NAME = "qoder_auth.json"
 
 #: device token 默认有效期兜底（服务端会给 expires_at）。
 DEFAULT_TTL_MS = 30 * 24 * 3600 * 1000
@@ -54,6 +63,12 @@ REFRESH_MARGIN_MS = 5 * 60 * 1000
 POLL_INTERVAL_S = 5.0
 POLL_TIMEOUT_S = 600.0
 
+#: 账号数上限（与 kimi/antigravity 同值：手动授权/导入的操作，8 个远超正常用量）。
+_MAX_ACCOUNTS = 8
+
+#: account_id 形状：既是文件名（无 ``/``，天然防路径穿越）也是 UI 账号坐标。
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
+
 
 class AuthError(RuntimeError):
     """凭据缺失、无效或刷新失败。"""
@@ -61,7 +76,7 @@ class AuthError(RuntimeError):
 
 @dataclass
 class Credential:
-    """一条可用的 Qoder 凭据。"""
+    """一条可用的 Qoder 凭据（单账号快照；多账号下由 cred dict 互转）。"""
 
     token: str
     uid: str = ""
@@ -90,41 +105,102 @@ class Credential:
         )
 
 
+@dataclass(frozen=True)
+class AccountRef:
+    """账号清单条目（不含任何秘密，可直接进 UI/health）。"""
+
+    id: str
+    email: str
+    name: str
+    region: str
+    priority: int
+    added_at: int
+
+
 # ---------------------------------------------------------------------------
-# 状态文件读写
+# 路径
 # ---------------------------------------------------------------------------
 
 
-def auth_state_path() -> Path:
-    """状态文件路径（可用 ``QODER_AUTH_FILE`` 覆盖）。"""
+def qoder_state_dir() -> Path:
+    """多账号状态目录（``QODER_STATE_DIR`` 可覆盖；测试隔离点）。"""
+    env = os.environ.get("QODER_STATE_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return state_dir() / STATE_DIR_NAME
+
+
+def index_path() -> Path:
+    return qoder_state_dir() / "index.json"
+
+
+def account_cred_path(account_id: str) -> Path:
+    """单账号 cred 文件路径。id 形状在生成处已校验，这里再防一道手滑。"""
+    if not _ID_RE.fullmatch(account_id):
+        raise ValueError(f"非法账号 id: {account_id!r}")
+    return qoder_state_dir() / f"{account_id}.json"
+
+
+def legacy_auth_state_path() -> Path:
+    """历史单账号状态文件路径（迁移源）。"""
     override = os.environ.get("QODER_AUTH_FILE")
     if override:
         return Path(override).expanduser()
-    return state_file(AUTH_STATE_NAME)
+    return state_dir() / LEGACY_AUTH_STATE_NAME
 
 
-def load_state() -> dict:
-    """读状态文件；不存在或损坏时返回空 dict。"""
-    path = auth_state_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+# ---------------------------------------------------------------------------
+# 索引读写（全部在 _index_lock + 跨进程 flock 下进行）
+# ---------------------------------------------------------------------------
+
+_index_lock = threading.Lock()
 
 
-def save_state(data: dict) -> Path:
-    """写状态文件（0600，含 token）。"""
-    path = auth_state_path()
+class _FileLock:
+    """跨进程文件锁（fcntl.flock，包在 index.lock 上）。
+
+    与 kimi 同理由：网关进程和 CLI（``buddy login qoder`` / 面板操作是另一
+    个进程入口）会同时读-改-写同一个 index.json，各自拿旧快照写回就会丢更新。
+    flock 让读-改-写整体成为一个跨进程临界区；flock 与进程内锁可组合（同一
+    进程重复 flock 同一文件会被内核拒绝，故必须先拿进程内锁再拿文件锁）。
+    """
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._fh = None
+
+    def __enter__(self) -> "_FileLock":
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "a+")  # noqa: SIM115 - 句柄在 __exit__ 关
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        if self._fh is not None:
+            try:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._fh.close()
+        return False
+
+
+def _index_file_lock() -> _FileLock:
+    return _FileLock(qoder_state_dir() / "index.lock")
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """0600 原子写（临时文件 + rename，与 antigravity/kimi 同款）。
+
+    先建 tmp 再写内容：``write_text`` 会以默认 0644 创建文件，内容（token）
+    在 ``chmod`` 之前就已落盘，同机其它用户在那个窗口里读得到。
+    ``os.open`` 直接带 0600 建文件，窗口就不存在了。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    # 先建 tmp 再写内容：``write_text`` 会以默认 0644 创建文件，内容（token）
-    # 在 ``chmod`` 之前就已落盘，同机其它用户在那个窗口里读得到。
-    # ``os.open`` 直接带 0600 建文件，窗口就不存在了。
     tmp = path.with_suffix(path.suffix + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         tmp.replace(path)
     except BaseException:
         try:
@@ -132,11 +208,295 @@ def save_state(data: dict) -> Path:
         except OSError:
             pass
         raise
-    return path
+
+
+def _read_index() -> dict[str, Any]:
+    try:
+        data = json.loads(index_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _index_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"version": 1, "accounts": entries}
 
 
 # ---------------------------------------------------------------------------
-# 桌面端 credential 复用（尽力而为）
+# 历史单账号迁移（qoder_auth.json → 账号 #1）
+# ---------------------------------------------------------------------------
+
+_LEGACY_MIGRATE_FLAG = ".legacy-migrated"
+
+
+def _migrate_legacy_unlocked() -> None:
+    """把历史单账号 ``qoder_auth.json`` 迁移成账号 #1（幂等）。
+
+    与 antigravity 同款：迁移是**追加**而不是替换——已有多账号的用户重跑不会
+    把登录态重置回旧文件。只迁一次（落一个标记文件），避免状态文件后来又被
+    写坏时反复把旧值顶回来。
+    """
+    flag = qoder_state_dir() / _LEGACY_MIGRATE_FLAG
+    if flag.exists():
+        return
+    path = legacy_auth_state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if isinstance(data, dict):
+        token = str(data.get("token") or "").strip()
+        if token:
+            cred = {
+                "token": token,
+                "uid": str(data.get("uid") or ""),
+                "machine_id": str(data.get("machine_id") or ""),
+                "refresh_token": str(data.get("refresh_token") or ""),
+                "expires_at_ms": int(data.get("expires_at_ms") or 0),
+                "name": str(data.get("name") or ""),
+                "email": str(data.get("email") or ""),
+                "region": str(data.get("region") or "") or resolve_region().key,
+                "plan": str(data.get("plan") or ""),
+                "source": "state",
+            }
+            _save_account_cred_unlocked(cred)
+            log.info("qoder: 已把历史单账号状态 %s 迁移为账号 %s",
+                     path, cred.get("account_id"))
+    try:
+        flag.touch()
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# account_id 派生
+# ---------------------------------------------------------------------------
+
+
+def derive_account_id(cred: dict[str, Any]) -> str:
+    """从 cred 派生稳定账号 id；已有合法 id 原样保留。
+
+    email 首选（qoder device flow 会带回邮箱，天然唯一且跨重登稳定）；拿不到
+    退 uid；再退 ``acct-<sha256(token)[:12]>``——保证任何导入路径都落得了盘。
+    """
+    existing = str(cred.get("account_id") or "").strip()
+    if existing and _ID_RE.fullmatch(existing):
+        return existing
+    email = str(cred.get("email") or "").strip()
+    if email and _ID_RE.fullmatch(email):
+        return email
+    uid = str(cred.get("uid") or "").strip()
+    if uid and _ID_RE.fullmatch(uid):
+        return uid
+    digest = hashlib.sha256(str(cred.get("token") or "").encode()).hexdigest()[:12]
+    return f"acct-{digest}"
+
+
+# ---------------------------------------------------------------------------
+# Credential <-> cred dict 互转
+# ---------------------------------------------------------------------------
+
+
+def credential_to_cred(cred: Credential) -> dict[str, Any]:
+    """``Credential`` 快照 -> 落盘 cred dict。"""
+    return {
+        "account_id": str(getattr(cred, "account_id", "") or ""),
+        "token": cred.token,
+        "uid": cred.uid,
+        "machine_id": cred.machine_id,
+        "refresh_token": cred.refresh_token,
+        "expires_at_ms": cred.expires_at_ms,
+        "name": cred.name,
+        "email": cred.email,
+        "region": cred.region,
+        "plan": cred.plan,
+        "source": cred.source,
+    }
+
+
+def cred_to_credential(data: dict[str, Any]) -> Credential:
+    """cred dict -> ``Credential`` 快照。"""
+    return Credential(
+        token=str(data.get("token") or ""),
+        uid=str(data.get("uid") or ""),
+        machine_id=str(data.get("machine_id") or ""),
+        refresh_token=str(data.get("refresh_token") or ""),
+        expires_at_ms=int(data.get("expires_at_ms") or 0),
+        name=str(data.get("name") or ""),
+        email=str(data.get("email") or ""),
+        region=str(data.get("region") or "") or "cn",
+        plan=str(data.get("plan") or ""),
+        source=str(data.get("source") or "state"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 多账号 API
+# ---------------------------------------------------------------------------
+
+
+def list_accounts() -> list[AccountRef]:
+    """枚举全部账号（按 priority 稳定排序）。
+
+    唯一的账号枚举入口：历史单账号迁移 + 索引自愈（cred 文件被删/损坏的
+    条目剔除——删文件即退出该账号）挂在这里，login/forward/quota/UI 走同一个口。
+    """
+    with _index_lock, _index_file_lock():
+        _migrate_legacy_unlocked()
+        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
+        kept: list[AccountRef] = []
+        changed = False
+        for e in entries:
+            aid = str(e.get("id") or "")
+            if not _ID_RE.fullmatch(aid):
+                changed = True
+                continue
+            if load_account_cred(aid) is None:
+                changed = True
+                log.warning("qoder: 账号 %s 的凭据文件缺失或损坏，已从账号清单剔除", aid)
+                continue
+            kept.append(AccountRef(
+                id=aid,
+                email=str(e.get("email") or ""),
+                name=str(e.get("name") or ""),
+                region=str(e.get("region") or "") or "cn",
+                priority=int(e.get("priority") or 0),
+                added_at=int(e.get("added_at") or 0),
+            ))
+        if changed:
+            _atomic_write_json(index_path(), _index_payload([asdict(a) for a in kept]))
+        kept.sort(key=lambda a: (a.priority, a.added_at, a.id))
+        return kept
+
+
+def load_account_cred(account_id: str) -> dict[str, Any] | None:
+    """读单账号 cred；没有/损坏/缺 token 返回 None。"""
+    if not _ID_RE.fullmatch(account_id):
+        return None
+    try:
+        data = json.loads(account_cred_path(account_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not str(data.get("token") or "").strip():
+        return None
+    return data
+
+
+def save_account_cred(cred: dict[str, Any]) -> AccountRef:
+    """落盘一个账号的凭据（幂等 upsert），返回账号引用。
+
+    匹配顺序：account_id → email → refresh_token。命中即更新该账号
+    （priority/added_at 不变——重新登录不改变 failover 顺位），全不命中追加为
+    新账号（priority 排到最后）。cred 缺 account_id 时现场生成并写回原 dict。
+    """
+    with _index_lock, _index_file_lock():
+        return _save_account_cred_unlocked(cred)
+
+
+def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
+    entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
+    aid = str(cred.get("account_id") or "")
+
+    def _find_existing() -> dict[str, Any] | None:
+        by_id = next((e for e in entries if str(e.get("id") or "") == aid), None)
+        if by_id is not None:
+            return by_id
+        email = str(cred.get("email") or "").strip()
+        rt = str(cred.get("refresh_token") or "")
+        if not email and not rt:
+            return None
+        for e in entries:
+            other = load_account_cred(str(e.get("id") or "")) or {}
+            if email and str(other.get("email") or "").strip() == email:
+                return e
+            if rt and other.get("refresh_token") == rt:
+                return e
+        return None
+
+    target = _find_existing()
+    if target is None and not _ID_RE.fullmatch(aid):
+        # cred 没带合法 account_id（device flow 首次落盘就是这种）时现场派生。
+        # 派生用的 email/uid 是稳定字段，可能得到与既有账号相同的 id——补一次
+        # 按派生 id 的查找，否则同一 account_id 会被追加成第二个顺位。
+        cred["account_id"] = derive_account_id(cred)  # 就地写回，调用方可见
+        aid = str(cred["account_id"])
+        target = next((e for e in entries if str(e.get("id") or "") == aid), None)
+    if target is not None:
+        aid = str(target["id"])
+        cred["account_id"] = aid
+    else:
+        if not _ID_RE.fullmatch(aid):
+            cred["account_id"] = derive_account_id(cred)
+            aid = str(cred["account_id"])
+        if len(entries) >= _MAX_ACCOUNTS:
+            raise AuthError(
+                f"qoder 账号数已达上限 {_MAX_ACCOUNTS}，"
+                f"请先在管理页删除不用的账号")
+        ref = AccountRef(
+            id=aid,
+            email=str(cred.get("email") or ""),
+            name=str(cred.get("name") or ""),
+            region=str(cred.get("region") or "") or resolve_region().key,
+            priority=max((int(e.get("priority") or 0) for e in entries), default=-1) + 1,
+            added_at=int(time.time()),
+        )
+        entries.append(asdict(ref))
+        target = asdict(ref)
+    target["email"] = str(cred.get("email") or target.get("email") or "")
+    target["name"] = str(cred.get("name") or target.get("name") or "")
+    target["region"] = str(cred.get("region") or target.get("region") or "") or "cn"
+    ref = AccountRef(id=aid, email=target["email"], name=target["name"],
+                     region=target["region"], priority=int(target.get("priority") or 0),
+                     added_at=int(target.get("added_at") or 0))
+    _atomic_write_json(account_cred_path(ref.id), dict(cred))
+    _atomic_write_json(index_path(), _index_payload(entries))
+    return ref
+
+
+def delete_account(account_id: str) -> bool:
+    """移除一个账号（索引条目 + cred 文件）；返回是否真的删了。"""
+    with _index_lock, _index_file_lock():
+        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
+        kept = [e for e in entries if str(e.get("id") or "") != account_id]
+        if len(kept) == len(entries):
+            return False
+        _atomic_write_json(index_path(), _index_payload(kept))
+    try:
+        account_cred_path(account_id).unlink()
+    except OSError:
+        pass
+    return True
+
+
+def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
+    """按给定 id 顺序重写全部账号的 priority（failover 顺位）。
+
+    入参必须是**完整**的当前账号 id 列表（少一个/多一个/重复即拒绝）；
+    priority 重写为 0..n-1，added_at 原样保留。返回重排后的 list_accounts()。
+    """
+    list_accounts()  # 先走唯一的枚举入口：自愈完再重排，别在残缺索引上动刀
+    with _index_lock, _index_file_lock():
+        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
+        current = [str(e.get("id") or "") for e in entries]
+        if sorted(ordered_ids) != sorted(current) or len(set(ordered_ids)) != len(ordered_ids):
+            raise ValueError(
+                f"重排必须提交完整的账号 id 列表（当前 {len(current)} 个，"
+                f"收到 {len(ordered_ids)} 个）")
+        rank = {aid: i for i, aid in enumerate(ordered_ids)}
+        for e in entries:
+            e["priority"] = rank[str(e.get("id") or "")]
+        _atomic_write_json(index_path(), _index_payload(entries))
+    return list_accounts()
+
+
+def has_cred() -> bool:
+    return bool(list_accounts())
+
+
+# ---------------------------------------------------------------------------
+# 桌面端 credential 复用（尽力而为）——历史迁移/兜底来源
 # ---------------------------------------------------------------------------
 
 #: 桌面端凭据文件（Electron safeStorage 加密）。
@@ -274,6 +634,11 @@ def _find_token(node: object, _depth: int = 0) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# machine_id
+# ---------------------------------------------------------------------------
+
+
 def machine_id(region: Region) -> str:
     """读该区域的 machine_id（桌面端/CLI 都会写，缺失则现造一个）。"""
     return _machine_id(region)
@@ -298,135 +663,8 @@ def _generate_machine_id() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 解析
+# 刷新与获取（转发主路径）
 # ---------------------------------------------------------------------------
-
-
-def resolve_credential(region: Region | None = None) -> Credential:
-    """解析出一条可用凭据；都不可用时抛 ``AuthError``。
-
-    只读不写：需要刷新的场景请用 ``ensure_credential``（异步）。
-    """
-    env_token = (os.environ.get("QODER_TOKEN") or "").strip()
-    if env_token:
-        reg = region or resolve_region()
-        return Credential(
-            token=env_token,
-            uid=(os.environ.get("QODER_UID") or "").strip(),
-            machine_id=_machine_id(reg),
-            region=reg.key,
-            source="env",
-        )
-
-    state = load_state()
-    token = str(state.get("token") or "").strip()
-    if token:
-        reg = region or resolve_region(state.get("region"))
-        return Credential(
-            token=token,
-            uid=str(state.get("uid") or ""),
-            machine_id=str(state.get("machine_id") or "") or _machine_id(reg),
-            refresh_token=str(state.get("refresh_token") or ""),
-            expires_at_ms=int(state.get("expires_at_ms") or 0),
-            name=str(state.get("name") or ""),
-            email=str(state.get("email") or ""),
-            region=reg.key,
-            plan=str(state.get("plan") or ""),
-            source="state",
-        )
-
-    # 兜底：复用桌面端登录态（可能因 safeStorage 换钥而失败）
-    reg = region or resolve_region()
-    desktop = _from_desktop(reg)
-    if desktop is not None:
-        return desktop
-
-    raise AuthError(
-        "qoder 未登录：请先跑 `buddy login qoder`（浏览器授权），"
-        "或设置 QODER_TOKEN 环境变量"
-    )
-
-
-#: 单飞锁：并发请求同时发现 token 过期时，只让第一个去刷新。
-#: 上游的 refresh 是**一次性**的——第二个请求拿着同一个 refresh_token 再打过去
-#: 会被判重放并可能把整条链作废，表现就是「偶发地突然失效」。锁只护住刷新
-#: 这一段（网络往返），不覆盖整个请求生命周期。
-_refresh_lock = threading.Lock()
-
-
-async def ensure_credential(region: Region | None = None) -> Credential:
-    """取凭据，临近过期时自动刷新并回写状态文件。"""
-    cred = resolve_credential(region)
-    if cred.source != "state" or not cred.refresh_token or not cred.is_expired():
-        return cred
-    try:
-        refreshed = await refresh_credential(cred, region)
-    except AuthError as exc:
-        log.warning("qoder token 刷新失败，沿用旧 token: %s", exc)
-        return cred
-    return refreshed
-
-
-async def refresh_credential(cred: Credential, region: Region | None = None) -> Credential:
-    """用 refresh token 换新 device token，并回写状态文件。
-
-    并发场景下**先抢锁再重读状态**：等锁的请求进来时，前面那个多半已经刷新
-    完并落盘了，此时直接复用新 token 返回，不再拿旧 refresh_token 打第二次
-    （重放会被上游判重）。锁是同步锁——刷新是 IO 等待，持锁期间不跑事件循环，
-    ``await`` 只发生在锁外。
-    """
-    with _refresh_lock:
-        fresh = _reload_if_rotated(cred)
-        if fresh is not None:
-            return fresh
-        reg = with_cached_endpoints(region or resolve_region(cred.region))
-        if not cred.refresh_token:
-            raise AuthError("缺少 refresh_token，无法刷新；请重新 `buddy login qoder`")
-        payload = {"refresh_token": cred.refresh_token}
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    reg.device_refresh_url(),
-                    json=payload,
-                    headers={"Content-Type": "application/json", "Accept": "application/json"},
-                )
-        except httpx.HTTPError as exc:
-            raise AuthError(f"刷新请求失败: {exc}") from exc
-    if resp.status_code != 200:
-        raise AuthError(f"刷新失败 HTTP {resp.status_code}: {resp.text[:200]}")
-    data = _parse_token_response(resp.json(), cred)
-    data.source = "state"
-    data.region = reg.key
-    _persist(data)
-    log.info("qoder token 已刷新 (%s)", data.describe())
-    return data
-
-
-def _reload_if_rotated(cred: Credential) -> Credential | None:
-    """锁内检查：状态文件里的 token 已被别的请求换过就复用它。
-
-    判据是 token 本身不同且新 token 未过期——只有真的换过才走这条捷径，
-    否则（等锁期间没人动过）返回 ``None``，调用方照常发刷新请求。
-    """
-    state = load_state()
-    token = str(state.get("token") or "")
-    if not token or token == cred.token:
-        return None
-    fresh = Credential(
-        token=token,
-        uid=str(state.get("uid") or cred.uid),
-        machine_id=str(state.get("machine_id") or cred.machine_id),
-        refresh_token=str(state.get("refresh_token") or cred.refresh_token),
-        expires_at_ms=int(state.get("expires_at_ms") or 0),
-        name=str(state.get("name") or ""),
-        email=str(state.get("email") or ""),
-        region=cred.region,
-        source="state",
-    )
-    if fresh.is_expired():
-        return None
-    log.debug("qoder token 已由并发请求刷新，复用新值 (%s)", fresh.describe())
-    return fresh
 
 
 def _parse_token_response(body: dict, base: Credential | None = None) -> Credential:
@@ -471,31 +709,116 @@ def _to_ms(value: object) -> int:
     return 0
 
 
-def _persist(cred: Credential) -> None:
-    """把凭据写进状态文件（合并已有字段，避免丢账号信息）。
+def refresh_account_cred(cred: dict[str, Any], region: Region | None = None) -> dict[str, Any]:
+    """用 refresh token 换新 device token，更新并写回该账号的文件。
 
-    ``token`` / ``refresh_token`` 只在**非空**时覆盖：刷新失败、解析残缺或
-    device flow 中断时拿到的空串若照写，会把原来那份能用的凭据**抹掉**
-    ——用户看到的是「突然要重新登录」。空值一律保留旧值。
+    并发场景下**先抢每账号锁再重读盘**：等锁的请求进来时，前面那个多半已经
+    刷新完并落盘了，此时直接复用新 token 返回，不再拿旧 refresh_token 打第二次
+    （重放会被上游判重）。锁内覆盖「刷新 + 回写」整段：同步 IO 持锁阻塞无碍
+    （调用方在 ``asyncio.to_thread`` 里跑，不卡事件循环）。
+
+    刷新后回写前再重读盘：账号已被删就别把它"复活"；发现 RT 已被换掉（刚导入
+    的新凭据）就整份放弃回写，免得拿旧快照把 uid/machine_id 全退回旧值。
     """
-    state = load_state()
-    state.update(
-        {
-            "uid": cred.uid,
-            "machine_id": cred.machine_id,
-            "expires_at_ms": cred.expires_at_ms,
-            "name": cred.name,
-            "email": cred.email,
-            "region": cred.region,
-            "plan": cred.plan,
-            "updated_at_ms": int(time.time() * 1000),
-        }
-    )
-    if cred.token:
-        state["token"] = cred.token
-    if cred.refresh_token:
-        state["refresh_token"] = cred.refresh_token
-    save_state(state)
+    aid = str(cred.get("account_id") or "")
+    lock = _refresh_lock(aid)
+    # 刷新 + 回写整体在锁内：同步 IO，持锁期间本线程阻塞（调用方在
+    # asyncio.to_thread 里跑，不会卡事件循环）。回写若在锁外，并发第二个
+    # 线程进锁时第一个还没落盘，双检会漏、refresh 重放。
+    with lock:
+        fresh = _reload_if_rotated(cred)
+        if fresh is not None:
+            return fresh
+        reg = with_cached_endpoints(region or resolve_region(cred.get("region")))
+        rt = str(cred.get("refresh_token") or "")
+        if not rt:
+            raise AuthError("缺少 refresh_token，无法刷新；请重新 `buddy login qoder`")
+        payload = {"refresh_token": rt}
+        try:
+            resp = httpx.post(
+                reg.device_refresh_url(),
+                json=payload,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                timeout=30,
+            )
+        except httpx.HTTPError as exc:
+            raise AuthError(f"刷新请求失败: {exc}") from exc
+        if resp.status_code != 200:
+            raise AuthError(f"刷新失败 HTTP {resp.status_code}: {resp.text[:200]}")
+        data = _parse_token_response(resp.json(), cred_to_credential(cred))
+        data.source = "state"
+        data.region = reg.key
+        new_cred = credential_to_cred(data)
+        new_cred["account_id"] = aid
+        # 刷新是网络往返（最长 30 秒），期间用户可能在面板删了这个号或导入了
+        # 新凭据——回写前重读盘，别复活已删账号、也别用旧快照回滚新导入。
+        with _index_lock, _index_file_lock():
+            current = load_account_cred(aid)
+            if current is None:
+                log.debug("qoder: 刷新期间账号 %s 已被删除，放弃回写", aid)
+                new_cred["refresh_token"] = new_cred["refresh_token"] or rt
+                return new_cred
+            if current.get("refresh_token") != cred.get("refresh_token"):
+                log.debug("qoder: 刷新期间账号 %s 凭据已变更，放弃整份回写", aid)
+                new_cred["refresh_token"] = new_cred["refresh_token"] or rt
+                return new_cred
+            _atomic_write_json(account_cred_path(aid), new_cred)
+    log.info("qoder token 已刷新 (%s)", data.describe())
+    return new_cred
+
+
+def _reload_if_rotated(cred: dict[str, Any]) -> dict[str, Any] | None:
+    """锁内检查：该账号文件里的 token 已被别的请求换过就复用它。
+
+    判据是 token 本身不同且新 token 未过期——只有真的换过才走这条捷径，
+    否则（等锁期间没人动过）返回 ``None``，调用方照常发刷新请求。
+    """
+    aid = str(cred.get("account_id") or "")
+    state = load_account_cred(aid)
+    if state is None:
+        return None
+    token = str(state.get("token") or "")
+    if not token or token == cred.get("token"):
+        return None
+    fresh_cred = cred_to_credential(state)
+    if fresh_cred.is_expired():
+        return None
+    log.debug("qoder token 已由并发请求刷新，复用新值 (%s)", fresh_cred.describe())
+    state["account_id"] = aid
+    return state
+
+
+_refresh_locks: dict[str, threading.Lock] = {}
+_refresh_locks_guard = threading.Lock()
+
+
+def _refresh_lock(account_id: str) -> threading.Lock:
+    """每账号一把刷新锁：并发请求同时发现 token 过期时只有一个去刷新。"""
+    with _refresh_locks_guard:
+        return _refresh_locks.setdefault(account_id, threading.Lock())
+
+
+def ensure_account_token(account_id: str, *, force_refresh: bool = False
+                         ) -> tuple[str, dict[str, Any]]:
+    """拿该账号可用的 device token，返回 ``(token, cred 快照 dict)``。
+
+    cred 与 token 同源是本函数存在的理由：转发要 uid/machine_id（COSY 签名
+    的账号级身份），多账号下「token、cred 各读一次盘」会串号。刷新在每账号
+    锁内做并重读盘双检——别的线程刚刷完落盘就不再刷。
+    """
+    cred = load_account_cred(account_id)
+    if cred is None:
+        raise AuthError(f"qoder 账号 {account_id} 的凭据不存在或已损坏")
+    if not force_refresh and not cred_to_credential(cred).is_expired():
+        return cred["token"], dict(cred)
+    refreshed = refresh_account_cred(cred)
+    return refreshed["token"], dict(refreshed)
+
+
+def ensure_account_credential(account_id: str, *, force_refresh: bool = False) -> Credential:
+    """``ensure_account_token`` 的 ``Credential`` 形态（campaigns/catalog 用）。"""
+    _, cred = ensure_account_token(account_id, force_refresh=force_refresh)
+    return cred_to_credential(cred)
 
 
 # ---------------------------------------------------------------------------
@@ -556,19 +879,19 @@ def start_device_flow(region: Region | None = None) -> DeviceFlow:
     )
 
 
-async def poll_device_flow(
+def poll_device_flow(
     flow: DeviceFlow,
     *,
     timeout_s: float = POLL_TIMEOUT_S,
     interval_s: float = POLL_INTERVAL_S,
     on_tick: object = None,
 ) -> Credential:
-    """轮询直到用户在浏览器里完成授权。
+    """轮询直到用户在浏览器里完成授权（纯同步，登录 CLI 在线程/进程里跑）。
 
     服务端语义：``404`` = 尚未授权（继续等），``200`` = 成功并带回 token。
+    成功后返回 ``Credential``（**不**落盘——落盘走 :func:`save_account_cred`，
+    由 login 层决定账号坐标与提示）。
     """
-    import asyncio
-
     reg = with_cached_endpoints(resolve_region(flow.region))
     params = urllib.parse.urlencode(
         {"nonce": flow.nonce, "verifier": flow.verifier, "challenge_method": "S256"}
@@ -576,26 +899,25 @@ async def poll_device_flow(
     url = f"{reg.device_poll_url()}?{params}"
     deadline = time.monotonic() + timeout_s
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    with httpx.Client(timeout=30) as client:
         while time.monotonic() < deadline:
             try:
-                resp = await client.get(url, headers={"Accept": "application/json"})
+                resp = client.get(url, headers={"Accept": "application/json"})
             except httpx.HTTPError as exc:
                 log.debug("qoder device poll 网络异常，重试: %s", exc)
-                await asyncio.sleep(interval_s)
+                time.sleep(interval_s)
                 continue
             if resp.status_code == 200:
                 data = _parse_token_response(resp.json())
                 data.machine_id = data.machine_id or flow.machine_id
                 data.region = reg.key
                 data.source = "state"
-                _persist(data)
                 return data
             if resp.status_code != 404:
                 raise AuthError(f"授权轮询失败 HTTP {resp.status_code}: {resp.text[:200]}")
             if callable(on_tick):
                 on_tick()
-            await asyncio.sleep(interval_s)
+            time.sleep(interval_s)
 
     raise AuthError("授权超时（10 分钟）：请重新执行 `buddy login qoder`")
 
@@ -611,8 +933,8 @@ def _uuid() -> str:
 # ---------------------------------------------------------------------------
 
 
-async def exchange_personal_token(personal_token: str, region: Region | None = None) -> Credential:
-    """用个人访问令牌（``pt-``）换 device token。"""
+def exchange_personal_token(personal_token: str, region: Region | None = None) -> Credential:
+    """用个人访问令牌（``pt-``）换 device token，并落盘为账号。"""
     reg = with_cached_endpoints(region or resolve_region())
     mid = _machine_id(reg)
     payload = {
@@ -622,12 +944,12 @@ async def exchange_personal_token(personal_token: str, region: Region | None = N
         "machine_type": 5,
     }
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                reg.job_token_exchange_url(),
-                json=payload,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
-            )
+        resp = httpx.post(
+            reg.job_token_exchange_url(),
+            json=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=30,
+        )
     except httpx.HTTPError as exc:
         raise AuthError(f"PAT 换取失败: {exc}") from exc
     if resp.status_code != 200:
@@ -636,5 +958,14 @@ async def exchange_personal_token(personal_token: str, region: Region | None = N
     cred.machine_id = cred.machine_id or mid
     cred.region = reg.key
     cred.source = "state"
-    _persist(cred)
     return cred
+
+
+# ---------------------------------------------------------------------------
+# 兼容薄壳：旧单账号模块级名字（web/ui/channels.py 等少量引用点）
+# ---------------------------------------------------------------------------
+
+
+def auth_state_path() -> Path:
+    """兼容：历史单账号状态文件路径（迁移源）。"""
+    return legacy_auth_state_path()
