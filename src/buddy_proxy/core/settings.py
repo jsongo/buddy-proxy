@@ -163,7 +163,7 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 #:
 #: ``workbuddy`` 是 ``codebuddy`` 的旧称，不单列：归一在 ``model_key`` 里做。
 KNOWN_PROVIDER_IDS = frozenset(
-    {"codebuddy", "zcode", "mimo", "qoder", "doubao", "trae", "traepat", "kimi"}
+    {"codebuddy", "zcode", "mimo", "qoder", "doubao", "dumate", "trae", "traepat", "kimi"}
 )
 
 #: 通道没启用时，告诉用户**怎么启用**。值是要打印给用户看的短句。
@@ -178,6 +178,7 @@ PROVIDER_ENABLE_HINTS: dict[str, str] = {
     "mimo": "加 --mimo（或设 MIMO_ENABLED=1）",
     "qoder": "加 --qoder（或设 QODER_ENABLED=1）",
     "doubao": "加 --doubao（或设 DOUBAO_ENABLED=1）",
+    "dumate": "加 --dumate（或设 DUMATE_ENABLED=1），并确保百度搭子 App 在运行",
     "trae": "加 --trae（或设 TRAE_ENABLED=1）",
     # traepat 没独立开关：先配 TRAE_PAT_BEARER(_PROFILES)，再开 --trae
     "traepat": "配置 TRAE_PAT_BEARER（或 TRAE_PAT_BEARER_PROFILES）后加 --trae",

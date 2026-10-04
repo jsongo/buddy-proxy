@@ -17,7 +17,7 @@
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
 ---
@@ -52,7 +52,7 @@ uv run python -m buddy_proxy --login --desensitize
 ```bash
 ./buddy start              # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # 登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity）
+./buddy login [provider]   # 登录/自检上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/dumate/mimo/qoder/gemini/antigravity/kimi）
 ./buddy ui                 # 仅打开管理页（必要时先启动）
 ./buddy update             # 更新到最新代码（git pull -> uv sync -> 重启）
 
@@ -114,6 +114,34 @@ uv run python -m buddy_proxy --desensitize --doubao
   `doubao-2.1-turbo`、`doubao-2.1-pro`（额度消耗更快）、`orange-5.0`（支持极高/最高推理强度）、
   `gemini-3.7-flash`、`gpt-5.6-sol`（App 内提供的第三方模型）；
   请求体可带 `reasoning_effort`（3低/4中/5高/6极高/7最高，默认 5）
+
+### 百度搭子 Provider（可选）
+
+内置 DuMate（百度搭子 / 千帆桌面端）provider，直连本机 App 的本地 OpenAI 兼容代理：
+
+```bash
+# 启用 DuMate provider（需要本机已安装并登录 DuMate.app 且在运行）
+uv run python -m buddy_proxy --desensitize --dumate
+```
+
+- **原理**：复用 DuMate.app 内置的本地代理（`dumate-main-server`，监听
+  `127.0.0.1:<port>`），以你的百度云登录态直连 `dumate-svc.baidu.com` 网关。
+  无需扫码、无需配 token——本地鉴权 key（`X-Dumate-Inapp-Key`）从运行中的
+  App 进程环境自动抽取，每次 App 重启自动轮换
+- **前置**：本机已安装百度搭子桌面端并登录百度云账号，且 App 正在运行。
+  重启电脑 / 退出 App 后重新打开即可，`buddy login dumate` 只做状态自检
+- **模型**（2026-10 抓包 + 逐个实测）：`dm-auto-model/text.L0`（自动路由，
+  App 默认）、`kimi-k3`、`qwen3.8-max`。上下文 192k / 输出 128k，支持
+  function calling，system prompt 完全可控且如实计费（实测 9.6k 字符 system
+  精确计入 prompt_tokens）。deepseek / glm-5.3 / 海外模型（claude/gpt/gemini）
+  未对百度账号开放
+- **签到**：自动打卡循环每日领取（`POST /api/dumate/points/loginBonus`，
+  bceConsole 通道）；管理页显示累计签到积分
+- **额度**：本地 `/api/dumate/points/remaining` 只回布尔态（有/无），数字
+  余额面板在 App 内、无对外接口，管理页据此显示「有额度 / 已用尽」
+- **协议**：仅 OpenAI chat completions；Anthropic /v1/messages 不支持
+  （DuMate 网关只认 OpenAI 形态）
+- **依赖**：纯 Python 标准库（含零依赖 AES-256-GCM 实现解密 bceConsole cookie）
 
 ### Trae Provider（可选）
 
@@ -530,6 +558,7 @@ providers:
 --trae                    启用 Trae provider（解密 Trae IDE 登录态）
 --zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
+--dumate                  启用百度搭子 provider（DuMate 本地代理，需 App 在运行）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
 --qoder                   启用 Qoder provider（COSY 签名，千问3.8 / GLM / Kimi）
 --antigravity             启用 Antigravity provider（Google Antigravity 免费额度，一个

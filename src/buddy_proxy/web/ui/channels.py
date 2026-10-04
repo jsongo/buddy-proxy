@@ -350,6 +350,37 @@ async def ui_traepat_refresh_tokens(request: Request):
     return await asyncio.to_thread(refresh_missing_tokens)
 
 
+@app.get("/ui/api/dumate/status")
+async def ui_dumate_status(request: Request):
+    """DuMate（百度搭子）本地代理状态（供管理页通道面板展示）。
+
+    纯本地只读：跑 pgrep / ps 发现进程并抽 inapp key，**不发起任何网络请求**，
+    所以秒回。前端据此渲染「已就绪 / App 未运行 / 未安装」三种态。
+    """
+    _ensure_local(request)
+    from ...dumate import discovery
+
+    info = await asyncio.to_thread(discovery.describe_state)
+    ep = await asyncio.to_thread(discovery.discover)
+    if ep is not None:
+        info["base_url"] = ep.base_url
+        info["chat_path"] = discovery.PROXY_CHAT_PATH
+    info["login_command"] = "buddy login dumate"
+
+    # bceConsole 登录态 + 签到累计（只读查询，不领取）：让面板显示「已登录 ·
+    # 累计签到 N 分」而非只有布尔态。解密失败（未登录/App未装）就保持 None。
+    from ...dumate import cookies as dumate_cookies
+    auth = await asyncio.to_thread(dumate_cookies.resolve_bceconsole_auth)
+    info["bceconsole_authenticated"] = auth is not None
+    if auth is not None:
+        from ...dumate import checkin as dumate_checkin
+        status = await asyncio.to_thread(dumate_checkin.fetch_checkin_status)
+        if status:
+            info["checkin_total_points"] = status.get("total_points", 0)
+            info["checkin_total_times"] = status.get("total_times", 0)
+    return info
+
+
 @app.get("/ui/api/codebuddy/usage-records")
 async def ui_codebuddy_usage_records(
     request: Request, days: int = 7, page: int = 1, page_size: int = 20

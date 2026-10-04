@@ -24,6 +24,9 @@ src/buddy_proxy/
   trae/                  # trae domain (credentials, transport, sse, pat, ...)
   qoder/                 # qoder domain (provider + convert/errors/quota helpers)
   doubao/                # doubao domain (provider, cdp_client, payloads, ws)
+  dumate/                # DuMate domain (discovery = local-proxy discovery + inapp-key,
+                         #   cookies = pure-stdlib AES-256-GCM bceConsole cookie decrypt,
+                         #   checkin = daily sign-in, provider)
 ```
 
 `core.state` imports `CodeBuddyClient` / `BaseProvider` only under

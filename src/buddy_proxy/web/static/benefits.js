@@ -219,8 +219,8 @@ function renderBenefits() {
   syncNextTimeAuto();
 
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
-  // traepat/antigravity/kimi/qoder 的多账号额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
-  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder');
+  // traepat/antigravity/kimi/qoder/dumate 的额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
+  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'dumate');
   document.getElementById('quota-list').innerHTML = qps.length ? qps.map(p => {
     const q = p.quota;
     const items = quotaItemsHtml(q.items || [], p.id);
@@ -232,6 +232,7 @@ function renderBenefits() {
         ${headSum}
       </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
+  renderDumatePanel();
   renderTraepatPanel();
   renderAntigravityPanel();
   renderKimiPanel();
@@ -450,6 +451,66 @@ function quotaFoldToggle(btn) {
   const key = btn.dataset.qfold;
   QUOTA_FOLD.open[key] = !QUOTA_FOLD.open[key];
   syncQuotaFold();
+}
+
+// ---- DUMATE 面板（底部整宽卡片）----
+// DuMate（百度搭子）复用本机 App 登录态，经本地代理转发。额度只有布尔态
+// （有/无），所以卡片重点是「连接状态」+「刷新额度」；状态走独立的
+// /ui/api/dumate/status（纯本地只读秒回），额度走 /ui/api/benefits 里的 dumate 条目。
+let DUMATE_STATUS = null;
+
+function renderDumatePanel() {
+  const panel = document.getElementById('dumate-panel');
+  if (!panel) return;
+  const dm = (BENEFITS.providers || []).find(p => p.id === 'dumate' && p.quota && p.quota.supported);
+  if (!dm) { panel.innerHTML = ''; return; }
+
+  // 每次渲染都顺手拉一次本地状态（纯本地只读秒回，不触网）——状态点/版本号
+  // 因此总能反映当前 App 在不在，不依赖额外轮询。没拉到就用上次的快照。
+  loadDumateStatus();
+  const st = DUMATE_STATUS;
+  const ready = st && st.ready;
+  const dotColor = ready ? 'var(--ok)' : (st && st.installed ? 'var(--warn)' : 'var(--err)');
+  const stateText = ready ? '已就绪' : (st ? (st.installed ? 'App 未运行' : '未安装') : '检测中…');
+  const ver = st && st.app_version ? ` · v${st.app_version}` : '';
+  const ep = st && st.base_url ? ` · ${st.base_url}` : '';
+  const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
+    `onclick="refreshProviderQuota('dumate', this)">↻</button>`;
+
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head">
+        <span class="name">百度搭子 (DuMate)</span>
+        <span class="tag">本地代理 · 复用 App 登录态</span>
+        <span class="grow"></span>
+        <span class="muted" style="font-size:11px;display:flex;align-items:center;gap:5px">
+          <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor}"></i>
+          ${esc(stateText)}${esc(ver)}
+        </span>
+        ${refreshBtn}
+      </div>
+      ${quotaItemsHtml(dm.quota.items || [], 'dumate')}
+      <div class="muted" style="font-size:11px;line-height:1.5;margin-top:6px">
+        ${ready
+          ? `本地代理在线${esc(ep)} · 模型 自动路由 / kimi-k3 / qwen3.8-max · 上下文 192k`
+          : esc(st && st.hint ? st.hint : '正在检测本地代理…')}
+        ${st && st.bceconsole_authenticated
+          ? ` · 已登录${st.checkin_total_points != null ? ` · 累计签到 ${esc(String(st.checkin_total_points))} 分（${esc(String(st.checkin_total_times || 0))} 次）` : ''}`
+          : ' · bceConsole 未登录'}
+      </div>
+    </div>`;
+}
+
+async function loadDumateStatus() {
+  try {
+    const r = await api('/ui/api/dumate/status');
+    DUMATE_STATUS = r;
+    // 状态到了但面板还没数据时，触发一次重渲让状态点/版本号就位
+    const panel = document.getElementById('dumate-panel');
+    if (panel && panel.innerHTML.trim() && BENEFITS) renderDumatePanel();
+  } catch (e) {
+    DUMATE_STATUS = null;  // 静默：下轮 30s 自动重试
+  }
 }
 
 // ---- TRAE PAT 面板（底部整宽卡片）----
