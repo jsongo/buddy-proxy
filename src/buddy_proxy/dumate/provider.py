@@ -194,6 +194,8 @@ class DumateProvider(BaseProvider):
 
         if resp.status_code >= 400:
             if stream:
+                # 先把错误体读完再关流：aclose() 会丢弃未读 body，之后拿不到上游
+                # 真实错误（复用 zcode 同套防坑；dumate 上游是同一类 Go 网关）。
                 await resp.aread()
             try:
                 return _upstream_error_response(resp)
