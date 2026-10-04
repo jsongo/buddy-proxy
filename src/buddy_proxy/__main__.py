@@ -266,8 +266,10 @@ def main():
         except HTTPException as exc:
             logger.warning("qoder provider 认证未就绪: %s", exc.detail)
         providers[qoder.id] = qoder
-        logger.info("Qoder provider enabled (%s)", qoder.health().get("base_url"))
-        print(f"[Qoder] Enabled ({qoder.region().label})")
+        _qh = qoder.health()
+        logger.info("Qoder provider enabled (%s / %s 个账号)",
+                    _qh.get("base_url"), len(_qh.get("accounts") or []))
+        print(f"[Qoder] Enabled ({qoder.region().label} / {len(_qh.get('accounts') or [])} 个账号)")
     else:
         print("[Qoder] Disabled (pass --qoder or QODER_ENABLED=1 to enable)")
 

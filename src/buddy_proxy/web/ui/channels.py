@@ -21,8 +21,9 @@ from .common import _ensure_local
 async def ui_qoder_auth(request: Request):
     """Qoder 登录/鉴权状态 + 账号信息（供管理页鉴权面板展示）。
 
-    纯本地读取，不触网：返回区域、账号、token 过期时间与来源，前端据此
-    提示「未登录 / 即将过期 / 正常」，并可给出重新登录的命令。
+    纯本地读取，不触网：返回区域、首个账号的 token 过期时间与来源，前端据此
+    提示「未登录 / 即将过期 / 正常」，并可给出重新登录的命令。多账号明细走
+    ``/ui/api/qoder/accounts``。
     """
     _ensure_local(request)
     state = get_state()
@@ -31,7 +32,12 @@ async def ui_qoder_auth(request: Request):
         return {"enabled": False, "authenticated": False}
 
     try:
-        from ...qoder.credentials import auth_state_path, load_state, resolve_credential
+        from ...qoder.credentials import (
+            cred_to_credential,
+            list_accounts,
+            load_account_cred,
+            qoder_state_dir,
+        )
         from ...qoder.config import REGIONS
 
         region = provider.region()
@@ -41,40 +47,97 @@ async def ui_qoder_auth(request: Request):
             "region_label": region.label,
             "regions": sorted(REGIONS),
             "endpoint": region.infer_base,
-            "state_file": str(auth_state_path()),
+            "state_dir": str(qoder_state_dir()),
             "login_command": "buddy login qoder",
         }
     except Exception as exc:  # noqa: BLE001 - 状态面板不该因读取失败而 500
         return {"enabled": True, "authenticated": False, "error": str(exc)[:200]}
 
-    try:
-        cred = resolve_credential(region)
-    except Exception:
-        cred = None
-
-    saved = load_state()
-    # 内存凭据里的 plan 是额度接口回填的，可能比状态文件新（同一进程内）。
-    live_plan = getattr(cred, "plan", "") if cred else ""
+    accounts = list_accounts()
+    first = (load_account_cred(accounts[0].id) if accounts else None) or {}
+    first_cred = cred_to_credential(first)
     now_ms = int(time.time() * 1000)
-    expires_at = (cred.expires_at_ms if cred else 0) or int(saved.get("expires_at_ms") or 0)
+    expires_at = first_cred.expires_at_ms
     info.update({
-        "authenticated": cred is not None,
-        "uid": (cred.uid if cred else "") or saved.get("uid") or "",
-        "name": (cred.name if cred else "") or saved.get("name") or "",
-        "email": (cred.email if cred else "") or saved.get("email") or "",
-        "plan": live_plan or saved.get("plan") or "",
-        "source": cred.source if cred else "",
+        "authenticated": bool(accounts),
+        "uid": first_cred.uid,
+        "name": first_cred.name,
+        "email": first_cred.email,
+        "plan": first_cred.plan,
+        "source": first_cred.source,
         "expires_at_ms": expires_at or None,
         "expires_in_days": (
             round((expires_at - now_ms) / 86400000, 1) if expires_at else None
         ),
         "expired": bool(expires_at and expires_at <= now_ms),
-        "has_refresh_token": bool(
-            (cred.refresh_token if cred else "") or saved.get("refresh_token")
-        ),
-        "updated_at_ms": saved.get("updated_at_ms"),
+        "has_refresh_token": bool(first_cred.refresh_token),
+        "account_count": len(accounts),
     })
     return info
+
+
+@app.get("/ui/api/qoder/accounts")
+async def ui_qoder_accounts(request: Request):
+    """qoder 各账号本地凭证/冷却状态（纯本地不触网，不含秘密）。"""
+    _ensure_local(request)
+    try:
+        from ...qoder import failover
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "qoder 通道不可用"}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/qoder/accounts/order")
+async def ui_qoder_accounts_order(request: Request):
+    """调整 qoder 账号的 failover 顺位（管理页上移/下移按钮）。
+
+    提交完整账号 id 顺序列表，重写 index.json 的 priority；返回重排后的账号
+    状态（与 GET 同构）。quota 缓存键带 priority（``quota_epoch``），重排后旧
+    额度快照自动失效。
+    """
+    _ensure_local(request)
+    try:
+        from ...qoder import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "qoder 通道不可用"}})
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 ids（账号 id 的完整顺序列表）"}})
+    try:
+        await asyncio.to_thread(creds.reorder_accounts, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    from ...qoder import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/qoder/accounts/delete")
+async def ui_qoder_accounts_delete(request: Request):
+    """删除一个 qoder 账号（索引条目 + cred 文件 + 冷却标记）。
+
+    不再使用或凭据作废的账号从轮换里摘掉——留着每轮 failover 白打一次上游。
+    返回删除后的账号状态（与 GET 同构，前端直接重渲染）。
+    """
+    _ensure_local(request)
+    try:
+        from ...qoder import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "qoder 通道不可用"}})
+    body = await request.json()
+    aid = body.get("id")
+    if not isinstance(aid, str) or not aid.strip():
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（要删除的账号 id）"}})
+    aid = aid.strip()
+    removed = await asyncio.to_thread(creds.delete_account, aid)
+    if not removed:
+        raise HTTPException(status_code=404,
+                            detail={"error": {"message": f"账号不存在: {aid}"}})
+    from ...qoder import failover
+    await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
 
 
 @app.post("/ui/api/qoder/models/refresh")

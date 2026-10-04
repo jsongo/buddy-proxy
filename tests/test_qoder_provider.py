@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 
 import pytest
 
@@ -37,10 +38,8 @@ from buddy_proxy.qoder.credentials import (
     Credential,
     _find_token,
     _parse_token_response,
-    _persist,
     _to_ms,
     auth_state_path,
-    save_state,
 )
 from buddy_proxy.qoder.provider import _to_anthropic_stream, _unwrap, _upstream_error
 
@@ -760,52 +759,66 @@ def test_credential_is_expired():
     assert not unknown.is_expired()
 
 
-def test_reload_if_rotated_reuses_token_refreshed_by_peer(monkeypatch, tmp_path):
+def _seed_cred(account_id: str, **over) -> dict:
+    """落一个测试账号（走多账号存储 API）。"""
+    from buddy_proxy.qoder.credentials import save_account_cred
+
+    cred = {
+        "account_id": account_id,
+        "token": f"dt-{account_id}-token",
+        "uid": f"uid-{account_id}",
+        "machine_id": "m1",
+        "refresh_token": f"rt-{account_id}",
+        "expires_at_ms": int(time.time() * 1000) + 3600_000,
+        "name": "",
+        "email": f"{account_id}@example.com",
+        "region": "cn",
+        "plan": "",
+        "source": "state",
+    }
+    cred.update(over)
+    save_account_cred(cred)
+    return cred
+
+
+def test_reload_if_rotated_reuses_token_refreshed_by_peer():
     """并发第二个请求拿到别人刚刷好的 token，不再重放 refresh_token。
 
     上游 refresh 是一次性的：同一个 refresh_token 打两次可能被判重放、把整条
     链作废，症状是「偶发地突然要重新登录」。
     """
-    import time as _time
-
     from buddy_proxy.qoder.credentials import _reload_if_rotated
 
-    target = tmp_path / "qoder.json"
-    monkeypatch.setenv("QODER_AUTH_FILE", str(target))
-    future = int(_time.time() * 1000) + 3600_000
-    save_state({"token": "dt-new", "refresh_token": "rt-new", "expires_at_ms": future})
+    future = int(time.time() * 1000) + 3600_000
+    _seed_cred("u1", token="dt-new", refresh_token="rt-new", expires_at_ms=future)
 
-    old = Credential(
-        token="dt-old", refresh_token="rt-old", expires_at_ms=0, region="cn", source="state"
-    )
+    old = {"account_id": "u1", "token": "dt-old", "refresh_token": "rt-old",
+           "expires_at_ms": 0, "region": "cn", "source": "state"}
     fresh = _reload_if_rotated(old)
     assert fresh is not None
-    assert fresh.token == "dt-new"
-    assert fresh.refresh_token == "rt-new"
-    assert not fresh.is_expired()
+    assert fresh["token"] == "dt-new"
+    assert fresh["refresh_token"] == "rt-new"
+    assert not Credential(**{k: v for k, v in fresh.items()
+                             if k in Credential.__dataclass_fields__}).is_expired()
 
 
-def test_reload_if_rotated_returns_none_when_token_unchanged(monkeypatch, tmp_path):
+def test_reload_if_rotated_returns_none_when_token_unchanged():
     """没人换过 token 时不能走捷径——否则真的过期了就永远不刷新。"""
     from buddy_proxy.qoder.credentials import _reload_if_rotated
 
-    target = tmp_path / "qoder.json"
-    monkeypatch.setenv("QODER_AUTH_FILE", str(target))
-    save_state({"token": "dt-same", "refresh_token": "rt-x"})
-
-    old = Credential(token="dt-same", refresh_token="rt-x", region="cn", source="state")
+    _seed_cred("u1", token="dt-same", refresh_token="rt-x")
+    old = {"account_id": "u1", "token": "dt-same", "refresh_token": "rt-x",
+           "expires_at_ms": 0, "region": "cn", "source": "state"}
     assert _reload_if_rotated(old) is None
 
 
-def test_reload_if_rotated_ignores_already_expired_new_token(monkeypatch, tmp_path):
+def test_reload_if_rotated_ignores_already_expired_new_token():
     """别人换来的新 token 若也已过期，仍应走正常刷新而不是复用。"""
     from buddy_proxy.qoder.credentials import _reload_if_rotated
 
-    target = tmp_path / "qoder.json"
-    monkeypatch.setenv("QODER_AUTH_FILE", str(target))
-    save_state({"token": "dt-stale", "refresh_token": "rt-y", "expires_at_ms": 1000})
-
-    old = Credential(token="dt-old", refresh_token="rt-old", region="cn", source="state")
+    _seed_cred("u1", token="dt-stale", refresh_token="rt-y", expires_at_ms=1000)
+    old = {"account_id": "u1", "token": "dt-old", "refresh_token": "rt-old",
+           "expires_at_ms": 0, "region": "cn", "source": "state"}
     assert _reload_if_rotated(old) is None
 
 
@@ -820,6 +833,15 @@ def test_auth_state_path_honours_env(monkeypatch, tmp_path):
     target = tmp_path / "qoder.json"
     monkeypatch.setenv("QODER_AUTH_FILE", str(target))
     assert auth_state_path() == target
+
+
+def test_qoder_state_dir_honours_env(monkeypatch, tmp_path):
+    """多账号状态目录由 QODER_STATE_DIR 决定（conftest 已隔离到 tmp）。"""
+    from buddy_proxy.qoder.credentials import qoder_state_dir
+
+    target = tmp_path / "qoder-custom"
+    monkeypatch.setenv("QODER_STATE_DIR", str(target))
+    assert qoder_state_dir() == target
 
 
 def test_find_token_skips_avatar_like_fields():
@@ -871,66 +893,14 @@ def test_find_token_denylist_covers_common_avatar_keys():
         ), f"{key} 在场时仍应找到真令牌"
 
 
-def test_persist_never_overwrites_good_token_with_empty(monkeypatch, tmp_path):
-    """空 token / 空 refresh_token 不能覆盖已有的好值。
-
-    刷新失败或 device flow 中断时会构造出空串凭据，照写会把能用的一份抹掉，
-    用户看到的是「突然要重新登录」。
-    """
-    target = tmp_path / "qoder.json"
-    monkeypatch.setenv("QODER_AUTH_FILE", str(target))
-    save_state({"token": "dt-good", "refresh_token": "rt-good", "uid": "1"})
-
-    _persist(
-        Credential(
-            token="",
-            uid="1",
-            machine_id="m",
-            refresh_token="",
-            expires_at_ms=0,
-            name="n",
-            email="e",
-            region="cn",
-            source="state",
-        )
-    )
-    state = json.loads(target.read_text("utf-8"))
-    assert state["token"] == "dt-good"
-    assert state["refresh_token"] == "rt-good"
-
-
-def test_persist_writes_new_token_when_present(monkeypatch, tmp_path):
-    """非空 token 照常覆盖（别把修复做成「永不更新」）。"""
-    target = tmp_path / "qoder.json"
-    monkeypatch.setenv("QODER_AUTH_FILE", str(target))
-    save_state({"token": "dt-old", "refresh_token": "rt-old"})
-
-    _persist(
-        Credential(
-            token="dt-new",
-            uid="1",
-            machine_id="m",
-            refresh_token="rt-new",
-            expires_at_ms=1,
-            name="",
-            email="",
-            region="cn",
-            source="state",
-        )
-    )
-    state = json.loads(target.read_text("utf-8"))
-    assert state["token"] == "dt-new"
-    assert state["refresh_token"] == "rt-new"
-
-
-def test_save_state_file_mode_is_0600(monkeypatch, tmp_path):
-    """含 token 的状态文件必须 0600——且是**建文件时**就 0600。"""
+def test_account_cred_file_mode_is_0600():
+    """每账号 cred 文件必须 0600——且是**建文件时**就 0600。"""
     import stat as _stat
 
-    target = tmp_path / "qoder.json"
-    monkeypatch.setenv("QODER_AUTH_FILE", str(target))
-    save_state({"token": "dt-x"})
-    mode = _stat.S_IMODE(target.stat().st_mode)
+    from buddy_proxy.qoder.credentials import account_cred_path
+
+    _seed_cred("u1")
+    mode = _stat.S_IMODE(account_cred_path("u1").stat().st_mode)
     assert mode == 0o600, f"expected 0600, got {oct(mode)}"
 
 
