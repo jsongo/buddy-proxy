@@ -87,7 +87,20 @@ MODELS: list[dict[str, Any]] = _load_models()
 DEFAULT_MODELS: dict[str, str] = {m["id"]: str(m.get("description") or m["id"]) for m in MODELS}
 _MODEL_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
 
-_QUOTA_NOTE = "两组模型各自共享 weekly + 5h 双池（Gemini 组 / Claude+GPT 组），按 token 成本比例消耗"
+_QUOTA_NOTE = ("两组模型各自共享 5 小时 + 每周两个额度池（Gemini 组 / Claude+GPT 组），"
+               "按 token 成本比例消耗。上游只在用量逼近池上限时才下调读数——"
+               "显示 100% 代表两组池都接近满额，不是「没有额度」")
+
+#: 组内模型清单展示时去掉 effort / 形态后缀（-low/-medium/-high/-tiered/-agent…），
+#: 同一模型的多档位只列一次。上游名形如 ``gemini-3.1-pro-low``、``gemini-3.8-flash-tiered``。
+_EFFORT_SUFFIXES = ("-extra-low", "-low", "-medium", "-high", "-tiered")
+
+
+def _strip_effort_suffix(name: str) -> str:
+    for suffix in _EFFORT_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 #: 多账号额度并发查询：整轮 deadline + 常驻线程池。
 #: 常驻（不是每轮新建）的理由见 trae/pat/quota.py：每轮新建 + shutdown(wait=False)
@@ -629,12 +642,28 @@ class AntigravityProvider(BaseProvider):
 
     @staticmethod
     def _quota_items_from(data: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
-        """fetchAvailableModels 响应 → 按组聚合的额度条目（prefix 拼在 label 前）。"""
+        """fetchAvailableModels 响应 → 按组聚合的额度条目（prefix 拼在 label 前）。
+
+        组内共享 5 小时 + 每周两个额度池，上游对组内每个模型变体只回**同一个**
+        ``remainingFraction``（满额时恒为 1，且只在逼近池上限时才下调），没有分池
+        字段、也没有任何接口能查到每周池的剩余（``retrieveUserQuota`` 返回同一份
+        数据，``fetchUserStatus``/``fetchCredits``/``getUserQuota`` 均 404）。
+        所以这里：
+
+        * 组内取**最紧水位**（min）作为该组读数，并把「谁最紧」记进 note——
+          满额时全组都是 1，此时不点名也无妨；
+        * ``reset_ts`` 取**那个最紧模型自己的** resetTime（不是组内任意最小值）：
+          它只是下一个 5 小时窗口的滚动刷新点，不代表整组重置、更不代表每周池。
+        * ``used`` 由 ``1 - worst`` 反推成千分制，与 ``remaining/total`` 同量纲：
+          上游只给剩余，这是唯一诚实的「已用」口径（此前留 None，前端走「已用未知」
+          分支，满额被渲染成空进度条，用户读成「额度是 0」）。
+        """
         upstream = data["models"]
-        by_group: dict[str, list[tuple[float, float]]] = {}  # group -> [(frac, reset_epoch)]
+        # group -> [(frac, reset_epoch, upstream_model_name)]
+        by_group: dict[str, list[tuple[float, float, str]]] = {}
         for m in MODELS:
             base = str(m.get("upstream") or m["id"])
-            fracs: list[tuple[float, float]] = []
+            fracs: list[tuple[float, float, str]] = []
             for key, q in upstream.items():
                 if key != base and not key.startswith(f"{base}-"):
                     continue  # 变体名（-low/-medium/-high/-tiered）也算这个模型的
@@ -644,29 +673,39 @@ class AntigravityProvider(BaseProvider):
                 frac = info.get("remainingFraction")
                 if not isinstance(frac, (int, float)):
                     continue
-                fracs.append((float(frac), _iso_to_epoch(info.get("resetTime"))))
+                fracs.append((float(frac), _iso_to_epoch(info.get("resetTime")), key))
             if fracs:
                 by_group.setdefault(str(m.get("group") or "gemini"), []).extend(fracs)
         items: list[dict[str, Any]] = []
         for group, fracs in by_group.items():
             label = "Gemini 组" if group == "gemini" else "Claude/GPT 组"
-            worst = min(f for f, _ in fracs)
-            reset = min((t for _, t in fracs if t > 0), default=0)
+            worst_frac, worst_reset, worst_model = min(fracs, key=lambda t: t[0])
+            # 组内模型清单（upstream 变体名去 effort 后缀去重），供面板展示「这组管着谁」
+            names = sorted({_strip_effort_suffix(n) for _, _, n in fracs})
+            remaining = round(worst_frac * 1000, 1)
+            # 满额措辞与收紧措辞分开：满了就直说「满额」，别让「取最紧水位」看着像有损耗
+            full = worst_frac >= 1.0
+            tightness = ("满额（组内各模型均为 100%）" if full
+                         else f"组内最紧的是 {worst_model}")
             items.append({
-                # 解释性文字不塞 label（曾把「组内共享 weekly + 5h 双池，取组内
-                # 最紧水位」整句拼进来，面板窄卡里 label 挤得日期换行、右侧
-                # 「已用 0%」也断行——用户截图骂丑）。挪 note 字段给前端渲染
-                # 成 title 悬浮提示。
+                # 解释性文字不塞 label（曾把整句塞进来，面板窄卡里 label 挤得日期
+                # 换行、右侧「已用 0%」也断行——用户截图骂丑）。挪 note 字段给前端
+                # 渲染成说明行 / title。
                 "label": f"{prefix}{label}",
-                "note": "组内共享 weekly + 5h 双池，取组内最紧水位；"
-                        "上游只在用量逼近池上限时才下调读数",
-                "used": None,
+                "note": (f"组内包含：{'、'.join(names)}。共享 5 小时 + 每周双池，"
+                         f"按 token 成本比例消耗；上游只在逼近池上限时才下调读数，"
+                         f"此处取组内最紧水位，{tightness}"),
+                "models_in_group": names,
+                "used": round((1 - worst_frac) * 1000, 1),
                 "total": 1000,
-                "remaining": round(worst * 1000, 1),
-                "percent": round((1 - worst) * 100, 2),  # 前端 percent=已用
+                "remaining": remaining,
+                "percent": round((1 - worst_frac) * 100, 2),  # 前端 percent=已用
                 # weekly/5h 是周期重置，不是权益到期：不给 expire_ts，
                 # 否则「5 小时后重置」会被到期横幅误报成「5 小时后到期」
-                "reset_ts": reset or None,
+                "reset_ts": worst_reset or None,
+                # resetTime 只是下一个 5 小时窗口的滚动刷新点——前端把它拼进
+                # reset 文案的 title，免得用户当成「整个池子到此重置」
+                "reset_note": "下一个 5 小时窗口刷新点（滚动），不代表每周池重置",
                 "expire_ts": None,
                 "unit": "permille",
             })

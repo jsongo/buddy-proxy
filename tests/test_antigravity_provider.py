@@ -121,16 +121,63 @@ def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
 
     quota = provider.quota()
     assert len(quota["items"]) == 2
-    by_label = {i["label"].split("（")[0]: i for i in quota["items"]}
+    by_label = {i["label"]: i for i in quota["items"]}
     gemini = by_label["Gemini 组"]
     cgpt = by_label["Claude/GPT 组"]
     # 组内跨模型取最小：gemini 组 min(0.9,0.8,0.5,0.7)=0.5；claude-gpt 组 min(1.0,1.0,0.99)=0.99
     assert gemini["remaining"] == 500.0 and gemini["total"] == 1000
     assert gemini["percent"] == 50.0  # 已用
+    assert gemini["used"] == 500.0    # 已用千分制（与 remaining 同量纲，1-worst 反推）
     assert cgpt["remaining"] == 990.0 and cgpt["percent"] == 1.0
-    # reset_ts = 组内最早的 resetTime epoch（gemini 组 19:00Z < 20:28Z）
+    assert cgpt["used"] == 10.0
+    # reset_ts = **最紧那个模型自己的** resetTime（不是组内任意最小值）：
+    # gemini 组最紧是 3.6-flash-medium(0.5) → 19:00Z；claude-gpt 最紧是 gpt-oss(0.99)
+    # 但它没有 resetTime，回落到 0 → None。这跟旧语义（组内最早）不同，是本次修正点。
     assert gemini["reset_ts"] == prov._iso_to_epoch("2026-10-02T19:00:00Z")
-    assert cgpt["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:30:52Z")
+    assert cgpt["reset_ts"] is None
+    # reset_note 讲清「这只是 5 小时窗口滚动刷新点」
+    assert "5 小时" in gemini["reset_note"]
+    # note 里点名最紧模型 + 列出组内模型清单
+    assert "gemini-3.6-flash" in gemini["note"]
+    assert gemini["models_in_group"] == ["gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.8-flash"]
+    assert cgpt["models_in_group"] == ["claude-opus-4-6-thinking", "claude-sonnet-4-6", "gpt-oss-120b"]
+
+
+def test_quota_full_quota_reads_as_full_not_zero(provider, tmp_path, monkeypatch):
+    """上游满额（所有 remainingFraction=1）时，读数必须是「满额」而不是被读成 0。
+
+    实测背景（2026-10-04，两个 g1-pro-tier 账号）：上游对每个模型都只回
+    remainingFraction=1 + resetTime=当下+5h，且只在逼近池上限时才下调。旧实现把
+    percent（已用）留成 0、进度条画成空的，用户把「已用 0%」读成「额度是 0」。
+    这里锁住：满额时 remaining==total、used==0，进度条语义（percent=已用）为 0。
+    """
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            "gemini-3.1-pro-low": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
+            "gemini-3.6-flash-medium": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
+            "claude-sonnet-4-6": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
+            "gpt-oss-120b-medium": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+
+    quota = provider.quota()
+    assert len(quota["items"]) == 2
+    for it in quota["items"]:
+        assert it["remaining"] == 1000.0 and it["total"] == 1000
+        assert it["used"] == 0.0 and it["percent"] == 0.0
+        assert "满额" in it["note"]
+    assert quota["level"] == "free-tier"  # 凭据没写 tier_name 时的兜底
 
 
 def test_models_json_load_fallback(tmp_path, monkeypatch):
