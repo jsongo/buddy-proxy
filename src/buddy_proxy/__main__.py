@@ -204,6 +204,8 @@ def main():
     parser.add_argument("--kimi", action="store_true", default=os.getenv("KIMI_ENABLED", "") == "1",
                         help="启用 Kimi provider（Kimi Code 订阅通道，kimi cli 同款 OAuth；"
                              "凭据跑 `buddy login kimi` 或在管理面板导入 token JSON）")
+    parser.add_argument("--dumate", action="store_true", default=os.getenv("DUMATE_ENABLED", "") == "1",
+                        help="启用 DuMate provider（百度搭子/千帆桌面端本地代理；需本机已安装并登录 DuMate.app 且在运行）")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
                              "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
@@ -328,6 +330,16 @@ def main():
         print("[Doubao] Enabled (CDP)")
     else:
         print("[Doubao] Disabled (pass --doubao or DOUBAO_ENABLED=1 to enable)")
+
+    if args.dumate:
+        from buddy_proxy.dumate.provider import DumateProvider
+
+        dumate = DumateProvider()
+        providers[dumate.id] = dumate
+        logger.info("Dumate provider enabled (local proxy)")
+        print("[DuMate] Enabled (local proxy)")
+    else:
+        print("[DuMate] Disabled (pass --dumate or DUMATE_ENABLED=1 to enable)")
 
     if args.trae:
         from buddy_proxy.trae.provider import TraeProvider

@@ -219,7 +219,13 @@
                 background: var(--card2); border-bottom: 1px solid var(--line);
                 border-radius: 12px 12px 0 0; cursor: pointer; user-select: none; }
   .group-head:hover { background: #1d2531; }
-  .group-head .name { font-weight: 600; }
+  /* 名字允许收缩折行前先截断（ellipsis），别把后面的 tag/状态/计数挤折行——
+     窄屏或长通道名（如「Trae PAT (服务账号直连)」）时整行元素会溢出/错位。 */
+  .group-head .name { font-weight: 600; flex: 0 1 auto; min-width: 0;
+                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* tag 不收缩，保持完整；右侧计数+chev 也保持一行 */
+  .group-head .tag { flex-shrink: 0; }
+  .group-head .muted { flex-shrink: 0; }
   .chev { display: inline-block; transition: transform .15s ease; color: var(--muted);
           font-size: 11px; margin-left: 2px; }
   .group.collapsed .chev { transform: rotate(-90deg); }

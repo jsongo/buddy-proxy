@@ -140,6 +140,7 @@ async def list_models():
                 "provider": provider.id,
                 **({"credits": m["credits"]} if m.get("credits") is not None else {}),
                 **({"max_input": m["max_input"]} if m.get("max_input") is not None else {}),
+                **({"max_output": m["max_output"]} if m.get("max_output") is not None else {}),
                 **({"reasoning": m["reasoning"]} if "reasoning" in m else {}),
                 # 上游内部代号（如 Qoder 的 qfmodel）：对外 id 是人读的小写真实名
                 # （qoder/qwen3.8-flash），排障时要能对回上游目录，故一并透传。

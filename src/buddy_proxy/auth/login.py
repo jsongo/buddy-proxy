@@ -41,7 +41,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "gemini-cli": "gemini",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "mimo", "qoder", "gemini", "antigravity", "kimi")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi")
 
 
 def _login_codebuddy(open_browser: bool = True) -> int:
@@ -290,6 +290,24 @@ def _login_doubao(**_kwargs) -> int:
     print("豆包 provider 无独立登录：它通过 Chrome CDP 复用本机豆包工作 App 的登录态。")
     print("启动时加 --doubao（或 DOUBAO_ENABLED=1）即可，无需 proxy.sh login。")
     return 0
+
+
+def _login_dumate(**_kwargs) -> int:
+    """DuMate（百度搭子）直连本地代理，无独立登录流程。"""
+    from buddy_proxy.dumate import discovery
+
+    state = discovery.describe_state()
+    print("DuMate（百度搭子）provider 无独立登录：它复用本机 DuMate.app 的登录态，")
+    print("经 App 内置本地代理直连 dumate-svc.baidu.com 网关。")
+    print()
+    if state.get("ready"):
+        print(f"[OK] DuMate 本地代理已就绪：port={state.get('port')} "
+              f"pid={state.get('pid')} version={state.get('app_version') or '?'}")
+        print("     启动时加 --dumate（或 DUMATE_ENABLED=1）即可启用。")
+        return 0
+    print(f"[未就绪] {state.get('hint')}")
+    print("     需要先打开并登录百度搭子桌面端，再启用 --dumate。")
+    return 1
 
 
 def _login_mimo(open_browser: bool = True, **_kwargs) -> int:
@@ -621,6 +639,7 @@ _DISPATCH = {
     "trae": _login_trae,
     "zcode": _login_zcode,
     "doubao": _login_doubao,
+    "dumate": _login_dumate,
     "mimo": _login_mimo,
     "qoder": _login_qoder,
     "gemini": _login_gemini,
