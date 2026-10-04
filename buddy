@@ -34,7 +34,7 @@ PROXY_SH="$BUDDY_HOME/proxy.sh"
 PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 PROXY_PORT="${PROXY_PORT:-8787}"
 # 与 proxy.sh 默认参数保持一致（改这里记得同步 proxy.sh 的 EXTRA_ARGS，反之亦然）
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --zcode --mimo --qoder --antigravity --kimi --default-provider trae}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --mimo --qoder --antigravity --kimi --default-provider trae}"
 
 SERVICE_LABEL="com.buddy.proxy"
 PLIST="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
@@ -191,11 +191,11 @@ port_listening() {
 
 # 代理进程是否活着。探活要的是「进程在不在」，而不是「某个瞬间端口能不能连」——
 # 启动空窗/瞬时卡慢都会让一次 TCP 探测失败，但进程其实好好的。proxy.sh status 只
-# 看 pid 文件、会跨端口误判（A 端口在跑就算 B 端口 running），所以必须以端口实况为准，
-# pid 命中仅作辅助。
+# 看 pid 文件、会跨端口误判（A 端口在跑就算 B 端口 running），所以这里认的是
+# 「本端口的 buddy_proxy 进程」这个命令行事实：端口在监听，或进程已起但还没 bind。
 proxy_running() {
     port_listening && return 0
-    PROXY_PORT="$PROXY_PORT" "$PROXY_SH" status >/dev/null 2>&1
+    pgrep -f "buddy_proxy --host ${PROXY_HOST} --port ${PROXY_PORT}" >/dev/null 2>&1
 }
 
 # 单一状态行：health 只在 OK / 无响应 之间变化时刷新，避免 status 里同一行
