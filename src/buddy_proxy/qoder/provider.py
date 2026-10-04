@@ -460,14 +460,27 @@ class QoderProvider(BaseProvider):
             return [], False
         prefix = f"Qoder #{index} · " if multi else ""
         out = self._format_quota(data, cred, label_prefix=prefix)
-        # 账号套餐名来自额度接口（``userType``），顺手回填到 cred 文件，
-        # 让 /health、鉴权面板不必再单独查一次。
+        # 账号套餐名来自额度接口（``userType``），顺手回填到 cred 文件，让
+        # /health、鉴权面板不必再单独查一次。**必须读最新盘再改 plan**：
+        # cred_dict 是 ensure_account_token 返回时的快照，若期间有并发请求
+        # 触发刷新（RT 滚动、token 已更新），拿旧快照整份覆盖会把新 token
+        # 回滚回去——下一个请求拿着被回滚的旧 token 就 401 了。
         tier = str(data.get("userType") or "")
         if tier and cred.plan != tier:
             try:
-                cred_dict["plan"] = tier
-                from .credentials import _atomic_write_json, account_cred_path
-                _atomic_write_json(account_cred_path(acct.id), cred_dict)
+                from .credentials import (
+                    _atomic_write_json,
+                    _index_file_lock,
+                    _index_lock,
+                    account_cred_path,
+                    load_account_cred,
+                )
+
+                with _index_lock, _index_file_lock():
+                    current = load_account_cred(acct.id)
+                    if current is not None and current.get("plan") != tier:
+                        current["plan"] = tier
+                        _atomic_write_json(account_cred_path(acct.id), current)
             except Exception as exc:  # noqa: BLE001 - 回填失败不影响额度展示
                 log.debug("qoder 套餐名回填失败: %s", exc)
         return out["items"], True
