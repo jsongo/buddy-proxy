@@ -34,7 +34,7 @@ PROXY_SH="$BUDDY_HOME/proxy.sh"
 PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 PROXY_PORT="${PROXY_PORT:-8787}"
 # 与 proxy.sh 默认参数保持一致（改这里记得同步 proxy.sh 的 EXTRA_ARGS，反之亦然）
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --zcode --mimo --qoder --kimi --default-provider trae}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --zcode --mimo --qoder --antigravity --kimi --default-provider trae}"
 
 SERVICE_LABEL="com.buddy.proxy"
 PLIST="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
@@ -184,21 +184,75 @@ cmd_restart() {
     fi
 }
 
+# 目标端口是否真有进程在监听（唯一事实，pid 文件可能滞后/失效）。
+port_listening() {
+    lsof -ti tcp:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+# 代理进程是否活着。探活要的是「进程在不在」，而不是「某个瞬间端口能不能连」——
+# 启动空窗/瞬时卡慢都会让一次 TCP 探测失败，但进程其实好好的。proxy.sh status 只
+# 看 pid 文件、会跨端口误判（A 端口在跑就算 B 端口 running），所以必须以端口实况为准，
+# pid 命中仅作辅助。
+proxy_running() {
+    port_listening && return 0
+    PROXY_PORT="$PROXY_PORT" "$PROXY_SH" status >/dev/null 2>&1
+}
+
+# 单一状态行：health 只在 OK / 无响应 之间变化时刷新，避免 status 里同一行
+# 被反复重写成刷屏。返回当前是否健康，调用方据此决定要不要重试。
+render_health_line() {
+    local healthy="$1"
+    local line
+    if [[ "$healthy" == "1" ]]; then
+        line="health: OK  管理页: $UI_URL"
+    else
+        line="health: 无响应"
+    fi
+    if [[ "$line" != "${_LAST_HEALTH_LINE:-}" ]]; then
+        printf '%s\n' "$line"
+        _LAST_HEALTH_LINE="$line"
+    fi
+}
+
+# 探测 /health，带 per-try 超时与有限重试。外部拉起代理（绕过 proxy.sh）时
+# pid 文件可能滞后于端口监听，且进程是异步起来的，期间端口会拒连——一次探测
+# 必然误报「无响应」。只有进程没在跑才立刻下结论，避免把正常启动的代理错杀。
+probe_health() {
+    local tries="${1:-1}" i
+    for ((i=1; i<=tries; i++)); do
+        if curl -sf -m 5 -o /dev/null "http://127.0.0.1:${PROXY_PORT}/health"; then
+            return 0
+        fi
+        [[ "$i" -lt "$tries" ]] && sleep 1
+    done
+    return 1
+}
+
 cmd_status() {
     if [[ -f "$PLIST" ]]; then
         cmd_service status
     fi
     "$PROXY_SH" status || true
-    if curl -sf -o /dev/null "http://127.0.0.1:${PROXY_PORT}/health"; then
-        log "health: OK  管理页: $UI_URL"
+    if proxy_running; then
+        # 进程在跑：给它最多 ~25s（5s 超时 ×5 + 间隔）跨越启动空窗/瞬时卡慢，
+        # 不要一上来就报「无响应」吓自己。真死了（不监听也不退）会在重试后仍失败。
+        if probe_health 5; then
+            render_health_line 1
+        else
+            render_health_line 0
+        fi
+    elif probe_health 1; then
+        # 端口能通但 proxy.sh 不认这个 pid（多半是手动/外部拉起的实例）：
+        # 不算死，健康状态照常显示。
+        render_health_line 1
     else
-        log "health: 无响应"
+        render_health_line 0
     fi
 }
 
 wait_healthy() {
     for _ in $(seq 1 20); do
-        if curl -sf -o /dev/null "http://127.0.0.1:${PROXY_PORT}/health"; then
+        if curl -sf -m 5 -o /dev/null "http://127.0.0.1:${PROXY_PORT}/health"; then
             return 0
         fi
         sleep 0.5

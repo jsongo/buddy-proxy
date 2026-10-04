@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -84,8 +85,15 @@ async def health():
     # 一个通道炸掉都会让 buddy status 误报整个代理死了。
     providers_health: dict[str, Any] = {}
     for pid, p in getattr(state, "providers", {}).items():
+        # 单个通道的 health() 可能是同步阻塞调用（读文件/探网络）。直接 await 会
+        # 卡住整个 event loop，把所有请求（含 /health 自己）一起拖死——这正是
+        # 「代理活着但 status 报无响应」的另一种成因。放到线程里跑并加超时。
         try:
-            providers_health[pid] = p.health()
+            providers_health[pid] = await asyncio.wait_for(
+                asyncio.to_thread(p.health), timeout=3.0
+            )
+        except asyncio.TimeoutError:
+            providers_health[pid] = {"id": pid, "error": "health() 超时（>3s）"}
         except Exception as exc:  # noqa: BLE001 - 健康检查自身不能成为故障源
             providers_health[pid] = {"id": pid, "error": f"{type(exc).__name__}: {exc}"}
     # 资源水位自观测：FD 数（当前打开）与 RSS（进程峰值，ru_maxrss 只增不减，
