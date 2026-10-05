@@ -66,9 +66,15 @@ src/buddy_proxy/
   published `trae-cli` entrypoint and trae façade (not a shim to remove).
 - **`web/ui/`** provides localhost-only administration endpoints (split by
   responsibility: channels, models, settings, queries, page) and the bundled
-  UI under `web/static/` (an `index.html` skeleton plus `style.css` and three
-  JS files, served from `/ui/{name}`). It may update runtime settings but must
-  use `core/settings.py` for persistence.
+  UI under `web/static/` (an `index.html` skeleton plus `style.css` and six
+  JS files, served from `/ui/{name}`). `benefits.js` (calendar + quota fold +
+  channel-specific panels) was split by responsibility once it passed 700
+  lines: `benefits_accounts.js` holds the shared multi-account card helpers
+  (delete-confirm modal / move / delete / snapshot backfill) that new
+  multi-account channels reuse, `benefits_checkin.js` the checkin rows + Kimi
+  panel, `benefits_panels.js` the Trae PAT / Antigravity / Qoder panels.
+  It may update runtime settings but must use `core/settings.py` for
+  persistence.
 
 ## Runtime composition
 

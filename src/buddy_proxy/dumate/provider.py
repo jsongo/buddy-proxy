@@ -7,20 +7,23 @@
 - openai（/v1/chat/completions）→ 透传本地代理，SSE/JSON 原样回传；
 - responses（/v1/responses）→ 经通用链路（responses_adapter 转成 chat 后
   落到 openai 路径）；
-- anthropic（/v1/messages）→ **不支持**。DuMate 网关只认 OpenAI chat 形态，
-  若在这里把 anthropic 直通会拿到上游「invalid_model / api not registered」。
+- anthropic（/v1/messages）→ 网关只认 OpenAI chat 形状，路由层已把 anthropic
+  请求体转成 chat 传进来；这里把 OpenAI 响应包一层转回 anthropic（流式经
+  ``_to_anthropic_stream`` / 非流式经 ``chat_completion_to_anthropic_message``，
+  kimi/mimo 同款），Claude Code 等 /v1/messages 客户端可直接使用。
 
 模型：上游无 /v1/models 列表接口，模型名从 DuMate 客户端真实流量里抓包
 实测（见下方 ``_MODELS`` 的注释）。``dm-auto-model/text.L0`` 是搭子的智能路由
 档，``glm-5`` / ``qwen3.5-35b-a3b`` 是具体模型，``model-text`` 是内部工具模型。
 
-额度：本地 ``GET /api/dumate/points/remaining`` 只回
-``{"hasRemainingPoints": bool}``——百度搭子的额度面板在 App 内实现、走
-bceConsole 通道，没有可对外的数字余额接口。因此额度只显示「有/无」布尔态。
+额度：桌面端「积分」面板同口径走 bceConsole
+``GET /api/dumate/points/quota_overview``（数字余额 + 积分包明细）；本地代理的
+``/api/dumate/points/remaining`` 只回布尔、作为未登录兜底。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, AsyncIterator, Sequence
 
@@ -138,19 +141,11 @@ class DumateProvider(BaseProvider):
         original: dict[str, Any] | None = None,
     ) -> StreamingResponse | JSONResponse:
         if protocol == "anthropic":
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "message": (
-                            "dumate 通道暂不支持 Anthropic /v1/messages 协议"
-                            "（DuMate 网关只提供 OpenAI chat completions）。"
-                            "请改用 /v1/chat/completions 客户端。"
-                        ),
-                        "type": "unsupported_protocol",
-                    }
-                },
-            )
+            # DuMate 网关只认 OpenAI chat 形状，但路由层已把 anthropic 请求
+            # 转成 chat body 传进来——这里按 kimi/mimo 同款把 OpenAI 响应
+            # 包一层转回 anthropic（流式 / 非流式都支持），Claude Code 等
+            # /v1/messages 客户端即可直接使用。
+            pass
 
         ep = discovery.discover()
         if ep is None:
@@ -203,6 +198,12 @@ class DumateProvider(BaseProvider):
                 await resp.aclose()
 
         if stream:
+            if protocol == "anthropic":
+                return StreamingResponse(
+                    _to_anthropic_stream(resp, str(body.get("model") or "")),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "close"},
+                )
             return StreamingResponse(
                 _pass_through_stream(resp),
                 media_type="text/event-stream",
@@ -214,6 +215,10 @@ class DumateProvider(BaseProvider):
             raise HTTPException(status_code=502, detail={
                 "error": {"message": "dumate upstream returned non-JSON", "type": "bad_gateway"}
             }) from exc
+        if protocol == "anthropic":
+            from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
+
+            payload = chat_completion_to_anthropic_message(payload, original)
         return JSONResponse(content=payload)
 
     def health(self) -> dict[str, Any]:
@@ -228,13 +233,49 @@ class DumateProvider(BaseProvider):
     # ------------------------------------------------------------------
 
     def quota(self) -> dict[str, Any] | None:
-        """查 DuMate 额度。
+        """查 DuMate 积分余额（数字，照 antigravity 进度条语义）。
 
-        本地 ``/api/dumate/points/remaining`` 只回 ``{"hasRemainingPoints": bool}``，
-        没有数字余额（数字面板在 App 内、走 bceConsole 通道，无对外接口）。因此
-        这里把布尔态翻译成管理页的额度条目：有额度 → 满额 1/1，无 → 0/1。
-        ``sum_items`` 不置位（单条目），``unit="count"`` 触发到期量过滤免刷屏。
+        桌面端「积分」面板同口径：``GET /api/dumate/points/quota_overview``
+        （bceConsole cookie 通道，非本地代理；实测抓包 2026-10-05）。返回
+        used/total/remaining（积分单位）+ percent（已用%）。未登录 / App 未装 /
+        查询失败时退回本地代理的布尔 ``hasRemainingPoints`` 翻译成的百分制条目，
+        至少别让面板空着；百分制 unit 标 ``"percent"``，数字条目标 ``"points"``。
         """
+        from . import checkin as dumate_checkin
+
+        # 优先：bceConsole 数字余额（quota_overview）
+        q = dumate_checkin.fetch_quota_overview(timeout=10.0)
+        if q is not None:
+            remaining = q["remaining_points"]
+            total = q["total_points"]
+            used = q["used_points"]
+            items = [{
+                "label": "可用积分",
+                "used": round(used, 2),
+                "total": round(total, 2),
+                "remaining": round(remaining, 2),
+                "percent": round(used / total * 100, 2) if total > 0 else 0.0,
+                "reset_ts": None,
+                "expire_ts": None,
+                "unit": "points",
+            }]
+            # 展开「积分包」明细（签到送的是 500 一个的包，有过期时间）
+            for p in q.get("packages") or []:
+                exp = p.get("expire_ts")
+                items.append({
+                    "label": f"积分包（{p.get('source') or 'grant'}）",
+                    "used": round(p["used_points"], 2),
+                    "total": round(p["total_points"], 2),
+                    "remaining": round(max(p["total_points"] - p["used_points"], 0.0), 2),
+                    "percent": (round(p["used_points"] / p["total_points"] * 100, 2)
+                                if p["total_points"] > 0 else 0.0),
+                    "reset_ts": None,
+                    "expire_ts": exp,
+                    "unit": "points",
+                })
+            return {"items": items, "level": "百度搭子"}
+
+        # 兜底：本地代理布尔态 → 百分制（保持原有「至少显示有/无」的行为）
         ep = discovery.discover()
         if ep is None:
             raise RuntimeError("dumate 本地代理不可达（DuMate 未运行）")
@@ -255,14 +296,14 @@ class DumateProvider(BaseProvider):
             "items": [
                 {
                     "label": "可用额度",
-                    "used": 0 if has else 1,
-                    "total": 1,
-                    "remaining": 1 if has else 0,
+                    "used": 0 if has else 100,
+                    "total": 100,
+                    "remaining": 100 if has else 0,
                     "percent": 0.0 if has else 100.0,
                     # 布尔态额度：没有「周期性重置」概念，也不做到期告警
                     "reset_ts": None,
                     "expire_ts": None,
-                    "unit": "count",
+                    "unit": "percent",
                 }
             ],
             "level": "百度搭子",
@@ -301,6 +342,71 @@ async def _pass_through_stream(resp: httpx.Response) -> AsyncIterator[bytes]:
                 yield chunk
     finally:
         await resp.aclose()
+
+
+async def _to_anthropic_stream(resp: httpx.Response, model: str) -> AsyncIterator[str]:
+    """上游 OpenAI SSE → Anthropic 事件流（``/v1/messages`` 客户端要的形状）。
+
+    DuMate 本地代理只回 OpenAI chat chunk；复用 ``anthropic_adapter.
+    AnthropicStreamConverter``（kimi/mimo 同款），``reasoning_content`` →
+    thinking 块、``tool_calls`` → tool_use 块。转换途中任何异常先收尾再抛
+    （不兜的话客户端拿到「内容块悬空、没有 message_stop」的残流，更难排查）。
+    """
+    from ..protocols.anthropic_adapter import AnthropicStreamConverter
+
+    converter = AnthropicStreamConverter(model)
+
+    def _emit(event_name: str, payload: dict[str, Any]) -> str:
+        return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _close_open() -> list[str]:
+        """把已开出的内容块收尾（best-effort：收尾本身再炸也不能盖掉原错误）。"""
+        try:
+            return [_emit(n, p) for n, p in converter.close_open_blocks()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _abort(msg: str) -> list[str]:
+        """收尾 + 补一个 error 事件，让客户端拿到结构完整的结束。"""
+        out = _close_open()
+        out.append(_emit("error", {
+            "type": "error",
+            "error": {"type": "api_error", "message": msg},
+        }))
+        return out
+
+    try:
+        async for line in resp.aiter_lines():
+            line = line.strip()
+            if not line or line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("error"):
+                err = chunk["error"]
+                msg = str(err.get("message", err)) if isinstance(err, dict) else str(err)
+                for event in _abort(msg):
+                    yield event
+                return
+            for name, payload in converter.feed_chunk(chunk):
+                yield _emit(name, payload)
+        for name, payload in converter.finish():
+            yield _emit(name, payload)
+    except Exception as exc:  # noqa: BLE001 — 上游畸形数据不该让客户端只收到半截流
+        log.warning("dumate anthropic stream aborted: %s: %s", type(exc).__name__, exc)
+        for event in _abort(f"{type(exc).__name__}: {exc}"):
+            yield event
+        return
+    yield "data: [DONE]\n\n"
 
 
 def _upstream_error_response(resp: httpx.Response) -> JSONResponse:

@@ -27,15 +27,16 @@ import subprocess
 
 import pytest
 
-BENEFITS_JS = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "src/buddy_proxy/web/static/benefits.js"
-)
+_STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
+# 2026-10 前端按职责拆分（benefits.js 超 700 行）：ANTIGRAVITY 面板段挪到
+# benefits_panels.js，KIMI 面板段挪到 benefits_checkin.js。这里分两个文件提取拼接。
+BENEFITS_JS_AG = _STATIC / "benefits_panels.js"     # ANTIGRAVITY 段
+BENEFITS_JS_KIMI = _STATIC / "benefits_checkin.js"  # KIMI 段（含导入）
 # KIMI 段复用 ANTIGRAVITY 段的组件（confirmAccountDelete / AG_CONFIRM_OPEN），
-# 但两段在文件里不相邻（中间隔着 trae PAT 段）——分两段提取拼接。KIMI 段在
-# 文件末尾（不能插进 ANTIGRAVITY 段与 force=false 之间，antigravity 测试的
-# SEG_RE 会误吸）。
-SEG_AG = re.compile(r"// ---- ANTIGRAVITY 面板.*?(?=\n// force=false)", re.S)
+# 但两段在文件里不相邻：traepat 段挪到 benefits_panels.js 开头，KIMI 段挪到
+# benefits_checkin.js 末尾，中间隔着 QODER 段——分两段提取拼接。
+# ANTIGRAVITY 段尾：后随 QODER 面板段头。
+SEG_AG = re.compile(r"// ---- ANTIGRAVITY 面板.*?(?=\n// ---- QODER 面板)", re.S)
 SEG_KIMI = re.compile(r"// ---- KIMI 面板.*$", re.S)
 
 pytestmark = pytest.mark.skipif(
@@ -91,10 +92,11 @@ globalThis.document = {
 
 
 def _run_js(body: str) -> str:
-    text = BENEFITS_JS.read_text(encoding="utf-8")
-    ag = SEG_AG.search(text)
-    kimi = SEG_KIMI.search(text)
-    assert ag and kimi, "benefits.js 里找不到 ANTIGRAVITY/KIMI 面板段（边界注释被改了？）"
+    text_ag = BENEFITS_JS_AG.read_text(encoding="utf-8")
+    text_kimi = BENEFITS_JS_KIMI.read_text(encoding="utf-8")
+    ag = SEG_AG.search(text_ag)
+    kimi = SEG_KIMI.search(text_kimi)
+    assert ag and kimi, "找不到 ANTIGRAVITY/KIMI 面板段（边界注释被改了？）"
     script = (
         _STUB + ag.group(0) + "\n" + kimi.group(0)
         + "\n(async () => {\n" + body

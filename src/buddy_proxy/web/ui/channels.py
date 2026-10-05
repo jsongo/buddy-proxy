@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import pathlib
 import time
 from typing import Any
 
@@ -418,8 +421,9 @@ async def ui_traepat_refresh_tokens(request: Request):
 async def ui_dumate_status(request: Request):
     """DuMate（百度搭子）本地代理状态（供管理页通道面板展示）。
 
-    纯本地只读：跑 pgrep / ps 发现进程并抽 inapp key，**不发起任何网络请求**，
-    所以秒回。前端据此渲染「已就绪 / App 未运行 / 未安装」三种态。
+    进程发现纯本地（pgrep/ps）秒回；bceConsole 登录态 + 签到累计走
+    :func:`_dumate_account_info_cached`（30s 缓存，防 700ms 级 bce RTT
+    拖住面板首渲）。
     """
     _ensure_local(request)
     from ...dumate import discovery
@@ -430,19 +434,107 @@ async def ui_dumate_status(request: Request):
         info["base_url"] = ep.base_url
         info["chat_path"] = discovery.PROXY_CHAT_PATH
     info["login_command"] = "buddy login dumate"
-
-    # bceConsole 登录态 + 签到累计（只读查询，不领取）：让面板显示「已登录 ·
-    # 累计签到 N 分」而非只有布尔态。解密失败（未登录/App未装）就保持 None。
-    from ...dumate import cookies as dumate_cookies
-    auth = await asyncio.to_thread(dumate_cookies.resolve_bceconsole_auth)
-    info["bceconsole_authenticated"] = auth is not None
-    if auth is not None:
-        from ...dumate import checkin as dumate_checkin
-        status = await asyncio.to_thread(dumate_checkin.fetch_checkin_status)
-        if status:
-            info["checkin_total_points"] = status.get("total_points", 0)
-            info["checkin_total_times"] = status.get("total_times", 0)
+    info.update(await asyncio.to_thread(_dumate_account_info_cached))
     return info
+
+
+# 账号信息短 TTL 缓存：bceConsole RTT 实测 ~700ms（解密 cookie + 一次公网 GET），
+# 状态接口又是面板首渲的同步依赖——每 30s 才允许一次真请求，其余命中缓存。
+# 登录/签到变更由签到调度器（它走 BenefitsManager 自己的重试）兜住，不依赖这里的时效。
+_ACCOUNT_INFO_TTL = 30.0
+_account_info_cache: dict[str, Any] = {"ts": 0.0, "info": {}}
+
+
+def _dumate_account_info_cached() -> dict[str, Any]:
+    now = time.monotonic()
+    if now - _account_info_cache["ts"] < _ACCOUNT_INFO_TTL:
+        return _account_info_cache["info"]
+    info = _dumate_account_info()
+    _account_info_cache.update(ts=now, info=info)
+    return info
+
+
+def _dumate_account_info() -> dict[str, Any]:
+    """bceConsole 登录态 + 签到累计（只读查询，不领取）。
+
+    让面板显示「已登录 · 累计签到 N 分」而非只有布尔态。解密失败（未登录/
+    App 未装）时 bceconsole_authenticated=False，签到字段缺省。账号 id 用稳定的
+    bceUserId（auth.json 里），作为 dumate 单账号的固定标识。
+    """
+    from ...dumate import cookies as dumate_cookies
+
+    info: dict[str, Any] = {"bceconsole_authenticated": False}
+    auth = dumate_cookies.resolve_bceconsole_auth()
+    if auth is None:
+        return info
+    info["bceconsole_authenticated"] = True
+
+    base = os.path.expanduser(
+        "~/Library/Application Support/qianfan-desktop-app"
+    )
+    try:
+        auth_json = json.loads(
+            (pathlib.Path(base) / "auth.json").read_text("utf-8")
+        )
+        info["account_id"] = (
+            auth_json.get("accountProfiles") or [{}]
+        )[0].get("bceUserId") or ""
+        info["display_name"] = (
+            auth_json.get("accountProfiles") or [{}]
+        )[0].get("displayName") or ""
+    except Exception:  # noqa: BLE001 - 账号元信息缺失不影响登录态/签到展示
+        pass
+
+    from ...dumate import checkin as dumate_checkin
+
+    # 面板状态接口是高频只读：签到累计只是其中一字段，网络慢/断时给短超时
+    # 快速失败（返回 None 字段缺省），别让 700ms+ 的 bce 查询拖住整页首渲
+    status = dumate_checkin.fetch_checkin_status(timeout=3.0)
+    if status:
+        info["checkin_total_points"] = status.get("total_points", 0)
+        info["checkin_total_times"] = status.get("total_times", 0)
+    return info
+
+
+@app.get("/ui/api/dumate/accounts")
+async def ui_dumate_accounts(request: Request):
+    """dumate 账号列表（多账号卡片数据源，纯本地只读）。
+
+    dumate 是单账号（复用本机 App 登录态），这里返回恰好一个账号条目，走
+    benefits_accounts.js 的通用卡片渲染（标题=displayName、副标题=累计签到）。
+    """
+    _ensure_local(request)
+    from ...dumate import discovery
+
+    if discovery.discover() is None:
+        return {"enabled": False, "accounts": []}
+    info = await asyncio.to_thread(_dumate_account_info_cached)
+    if not info.get("bceconsole_authenticated"):
+        return {"enabled": True, "accounts": []}
+    return {
+        "enabled": True,
+        "accounts": [{
+            "index": 1,
+            "id": info.get("account_id") or "dumate",
+            "display_name": info.get("display_name") or "百度搭子",
+            "checkin_total_points": info.get("checkin_total_points"),
+            "checkin_total_times": info.get("checkin_total_times"),
+        }],
+    }
+
+
+@app.post("/ui/api/dumate/accounts/delete")
+async def ui_dumate_accounts_delete(request: Request):
+    """dumate 无多账号 failover，删除是 no-op（返回当前账号列表，前端据此刷新）。"""
+    _ensure_local(request)
+    return await ui_dumate_accounts(request)
+
+
+@app.post("/ui/api/dumate/accounts/order")
+async def ui_dumate_accounts_order(request: Request):
+    """dumate 单账号，重排无意义（no-op，返回当前账号列表）。"""
+    _ensure_local(request)
+    return await ui_dumate_accounts(request)
 
 
 @app.get("/ui/api/codebuddy/usage-records")

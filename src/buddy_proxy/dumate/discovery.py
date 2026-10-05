@@ -101,8 +101,11 @@ def _find_main_server_pid() -> tuple[int, str] | None:
         except (ValueError, IndexError):
             continue
         cmdline = parts[1] if len(parts) > 1 else ""
-        # 排除 pgrep 自身 / 其它误匹配，要求路径里确实带 dumate-main-server
-        if _MAIN_SERVER_BIN in cmdline:
+        # 排除 pgrep 自身（`pgrep -lf dumate-main-server` 的 cmdline 也含
+        # 模式串，竞态时会先出现把自己匹配进去）/ 其它误匹配：要求命令是
+        # 真实可执行文件路径里的 dumate-main-server，而不是参数里提到它。
+        exe = cmdline.split(" ", 1)[0]
+        if exe.endswith("/" + _MAIN_SERVER_BIN) or exe.endswith(_MAIN_SERVER_BIN):
             return pid, cmdline
     return None
 

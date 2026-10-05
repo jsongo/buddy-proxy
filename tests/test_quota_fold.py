@@ -24,6 +24,10 @@ import pytest
 
 STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
 BENEFITS_JS = STATIC / "benefits.js"
+# 2026-10 前端按职责拆分（benefits.js 超 700 行）：面板段挪到 benefits_panels.js
+# （traepat/antigravity/qoder）与 benefits_checkin.js（kimi）。额度折叠函数
+# （quotaSpent/quotaItemsHtml/syncQuotaFold/quotaFoldToggle）仍在 benefits.js。
+PANELS_JS = [STATIC / "benefits_panels.js", STATIC / "benefits_checkin.js"]
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"
@@ -438,7 +442,10 @@ def test_all_three_panels_use_the_fold_helper():
     没变」，等于没修。kimi/qoder/trae 面板（复用 antigravity 的分组结构）也要跟上。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
     assert "quotaItemsHtml(q.items || [], p.id)" in text, "主额度列表没接上折叠"
-    calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", text)
+    # main 新增 trae 面板（quotaItemsHtml(its, 'trae:'+grp) 在 benefits.js 里）；
+    # 拆出去的面板段（pat/ag/kimi/qoder）在 PANELS_JS。两边都要扫。
+    all_src = text + "".join(p.read_text(encoding="utf-8") for p in PANELS_JS)
+    calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", all_src)
     assert sorted(calls) == ["ag", "kimi", "pat", "qoder", "trae"], f"各面板没接上折叠: {calls}"
 
 

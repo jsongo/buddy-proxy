@@ -1,0 +1,216 @@
+// ---- 多账号额度面板公共 helper（新通道接入时直接复用）----
+// antigravity / kimi / qoder 的「多账号 · 自动切换」面板是同一模板：按「<通道名> #N」
+// 分组额度条目、每组一块（标题=账号名、副标题=状态、↻/▲▼/✕ 按钮组）、账号快照
+// 异步回填就地更新。那三处已稳定、各有密集 node 桩测试覆盖，故不动它们；本文件
+// 把可复用件抽成参数化 helper，**新接入的多账号通道（如 dumate）用它一处组装**，
+// 未来再接入照 dumatePanel 的样子写一个 CONFIG 即可，不必重抄这套逻辑。
+//
+// 复用件：confirmAccountDelete（删除确认弹窗）/ acctSubHtml（账号状态副标题）/
+//         acctMoveButtons（▲▼ 顺位）/ acctDeleteButton + acctRowButtons（✕ + ↻ 按钮组）/
+//         groupAccountsByPrefix（按「<Prefix> #N」切分组）/ acctLoad（账号快照回填，
+//         含首份快照整卡重渲 + 就地回填 + syncQuotaFold 校准）
+//
+// 依赖 app.js 全局：api / toast / esc / refreshAll / syncQuotaFold / closeModal / setModalFoot
+// 以及 benefits.js 全局：BENEFITS / quotaItemsHtml / quotaItemHtml / refreshProviderQuota。
+'use strict';
+
+// 删除确认弹窗（各多账号通道共用）：复用 index.html 的 overlay/modal 骨架，不用系统
+// confirm。Promise 化：「删除该账号」resolve(true)；取消/遮罩/Esc（汇入 closeModal）
+// resolve(false)。closeModal 是 app.js 全局函数，临时替换拦下全部关闭路径、关完还原。
+let ACCT_CONFIRM_OPEN = false;
+function confirmAccountDelete(opts) {
+  if (ACCT_CONFIRM_OPEN) return Promise.resolve(false);
+  ACCT_CONFIRM_OPEN = true;
+  return new Promise(resolve => {
+    let done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      // 确认（v=true）时**不在这里清锁**：resolve 是微任务，调用方的在飞锁置位要等
+      // 下一拍——这中间窗口里再点 ✕ 会叠开第二个确认框永远等不到表态（前端测试
+      // test_delete_account_inflight_clicks_ignored 抓过）。锁交给确认方（delete 的
+      // finally）在请求真正收尾后清；取消（v=false）没有后续请求，立即清。
+      if (!v) ACCT_CONFIRM_OPEN = false;
+      resolve(v);
+    };
+    document.getElementById('modal-title').textContent = opts.title;
+    document.getElementById('modal-body').innerHTML =
+      `<p style="margin:0 0 6px">确定删除 <b>${esc(opts.name)}</b>？</p>` +
+      `<p class="muted" style="margin:0;font-size:12px">${opts.extra}</p>`;
+    setModalFoot(
+      `<button onclick="closeModal()">取消</button>` +
+      `<button class="danger" onclick="globalThis.__acctDelYes()">${esc(opts.yes || '删除该账号')}</button>`);
+    const prevClose = globalThis.closeModal;
+    globalThis.closeModal = () => {
+      globalThis.closeModal = prevClose;   // 先还原再走原关闭，别的弹窗不受污染
+      finish(false);
+      if (prevClose) prevClose();
+    };
+    globalThis.__acctDelYes = () => { finish(true); globalThis.closeModal(); };
+    document.getElementById('overlay').classList.add('show');
+  });
+}
+
+// 冷却时长格式化：≥2h 按小时（6h 拉黑档读着不像「360min」），否则按分钟。
+function acctCoolLeft(min) {
+  return min >= 120 ? (min / 60).toFixed(1) + 'h' : min + 'min';
+}
+
+/** 账号状态副标题（进度条上面那行 muted 小字）。
+ *  通用 bits：region / token 剩余（hours_left）/ 冷却（cooling[].kind+minutes_left）。
+ *  kind='blacklist' 标「疑似拉黑」引导删除；kind='quota'→「额度冷却」，其余→「账号冷却」。
+ *  通道特有 bit（如 dumate 的累计签到）经 subExtra(a, bits) 注入。 */
+function acctSubHtml(a, subExtra, dataAttr) {
+  if (!a) return '';
+  const bits = [];
+  if (subExtra) subExtra(a, bits);
+  if (a.region) bits.push(a.region === 'cn' ? 'CN 区' : 'Global 区');
+  if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
+  for (const c of a.cooling || []) {
+    const left = acctCoolLeft(c.minutes_left);
+    bits.push(c.kind === 'blacklist' ? `疑似拉黑 剩${left}`
+      : `${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
+  }
+  return bits.length
+    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" ${dataAttr}>${esc(bits.join(' · '))}</div>`
+    : '';
+}
+
+/** ▲▼ 顺位按钮（idx 渲染时 1-based，首尾禁用对应那个）。带 id 内联：重排响应回来后、
+ *  面板重绘前 DOM 还挂旧按钮（idx 是旧顺序）——点按时按快照里该 id 的实际位次挪才
+ *  不动错人。id 字符集由后端 _ID_RE 约束（字母数字 ._@-），内联进 onclick 安全。 */
+function acctMoveButtons(pid, idx, n, id) {
+  const arg = id ? `,'${id}'` : '';
+  return `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+    `onclick="acctMove('${pid}',${idx},-1${arg})">▲</button>` +
+    `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
+    `onclick="acctMove('${pid}',${idx},1${arg})">▼</button>`;
+}
+
+/** ✕ 删除按钮（要账号 id；快照没到（首屏）时先不渲染，等下轮回填）。 */
+function acctDeleteButton(pid, acct, hint) {
+  return acct
+    ? `<button class="ghost danger" title="删除该账号（${esc(hint)}）" ` +
+      `onclick="acctDelete('${pid}','${acct.id}')">✕</button>` : '';
+}
+
+/** ▲▼ + ✕ + ↻ 合成右上角按钮组。仍放块尾、绝对定位——load 的就地回填靠「名字元素的
+ *  下一个兄弟是副标题」定位，中间插任何元素会乱。↻ 无条件渲染（单账号也能刷）。 */
+function acctRowButtons(pid, moveBtns, delBtn) {
+  return `<span class="ag-move">` +
+    `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
+    `onclick="refreshProviderQuota('${pid}', this)">↻</button>${moveBtns}${delBtn}</span>`;
+}
+
+/** 按「<Prefix> #N」切分组。额度 label 形如「<Prefix> #N · <条目>」，单账号无前缀。
+ *  query_failed 说明条 / 无进度条语义的静态条（percent==null && used==null）不进分组，
+ *  横贯全宽展示。返回 {groups, notices}。 */
+function groupAccountsByPrefix(items, prefix, defaultName) {
+  const groups = new Map();
+  const notices = [];
+  for (const it of items) {
+    if (it.query_failed || (it.percent == null && it.used == null)) { notices.push(it); continue; }
+    const idx = it.label.indexOf(' · ');
+    const grp = idx >= 0 ? it.label.slice(0, idx) : defaultName;
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  return { groups, notices };
+}
+
+/** 界标 n = 全部「<Prefix> #N」序号最大值（自包含，不依赖快照到达时序，首屏首渲就有按钮）。 */
+function accountGroupBound(groups, prefix) {
+  const re = new RegExp('^' + prefix + ' #(\\d+)$');
+  return Math.max(...[...groups.keys()]
+    .map(g => g.match(re)).filter(Boolean).map(mm => Number(mm[1])), 1);
+}
+
+/** 账号快照回填（通用 load）。行为：enabled=false 清快照；数据没变不动 DOM（避免 30s
+ *  轮询闪回内部代号）；首份快照整卡重渲（直出账号名 + 带 id 按钮）并 syncQuotaFold；
+ *  之后就地回填（换组名 + 重写副标题）并 syncQuotaFold。acctFor(idx) 按快照取账号。 */
+function acctLoad(cfg, state) {
+  return (async function() {
+    try {
+      const r = await api(`/ui/api/${cfg.pid}/accounts`);
+      if (!r.enabled) { state.accts = []; return; }
+      const list = r.accounts || [];
+      if (JSON.stringify(list) === JSON.stringify(state.accts)) return;  // 没变不动 DOM
+      const snapshotMissing = !state.accts || !state.accts.length;
+      state.accts = list;
+      if (!list.length) return;
+      if (snapshotMissing) {
+        cfg.render();
+        syncQuotaFold();
+        return;
+      }
+      for (const a of list) {
+        const el = (list.length === 1)
+          ? document.querySelector(`#${cfg.pid}-panel .pat-pkg-name`)
+          : document.querySelector(`#${cfg.pid}-panel [data-${cfg.pid}-idx="${a.index}"]`);
+        if (!el) continue;
+        el.textContent = cfg.nameOf(a);
+        if (el.nextElementSibling && el.nextElementSibling.hasAttribute(`data-${cfg.pid}-sub`)) {
+          el.nextElementSibling.remove();
+        }
+        const sub = acctSubHtml(a, cfg.subExtra, `data-${cfg.pid}-sub`);
+        if (sub) el.insertAdjacentHTML('afterend', sub);
+      }
+      syncQuotaFold();
+    } catch (e) {
+      // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
+    }
+  });
+}
+
+function acctFor(state, idx) {
+  const accts = state.accts;
+  if (!accts) return null;
+  if (idx == null) return accts.length === 1 ? accts[0] : null;
+  return accts.find(a => a.index === idx) || null;
+}
+
+// ---- 全局分发：acctMove / acctDelete ----
+// 模板里统一写 acctMove/acctDelete（不同通道同一入口），这里按 pid 路由到对应
+// 通道的处理。ag/kimi/qoder 用各自的 agMoveAccount/agDeleteAccount 等（不动它们）；
+// dumate 用下面的 dumateMove/dumateDelete。新增多账号通道时在 ROUTES 里登记即可。
+function acctMove(pid, idx, delta, id) {
+  if (pid === 'dumate') return dumateMove(idx, delta, id);
+  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder'})[pid] + 'MoveAccount'];
+  if (fn) fn(idx, delta, id);
+}
+function acctDelete(pid, id) {
+  if (pid === 'dumate') return dumateDelete(id);
+  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder'})[pid] + 'DeleteAccount'];
+  if (fn) fn(id);
+}
+
+// dumate 单账号：重排无意义（no-op）。
+async function dumateMove() {}
+
+// dumate 单账号：删除即「清除本地累计签到缓存」——确认后调后端 no-op 接口刷新
+// 卡片（账号本身是 App 登录态，不能也不该真删，所以后端 /accounts/delete 是 no-op）。
+let DUMATE_DEL_MOVING = false;
+async function dumateDelete(id) {
+  if (DUMATE_DEL_MOVING) return;
+  const a = acctFor(DUMATE_STATE, 1);
+  const name = a ? (a.displayName || a.id) : id;
+  if (!(await confirmAccountDelete({
+      title: '清除 DuMate 本地缓存',
+      name,
+      extra: 'DuMate 复用本机 App 登录态、无多账号 failover，删除仅清除本地累计签到缓存的展示，不影响登录态与转发。',
+      yes: '清除缓存'}))) return;
+  DUMATE_DEL_MOVING = true;
+  try {
+    const r = await api('/ui/api/dumate/accounts/delete', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id})});
+    DUMATE_STATE.accts = r.accounts || [];
+    toast('已清除 DuMate 本地缓存');
+    refreshAll();
+  } catch (e) { toast('清除失败: ' + e.message, true); }
+  finally {
+    DUMATE_DEL_MOVING = false;
+    ACCT_CONFIRM_OPEN = false;  // 确认时从 confirmAccountDelete 接手的锁，到这里才放
+  }
+}
