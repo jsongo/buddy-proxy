@@ -485,26 +485,40 @@ class TraeProvider(BaseProvider):
                                 "；额度冷却到点自动恢复"),
                     "type": "rate_limit_error"}})
         last_exc: BaseException | None = None
-        for i, acct in enumerate(accounts):
-            set_current_work_account(acct.id)
-            try:
-                return await self._forward_once(
-                    body, protocol, original, requested_model, prompt,
-                    messages, tools, native, stream, agent_mode,
+        try:
+            for i, acct in enumerate(accounts):
+                set_current_work_account(acct.id)
+                try:
+                    return await self._forward_once(
+                        body, protocol, original, requested_model, prompt,
+                        messages, tools, native, stream, agent_mode,
+                    )
+                except HTTPException as e:
+                    last_exc = e
+                    # 账号级错误（401 凭据失效 / 429 额度）且还有下一个账号：冷却换号；
+                    # 其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
+                    if self._is_account_error(e) and i < len(accounts) - 1:
+                        failover.mark_cooldown(
+                            acct.id, quota=e.status_code == 429,
+                            reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
+                        continue
+                    raise
+                finally:
+                    set_current_work_account(None)
+        except HTTPException as e:
+            # 走到这是「最后一个账号也失败」或「非账号级错误透传」。anthropic 协议
+            # 的错误体用标准形状（Claude Code 等 SDK 靠它渲染错误）；openai 协议
+            # 维持「抛 HTTPException → 外层 exception handler 转 JSON」不变。
+            if protocol == "anthropic":
+                return JSONResponse(
+                    status_code=e.status_code,
+                    content={
+                        "type": "error",
+                        "error": {"type": "api_error", "message": str(e.detail)},
+                    },
                 )
-            except HTTPException as e:
-                last_exc = e
-                # 账号级错误（401 凭据失效 / 429 额度）且还有下一个账号：冷却换号；
-                # 其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
-                if self._is_account_error(e) and i < len(accounts) - 1:
-                    failover.mark_cooldown(
-                        acct.id, quota=e.status_code == 429,
-                        reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
-                    continue
-                raise
-            finally:
-                set_current_work_account(None)
-        # 全部账号失败
+            raise
+        # 全部账号失败（循环正常跑完不该到这，兜底）
         raise last_exc or HTTPException(status_code=429, detail=failover.cooldown_report())
 
     def _is_pat_variant(self) -> bool:
@@ -557,23 +571,14 @@ class TraeProvider(BaseProvider):
                 headers={"Cache-Control": "no-cache", "Connection": "close"},
             )
         # 非流式聚合内部是同步 urllib 调用（最长 180s），放线程池执行，
-        # 避免阻塞事件循环拖垮所有并发请求
-        try:
-            collected = await asyncio.to_thread(
-                self._collect, prompt, requested_model, not agent_mode, tools or None,
-                native,
-            )
-        except HTTPException as e:
-            # anthropic 协议错误体用标准形状（Claude Code 等 SDK 靠它渲染错误）
-            if protocol == "anthropic":
-                return JSONResponse(
-                    status_code=e.status_code,
-                    content={
-                        "type": "error",
-                        "error": {"type": "api_error", "message": str(e.detail)},
-                    },
-                )
-            raise
+        # 避免阻塞事件循环拖垮所有并发请求。
+        # 注意：这里的 HTTPException **必须 raise**（不能 return JSONResponse）——
+        # forward 的 failover 循环靠捕获它来判断账号级错误（401/429）冷却换号；
+        # 若在这里吞成返回值，撞错的账号不会被冷却、也不会换下一个账号。
+        collected = await asyncio.to_thread(
+            self._collect, prompt, requested_model, not agent_mode, tools or None,
+            native,
+        )
         if protocol == "anthropic":
             collected = chat_completion_to_anthropic_message(collected, original)
         return JSONResponse(content=collected)
