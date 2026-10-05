@@ -43,6 +43,13 @@ let PANEL = {innerHTML: ''};        // #dumate-panel
 globalThis.esc = s => String(s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// app.js 的数字格式化（与真实现一致）：dumate 今日消耗副标题用它
+globalThis.fmtNum = n => {
+  if (n == null) return '—';
+  const x = Number(n);
+  if (!isFinite(x)) return String(n);
+  return x >= 100 ? Math.round(x).toLocaleString('en-US') : String(Math.round(x * 10) / 10);
+};
 globalThis.__SYNC_CALLS = 0;
 globalThis.syncQuotaFold = () => { globalThis.__SYNC_CALLS++; };
 globalThis.BENEFITS = {};
@@ -358,12 +365,13 @@ def test_dumate_status_ready_triggers_rerender():
         + "globalThis.quotaItemHtml = it => '<div class=\"qitem\">' + esc(it.label) + '</div>';\n"
         + "globalThis.quotaItemsHtml = (items, key) =>\n"
         + "  '<div class=\"qbody\" data-qfold=\"' + esc(key) + '\">' + items.map(globalThis.quotaItemHtml).join('') + '</div>';\n"
-        + "globalThis.api = async (path) => globalThis.__DM_RESPONSE;\n"
+        + "globalThis.api = async (path) => path.includes('/accounts')\n"
+        + "  ? globalThis.__DM_ACCTS : globalThis.__DM_RESPONSE;\n"
         + seg.group(0)
         + """
 (async () => {
 globalThis.BENEFITS = {providers: [{id: 'dumate', quota: {supported: true, items: [
-  {label: '可用积分', used: 160.04, total: 1000, remaining: 839.96, percent: 16.0,
+  {label: '订阅积分', used: 160.04, total: 1000, remaining: 839.96, percent: 16.0,
    reset_ts: null, expire_ts: null, unit: 'points'},
 ]}}]};
 let RENDER_COUNT = 0;
@@ -372,6 +380,7 @@ renderDumatePanel = function() { RENDER_COUNT++; return origRender(); };
 // 桩 document.getElementById('dumate-panel') → PANEL
 const origGetEl = document.getElementById.bind(document);
 document.getElementById = id => (id === 'dumate-panel' ? PANEL : origGetEl(id));
+globalThis.__DM_ACCTS = {enabled: false, accounts: []};
 globalThis.__DM_RESPONSE = {ready: false, installed: true, running: false,
                             hint: '已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。'};
 renderDumatePanel();                        // 首渲（status 未到 → 检测中）
@@ -388,6 +397,24 @@ globalThis.__DM_RESPONSE = {ready: true, installed: true, running: true,
                             checkin_total_times: 2};
 await loadDumateStatus();                   // 应主动 render 一次
 const readyHtml = PANEL.innerHTML;
+// 账号快照到手（含今日消耗）：首份快照整卡重渲 → 卡片标题=display_name
+globalThis.__DM_ACCTS = {enabled: true, accounts: [
+  {index: 1, id: 'u1', display_name: 'jsongo',
+   today_consumed: 123.45, today_calls: 42,
+   checkin_total_points: 1000, checkin_total_times: 2}]};
+await loadDumateAccounts();
+await new Promise(r => setTimeout(r, 5));   // 等重渲尾部的嵌套 load 落定
+const acctHtml = PANEL.innerHTML;
+// 第二拍：消耗数变了 → 就地回填副标题（QS 桩元素观察 insertAdjacentHTML）
+const nameEl = el('jsongo');
+nameEl.nextElementSibling = null;
+QS['#dumate-panel .pat-pkg-name'] = nameEl;
+globalThis.__DM_ACCTS = {enabled: true, accounts: [
+  {index: 1, id: 'u1', display_name: 'jsongo',
+   today_consumed: 130.05, today_calls: 43,
+   checkin_total_points: 1000, checkin_total_times: 2}]};
+await loadDumateAccounts();
+const insertedSub = nameEl.inserted.join('');
 console.log(JSON.stringify({
   firstDetecting,
   firstReady: firstHtml.includes('已就绪'),
@@ -396,6 +423,8 @@ console.log(JSON.stringify({
   stillDetecting: readyHtml.includes('检测中'),
   showsLogin: readyHtml.includes('已登录'),
   version: readyHtml.includes('v1.0.0'),
+  cardName: acctHtml.includes('jsongo'),
+  insertedSub,
 }));
 })().catch(e => { console.error(e); process.exit(1); });
 """
@@ -406,7 +435,12 @@ console.log(JSON.stringify({
     assert proc.returncode == 0, f"node 执行失败:\n{proc.stderr}"
     data = json.loads(proc.stdout.strip().splitlines()[-1])
     assert data["firstDetecting"] and not data["firstReady"], "首渲应是检测中"
-    assert data["renderCount"] == 2, "就绪态到达后要主动重渲一次"
+    assert data["renderCount"] >= 2, "就绪态到达后要主动重渲一次"
     assert data["readyNow"] and not data["stillDetecting"], "重渲后应显示已就绪"
     assert data["showsLogin"], "已登录徽标要出来"
     assert data["version"], "版本号 v1.0.0 要出来"
+    assert data["cardName"], "账号卡标题=display_name（快照到位后）"
+    # 今日消耗：真实流水合计数进副标题（fmtNum: 130.05 → '130'，≥100 取整）
+    assert "今日消耗 130 分（43 次）" in data["insertedSub"], \
+        f"今日消耗要进副标题: {data['insertedSub']}"
+    assert "累计签到 1000 分（2 次）" in data["insertedSub"], "签到累计照旧"

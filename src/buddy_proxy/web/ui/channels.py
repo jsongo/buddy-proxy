@@ -493,6 +493,21 @@ def _dumate_account_info() -> dict[str, Any]:
     if status:
         info["checkin_total_points"] = status.get("total_points", 0)
         info["checkin_total_times"] = status.get("total_times", 0)
+
+    # 今日消耗（真实流水合计，不是估算）：records/usage 区间查「今天 0 点 → 现在」。
+    # 同样短超时快速失败，拿不到就缺省（前端不显示这一位）。limit=1：合计走
+    # consumedPoints/totalCount 字段，不需要明细列表。
+    import datetime as _dt
+
+    now_dt = _dt.datetime.now()
+    now = int(now_dt.timestamp())
+    day_start = int(now_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    usage = dumate_checkin.fetch_usage_records(
+        start_ts=day_start, end_ts=now, page=1, limit=1, timeout=3.0,
+    )
+    if usage is not None:
+        info["today_consumed"] = usage.get("consumed_points", 0.0)
+        info["today_calls"] = usage.get("total_count", 0)
     return info
 
 
@@ -519,8 +534,47 @@ async def ui_dumate_accounts(request: Request):
             "display_name": info.get("display_name") or "百度搭子",
             "checkin_total_points": info.get("checkin_total_points"),
             "checkin_total_times": info.get("checkin_total_times"),
+            "today_consumed": info.get("today_consumed"),
+            "today_calls": info.get("today_calls"),
         }],
     }
+
+
+@app.get("/ui/api/dumate/usage-records")
+async def ui_dumate_usage_records(
+    request: Request, days: int = 7, page: int = 1, limit: int = 20
+):
+    """DuMate 积分消耗流水（bceConsole records/usage 同源，真实逐笔扣减）。
+
+    暂无 UI 消费方，先以管理接口形式备用（curl 即可查），参数：
+    days（默认 7）、page、limit（≤100）。返回 ``{total_count, consumed_points, records[]}``。
+    """
+    _ensure_local(request)
+    from ...dumate import checkin as dumate_checkin
+
+    limit = max(1, min(int(limit or 20), 100))
+    page = max(1, int(page or 1))
+    days = max(1, min(int(days or 7), 90))
+
+    def _fetch():
+        end = int(time.time())
+        start = end - days * 86400
+        return dumate_checkin.fetch_usage_records(
+            start_ts=start, end_ts=end, page=page, limit=limit, timeout=15.0,
+        )
+
+    try:
+        result = await asyncio.to_thread(_fetch)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail={"error": {"message": str(exc)[:300]}}
+        )
+    if result is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"message": "dumate 未登录或消耗流水查询失败"}},
+        )
+    return result
 
 
 @app.post("/ui/api/dumate/accounts/delete")

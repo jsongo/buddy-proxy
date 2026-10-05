@@ -109,7 +109,8 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
     ``GET /api/dumate/points/quota_overview?timezone=...&clientType=...&ignoreLoginBonus=true``
     （**下划线**版；camelCase ``quotaOverview`` 是另一个端点、怎么调都是 500）。
     返回 dict 含 ``total_points`` / ``used_points`` / ``remaining_points`` /
-    ``is_subscribed`` / ``packages``（incremental 包列表）等；未登录 / 失败 None。
+    ``is_subscribed`` / ``packages``（subscription 付费主池 + incremental 赠送包，
+    ``total_points`` 就是两个池的合计）等；未登录 / 失败 None。
     """
     data = _bce_get(
         "/api/dumate/points/quota_overview"
@@ -127,7 +128,11 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
     packages = []
-    for p in result.get("incremental") or []:
+    # 两个池：subscription（付费订阅主池，plan_pro 等）+ incremental（login_bonus
+    # 赠送包）。totalPoints = 两者合计；只读 incremental 会漏掉订阅主池，面板明细
+    # 跟总结行对不上（实测：totalPoints=26000 = subscription 25000 + incremental
+    # 两个 500 包，但旧代码只列那两个包）。
+    for p in (result.get("subscription") or []) + (result.get("incremental") or []):
         try:
             packages.append({
                 "package_id": p.get("packageId") or "",
@@ -136,6 +141,7 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
                 "start_ts": p.get("startDate"),
                 "expire_ts": p.get("expireDate"),
                 "source": p.get("source") or "",
+                "package_type": p.get("packageType") or "",
                 "status": p.get("status") or "",
             })
         except (TypeError, ValueError):
@@ -147,6 +153,53 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
         "is_subscribed": bool(result.get("isSubscribed")),
         "packages": packages,
         "throttled": bool((result.get("modelThrottleInfo") or {}).get("throttled")),
+    }
+
+
+def fetch_usage_records(
+    *, start_ts: int, end_ts: int, page: int = 1, limit: int = 20, timeout: float = 15.0,
+) -> dict[str, Any] | None:
+    """查积分消耗流水（真实逐笔数据，bceConsole 通道）。
+
+    实测（2026-10-05）App 抓包：``GET /api/dumate/points/records/usage``，
+    query 参数 ``page`` / ``limit`` / ``startAt`` / ``endAt``，**秒级时间戳**
+    （毫秒会报 500「系统出现错误」；缺 startAt 报「参数错误:StartAt」）。
+
+    响应 ``{"code": 0, "success": true, "result": {"totalCount": N,
+    "consumedPoints": "1239.96", "list": [{"createdAt": 秒, "pointsChange": "-8.88",
+    "expectedPointsChange": "-8.88", "packageId": "...", "reason": ""}]}}``。
+    ``consumedPoints`` 是该区间合计消耗（正数字符串），``pointsChange`` 是单笔
+    带符号扣减。未登录 / 失败返回 None。
+    """
+    data = _bce_get(
+        f"/api/dumate/points/records/usage?page={page}&limit={limit}"
+        f"&startAt={int(start_ts)}&endAt={int(end_ts)}",
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    result = data.get("result") or {}
+    records: list[dict[str, Any]] = []
+    for it in result.get("list") or []:
+        try:
+            records.append({
+                "ts": int(it.get("createdAt") or 0),
+                "points": float(it.get("pointsChange") or 0),
+                "expected_points": float(it.get("expectedPointsChange") or 0),
+                "package_id": it.get("packageId") or "",
+                "conversation_name": it.get("conversationName") or "",
+                "reason": it.get("reason") or "",
+            })
+        except (TypeError, ValueError):
+            continue
+    try:
+        consumed = float(result.get("consumedPoints") or 0)
+    except (TypeError, ValueError):
+        consumed = 0.0
+    return {
+        "total_count": int(result.get("totalCount") or 0),
+        "consumed_points": consumed,
+        "records": records,
     }
 
 

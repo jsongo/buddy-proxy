@@ -249,8 +249,12 @@ class DumateProvider(BaseProvider):
             remaining = q["remaining_points"]
             total = q["total_points"]
             used = q["used_points"]
+            # 「订阅积分」= quota_overview 的 totalPoints（subscription 付费主池 +
+            # incremental 赠送包的合计），留在明细首位当账号卡的总结行（用户
+            # 2026-10-05：卡片上要有「剩 X / Y · 已用 Z%」总结，与 antigravity 账号卡
+            # 同款；下面各池明细跟在后面，口径与总结行对得上）。
             items = [{
-                "label": "可用积分",
+                "label": "订阅积分",
                 "used": round(used, 2),
                 "total": round(total, 2),
                 "remaining": round(remaining, 2),
@@ -259,11 +263,18 @@ class DumateProvider(BaseProvider):
                 "expire_ts": None,
                 "unit": "points",
             }]
-            # 展开「积分包」明细（签到送的是 500 一个的包，有过期时间）
+            # 展开各池明细：subscription 付费主池（plan_pro 等，按 packageType 命名）
+            # + incremental 赠送包（login_bonus 等，按 source 命名）。都有过期时间。
             for p in q.get("packages") or []:
                 exp = p.get("expire_ts")
+                ptype = p.get("package_type") or ""
+                src = p.get("source") or "grant"
+                # 付费主池标「订阅套餐（plan_pro）」，赠送包标「积分包（login_bonus）」
+                label = (f"订阅套餐（{ptype}）" if ptype == "plan_pro"
+                         else f"积分包（{src}）" if src == "login_bonus"
+                         else f"积分池（{ptype or src}）")
                 items.append({
-                    "label": f"积分包（{p.get('source') or 'grant'}）",
+                    "label": label,
                     "used": round(p["used_points"], 2),
                     "total": round(p["total_points"], 2),
                     "remaining": round(max(p["total_points"] - p["used_points"], 0.0), 2),

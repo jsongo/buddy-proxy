@@ -214,12 +214,21 @@ def test_forward_openai_nonstream_pass_through():
 
 
 def _quota_overview_result():
+    # 已订阅形状（2026-10-05 实测抓包）：totalPoints = subscription 主池 +
+    # incremental 赠送包合计
     return {
-        "isSubscribed": False,
+        "isSubscribed": True,
         "usedPoints": "160.04",
-        "totalPoints": "1000.00",
+        "totalPoints": "26000.00",
         "modelThrottleInfo": {"throttled": False, "reason": "", "throttleType": ""},
-        "subscription": [],
+        "subscription": [
+            {"packageId": "s1", "usedPoints": "0.00", "totalPoints": "25000.00",
+             "startDate": 1791174137, "expireDate": 1793852537,
+             "packageType": "plan_pro", "source": "purchase",
+             "status": "active", "autoRenewStatus": "cancelled",
+             "nextAutoRenewAt": 0, "devicePlatform": "PC",
+             "resourceId": "dp-x", "product": "dumate"},
+        ],
         "incremental": [
             {"packageId": "p1", "usedPoints": "0.00", "totalPoints": "500.00",
              "startDate": 1791129600, "expireDate": 1793807999,
@@ -243,10 +252,10 @@ def test_quota_prefers_quota_overview_numeric():
         "is_subscribed": False, "packages": [
             {"package_id": "p1", "used_points": 0.0, "total_points": 500.0,
              "start_ts": 1791129600, "expire_ts": 1793807999,
-             "source": "login_bonus", "status": "active"},
+             "source": "login_bonus", "package_type": "grant_point", "status": "active"},
             {"package_id": "p2", "used_points": 160.04, "total_points": 500.0,
              "start_ts": 1790870400, "expire_ts": 1793548799,
-             "source": "login_bonus", "status": "active"},
+             "source": "login_bonus", "package_type": "grant_point", "status": "active"},
         ],
         "throttled": False,
     }
@@ -254,7 +263,7 @@ def test_quota_prefers_quota_overview_numeric():
         q = p.quota()
 
     head = q["items"][0]
-    assert head["label"] == "可用积分"
+    assert head["label"] == "订阅积分"
     assert head["remaining"] == 839.96
     assert head["total"] == 1000.0
     assert head["used"] == 160.04
@@ -267,6 +276,47 @@ def test_quota_prefers_quota_overview_numeric():
     assert pkgs[0]["remaining"] == 500.0
     assert pkgs[1]["remaining"] == 339.96
     assert pkgs[0]["expire_ts"] == 1793807999
+
+
+def test_quota_subscription_pool_labeled_and_counted():
+    """已订阅账号：subscription 付费主池 + incremental 赠送包都进明细，口径与总结行对上。
+
+    回归 review 发现：旧代码只解析 incremental，漏掉 subscription 主池——
+    totalPoints=26000（plan_pro 25000 + 两个 login_bonus 各 500）但明细只列那两个
+    已用完的 500 包，用户看面板会懵。
+    """
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
+    p = DumateProvider()
+    q_overview = {
+        "total_points": 26000.0, "used_points": 2112.54, "remaining_points": 23887.46,
+        "is_subscribed": True, "packages": [
+            {"package_id": "sub1", "used_points": 1112.54, "total_points": 25000.0,
+             "start_ts": 1791174137, "expire_ts": 1793852537,
+             "source": "purchase", "package_type": "plan_pro", "status": "active"},
+            {"package_id": "inc1", "used_points": 500.0, "total_points": 500.0,
+             "start_ts": 1791129600, "expire_ts": 1793807999,
+             "source": "login_bonus", "package_type": "grant_point", "status": "used"},
+            {"package_id": "inc2", "used_points": 500.0, "total_points": 500.0,
+             "start_ts": 1790870400, "expire_ts": 1793548799,
+             "source": "login_bonus", "package_type": "grant_point", "status": "used"},
+        ],
+        "throttled": False,
+    }
+    with mock.patch.object(dumate_checkin, "fetch_quota_overview", return_value=q_overview):
+        q = p.quota()
+
+    head = q["items"][0]
+    assert head["label"] == "订阅积分"
+    assert head["total"] == 26000.0
+    # 明细 = 总结行的拆分：subscription 主池 + 两个赠送包
+    pkgs = q["items"][1:]
+    assert len(pkgs) == 3
+    assert pkgs[0]["label"] == "订阅套餐（plan_pro）"
+    assert pkgs[0]["total"] == 25000.0
+    assert pkgs[1]["label"].startswith("积分包")
+    # 各池 total 合计 == 总结行 total（口径一致）
+    assert sum(x["total"] for x in pkgs) == head["total"]
 
 
 def test_quota_falls_back_to_boolean_when_overview_fails():
@@ -291,7 +341,11 @@ def test_quota_falls_back_to_boolean_when_overview_fails():
 
 
 def test_quota_overview_parse():
-    """_parse 层：quota_overview 响应 → total/used/remaining + packages。"""
+    """_parse 层：quota_overview 响应 → total/used/remaining + packages。
+
+    subscription 付费主池 + incremental 赠送包都要进 packages（只读 incremental
+    会漏掉订阅主池，面板明细跟总结行对不上——review 实测发现的回归点）。
+    """
     from buddy_proxy.dumate import checkin as dumate_checkin
 
     class _FakeResp:
@@ -306,12 +360,16 @@ def test_quota_overview_parse():
         q = dumate_checkin.fetch_quota_overview()
 
     assert q is not None
-    assert q["total_points"] == 1000.0
+    assert q["total_points"] == 26000.0
     assert q["used_points"] == 160.04
-    assert q["remaining_points"] == 839.96
-    assert len(q["packages"]) == 2
-    assert q["packages"][0]["source"] == "login_bonus"
-    assert q["packages"][0]["expire_ts"] == 1793807999
+    assert q["remaining_points"] == 25839.96
+    assert q["is_subscribed"] is True
+    # 1 个订阅主池 + 2 个赠送包
+    assert len(q["packages"]) == 3
+    assert q["packages"][0]["package_type"] == "plan_pro"
+    assert q["packages"][0]["total_points"] == 25000.0
+    assert q["packages"][1]["source"] == "login_bonus"
+    assert q["packages"][1]["expire_ts"] == 1793807999
 
 
 def test_quota_overview_none_when_not_logged_in():
@@ -319,6 +377,52 @@ def test_quota_overview_none_when_not_logged_in():
 
     with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth", return_value=None):
         assert dumate_checkin.fetch_quota_overview() is None
+
+
+def test_usage_records_parse():
+    """records/usage 响应 → total_count/consumed_points + 逐笔 records。
+
+    实测（2026-10-05）：startAt/endAt 是**秒级**时间戳（毫秒会 500）；
+    pointsChange 是带符号扣减字符串（"-8.88"），consumedPoints 是区间合计正数。
+    """
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
+    class _FakeResp:
+        status_code = 200
+        def json(self):
+            return {"code": 0, "success": True, "result": {
+                "totalCount": 168,
+                "consumedPoints": "1239.96",
+                "list": [
+                    {"createdAt": 1791174999, "pointsChange": "-8.88",
+                     "expectedPointsChange": "-8.88", "packageId": "p1",
+                     "conversationName": "调试会话", "reason": ""},
+                    {"createdAt": 1791174986, "pointsChange": "-9.68",
+                     "expectedPointsChange": "-9.68", "packageId": "p1",
+                     "conversationName": "", "reason": ""},
+                ],
+            }}
+
+    with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth") as auth, \
+         mock.patch.object(httpx, "Client") as client_cls:
+        auth.return_value.headers = lambda: {"Cookie": "x"}
+        client_cls.return_value.__enter__.return_value.get.return_value = _FakeResp()
+        r = dumate_checkin.fetch_usage_records(start_ts=1791100000, end_ts=1791200000)
+
+    assert r is not None
+    assert r["total_count"] == 168
+    assert r["consumed_points"] == 1239.96
+    assert len(r["records"]) == 2
+    assert r["records"][0]["ts"] == 1791174999
+    assert r["records"][0]["points"] == -8.88
+    assert r["records"][0]["conversation_name"] == "调试会话"
+
+
+def test_usage_records_none_when_not_logged_in():
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
+    with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth", return_value=None):
+        assert dumate_checkin.fetch_usage_records(start_ts=0, end_ts=1) is None
 
 
 # --- 签到（bceConsole 通道） ------------------------------------------------

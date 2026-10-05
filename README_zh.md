@@ -137,10 +137,14 @@ uv run python -m buddy_proxy --desensitize --dumate
   未对百度账号开放
 - **签到**：自动打卡循环每日领取（`POST /api/dumate/points/loginBonus`，
   bceConsole 通道）；管理页显示累计签到积分
-- **额度**：本地 `/api/dumate/points/remaining` 只回布尔态（有/无），数字
-  余额面板在 App 内、无对外接口，管理页据此显示「有额度 / 已用尽」
-- **协议**：仅 OpenAI chat completions；Anthropic /v1/messages 不支持
-  （DuMate 网关只认 OpenAI 形态）
+- **额度**：走 App 自己的 bceConsole 接口拿数字积分（`GET /api/dumate/points/quota_overview`，
+  注意是下划线版；camelCase 的 `quotaOverview` 永远 500）：订阅总额/已用/剩余 +
+  各积分包明细（含到期日）。未登录时退回本地代理的布尔态 `/api/dumate/points/remaining`
+- **消耗流水**：真实逐笔扣减走 `GET /api/dumate/points/records/usage`
+  （`startAt`/`endAt` 是**秒级**时间戳，毫秒会 500）。面板副标题显示「今日消耗
+  N 分（M 次）」；`GET /ui/api/dumate/usage-records?days=N&page=&limit=` 可查原始流水
+- **协议**：OpenAI chat completions；Anthropic /v1/messages 会把 OpenAI 响应转回
+  anthropic 形态（与 kimi/qoder 同一套适配器），Claude Code 可直接调用
 - **依赖**：纯 Python 标准库（含零依赖 AES-256-GCM 实现解密 bceConsole cookie）
 
 ### Trae Provider（可选）
