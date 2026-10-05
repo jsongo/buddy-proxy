@@ -204,17 +204,21 @@ function renderBenefits() {
     if (c.streak_days >= 2) chips.push(`连续 ${c.streak_days} 天`);
     if (c.activity_name) chips.push(c.activity_name);
     const meta = chips.map(t => `<span class="br-chip">${esc(t)}</span>`).join('');
-    return `<div class="benefit-row">
-      <div class="br-id">
-        <i class="br-dot" style="background:${pcolor(p.id)}"></i>
-        <span class="br-name">${esc(p.id)}</span>
-      </div>
-      <div class="br-meta">${st}${meta}${nextTimeHtml(c)}</div>
-      <div class="br-act">
-        <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
+    // 照 antigravity 面板的卡中卡（pat-pkg）包一层：两列平摊时裸行 + 底线
+    // 会把左右两列糊成一片，子卡（亮底 + 描边 + 圆角）分隔一眼能看出来
+    return `<div class="pat-pkg ck-pkg">
+      <div class="benefit-row">
+        <div class="br-id">
+          <i class="br-dot" style="background:${pcolor(p.id)}"></i>
+          <span class="br-name">${esc(p.id)}</span>
+        </div>
+        <div class="br-meta">${st}${meta}${nextTimeHtml(c)}</div>
+        <div class="br-act">
+          <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
+        </div>
       </div>
     </div>`;
-  }).join('') : '<div class="empty" style="padding:14px 0">当前没有支持打卡的通道</div>';
+  }).join('') : '<div class="empty" style="grid-column:1/-1;padding:14px 0">当前没有支持打卡的通道</div>';
   // 数据换了新的一批 data-next-ts，重算一次并决定要不要起 ticker
   syncNextTimeAuto();
 

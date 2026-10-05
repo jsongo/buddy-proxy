@@ -276,11 +276,12 @@
   /* 打卡行：左侧通道标识（色块 + 名字 + 活动档期）｜中间状态与下次时间｜右侧动作。
      三列用 grid 而不是 flex：各行的 tag 数量不一样（trae 没有活动档期），
      flex 一换行右边缘就对不齐——按钮会掉到第二行、各行参差（02:14 那版就是这样）。
-     minmax(0,1fr) 让中列可压缩，长活动名不会把按钮挤出卡片。 */
+     minmax(0,1fr) 让中列可压缩，长活动名不会把按钮挤出卡片。
+     行外层套 .pat-pkg 子卡（卡中卡，照 antigravity 面板），分隔靠子卡描边，
+     行自身不再画底线。 */
   .benefit-row { display: grid; align-items: center; gap: 10px 14px;
-                 grid-template-columns: auto minmax(0, 1fr) auto;
-                 padding: 12px 0; border-bottom: 1px solid rgba(38,47,60,.55); }
-  .benefit-row:last-child { border-bottom: none; }
+                 grid-template-columns: auto minmax(0, 1fr) auto; }
+  .ck-pkg { padding: 12px 14px; }
   .br-id { display: flex; align-items: center; gap: 9px; min-width: 0; }
   /* 通道色块：用 pcolor() 上色，与日历 tooltip / 图表里的同通道颜色一致 */
   .br-dot { flex: none; width: 9px; height: 9px; border-radius: 3px; }
@@ -321,13 +322,19 @@
   .benefit-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
                   margin-bottom: 2px; }
   .benefit-head .bh-title { font-weight: 600; font-size: 13px; }
-  /* 左栏两张卡竖排（日历 + 通道签到） */
-  .col-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-  /* 打卡行的排布按**卡片自身宽度**决定，不看视口——两栏布局下这张卡只有
+  /* 打卡行的排布按**卡片自身宽度**决定，不看视口——原来两栏布局时这张卡只有
      约 560px，而单栏时反而是整宽。视口宽 → 卡窄，media query 的直觉正好
      是反的，所以用容器查询：窄时折成两行（通道 + 按钮一行，状态/时间另起
      一行），宽时三列一行排开，两种情况按钮都贴右对齐。 */
   .rows-card { container-type: inline-size; }
+  /* 签到行容器：全宽卡里两列平摊（左右各一列），行与行之间留缝（子卡不共
+     边界，缝太小会贴成一片）。同样用容器查询按**卡片实际宽度**判断——窄屏
+     收单栏时卡片还是整宽、仍能放两列；真窄到连两列都挤不下（≤720px）再退
+     回单列。 */
+  #checkin-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 22px; }
+  @container (max-width: 720px) {
+    #checkin-rows { grid-template-columns: 1fr; }
+  }
   @container (max-width: 640px) {
     .benefit-row { grid-template-columns: minmax(0, 1fr) auto; }
     /* 显式定位：只写 .br-meta{grid-column:1/-1} 的话，它跨行占掉第二行，
@@ -339,6 +346,7 @@
     .br-id  { grid-area: 1 / 1; }
     .br-act { grid-area: 1 / 2; }
     .br-meta { grid-area: 2 / 1 / 2 / -1; }
+    /* 单列回退时按钮行贴右对齐还靠 .br-act 自身 justify-content，不动 */
   }
   .grow { flex: 1; }
   .qitem { margin: 9px 0; }

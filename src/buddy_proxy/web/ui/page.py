@@ -36,13 +36,12 @@ def _read_static(name: str) -> str:
         raise HTTPException(status_code=404, detail={"error": {"message": f"{name} 不存在"}}) from exc
 
 
-_PAGE_HTML = _read_static("index.html")
-
-
+# 每次请求现读：CSS/JS 一直是这样，index.html 也照做——之前它只在 import 时读一次，
+# 改完页面不重启就永远 serve 旧骨架，和下面 no-cache 的意图正好相反。
 @app.get("/ui", response_class=HTMLResponse)
 async def ui_page():
     # no-cache：页面随代码更新，别让浏览器拿旧缓存（管理页无性能顾虑）
-    return HTMLResponse(content=_PAGE_HTML, headers={"Cache-Control": "no-cache"})
+    return HTMLResponse(content=_read_static("index.html"), headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/ui/{name}")
