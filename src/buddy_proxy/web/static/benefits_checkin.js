@@ -198,7 +198,7 @@ async function kimiDeleteAccount(id) {
   } catch (e) { toast('删除失败: ' + e.message, true); }
   finally {
     KIMI_MOVING = false;
-    AG_CONFIRM_OPEN = false;  // 确认时从 confirmAccountDelete 接手的锁，到这里才放
+    ACCT_CONFIRM_OPEN = false;  // 确认时从 confirmAccountDelete 接手的锁，到这里才放
   }
 }
 

@@ -2,7 +2,7 @@
 
 与 test_antigravity_panel_ui.py 同构：把整段面板代码抽出来用最小 DOM 桩
 真跑。KIMI 段复用 ANTIGRAVITY 段的组件（confirmAccountDelete /
-AG_CONFIRM_OPEN / .ag-move 样式），所以切片从 ANTIGRAVITY 段头一直取到
+ACCT_CONFIRM_OPEN / .ag-move 样式），所以切片从 ANTIGRAVITY 段头一直取到
 文件尾。盯六件事：
 
 - **分组渲染**：`Kimi #N · ` 前缀按账号分组，标题=账号名（快照回填），
@@ -13,7 +13,7 @@ AG_CONFIRM_OPEN / .ag-move 样式），所以切片从 ANTIGRAVITY 段头一直�
 - **通道未注册**：providers 里没有 kimi（没加 --kimi）时整块不渲染
 - **顺位/删除**：按快照里 id 的真实位次提交全量 id 列表；删除走确认弹窗
 - **导入弹窗**：openKimiImport 填 textarea → kimiImportSubmit POST payload
-- **跨通道确认锁**：共享 AG_CONFIRM_OPEN，同一时刻只有一个确认框
+- **跨通道确认锁**：共享 ACCT_CONFIRM_OPEN，同一时刻只有一个确认框
 
 JS 由本机 ``node`` 执行；没有 node 时整文件跳过（不是失败）——CI 有 node。
 """
@@ -34,7 +34,7 @@ _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/sta
 BENEFITS_JS_AG = _STATIC / "benefits_panels.js"     # ANTIGRAVITY 段
 BENEFITS_JS_KIMI = _STATIC / "benefits_checkin.js"  # KIMI 段（含导入）
 HELPERS_JS = _STATIC / "benefits_accounts.js"       # 公共件（✎ 改名等，面板段引用）
-# KIMI 段复用 ANTIGRAVITY 段的组件（confirmAccountDelete / AG_CONFIRM_OPEN），
+# KIMI 段复用 ANTIGRAVITY 段的组件（confirmAccountDelete / ACCT_CONFIRM_OPEN），
 # 但两段在文件里不相邻：traepat 段挪到 benefits_panels.js 开头，KIMI 段挪到
 # benefits_checkin.js 末尾，中间隔着 QODER 段——分两段提取拼接。
 # ANTIGRAVITY 段尾：后随 QODER 面板段头。
@@ -256,11 +256,11 @@ const shown = {
   foot: globalThis.__FOOT,
   overlayShown: globalThis.MODAL['overlay'].classList.contains('show'),
 };
-globalThis.__agDelYes();                    // 点「删除该账号」
+globalThis.__acctDelYes();                  // 点「删除该账号」
 await p;
 console.log(JSON.stringify({
   shown, calls: CALLS, toasts: TOASTS, refreshed: REFRESHED, closed: globalThis.__CLOSED,
-  confirmFree: !globalThis.AG_CONFIRM_OPEN,
+  confirmFree: !ACCT_CONFIRM_OPEN,
 }));
 """)
     data = json.loads(out.strip().splitlines()[-1])
@@ -287,7 +287,7 @@ const p = kimiDeleteAccount('u1');
 await new Promise(r => setTimeout(r, 5));
 globalThis.closeModal();                    // 走被 confirmAccountDelete 接管的关闭入口
 const yes = await p;
-console.log(JSON.stringify({canceled: !yes, confirmFree: !globalThis.AG_CONFIRM_OPEN}));
+console.log(JSON.stringify({canceled: !yes, confirmFree: !ACCT_CONFIRM_OPEN}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["canceled"] and data["confirmFree"]
@@ -365,11 +365,11 @@ const pk = kimiDeleteAccount('u1');         // kimi 先开确认框
 await new Promise(r => setTimeout(r, 5));
 const pa = agDeleteAccount('a@x.com');      // antigravity 的 ✕：锁被占，不叠层直接取消
 await new Promise(r => setTimeout(r, 5));
-globalThis.__agDelYes();                    // 只确认 kimi 那个
+globalThis.__acctDelYes();                  // 只确认 kimi 那个
 await pk;
 await pa;
 console.log(JSON.stringify({
-  calls: CALLS, confirmFree: !globalThis.AG_CONFIRM_OPEN,
+  calls: CALLS, confirmFree: !ACCT_CONFIRM_OPEN,
   closed: globalThis.__CLOSED,
 }));
 """)

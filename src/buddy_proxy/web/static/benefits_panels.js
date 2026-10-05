@@ -195,52 +195,11 @@ async function agMoveAccount(idx, delta, id) {
   finally { AG_MOVING = false; }
 }
 
-// 删除确认弹窗：复用 index.html 的 overlay/modal 骨架（与「测试上游」同款），
-// 不用系统 confirm——样式割裂、标题还是文件路径，观感差。Promise 化：
-// 「删除该账号」resolve(true)；取消按钮/遮罩点击/Esc（都汇入 closeModal）
-// resolve(false)。closeModal 是 app.js 的全局函数（浏览器里即 window.closeModal，
-// 各关闭入口解析到的都是它），临时替换拦下全部关闭路径，关完立刻还原。
-let AG_CONFIRM_OPEN = false;   // 确认流程占位：弹窗在开，或已确认、请求还没起来
-// 通用删除确认弹窗（antigravity / kimi 共用）：复用 index.html 的 overlay/modal
-// 骨架（与「测试上游」同款），不用系统 confirm——样式割裂、标题还是文件路径，
-// 观感差。Promise 化：「删除该账号」resolve(true)；取消按钮/遮罩点击/Esc
-// （都汇入 closeModal）resolve(false)。closeModal 是 app.js 的全局函数（浏览器
-// 里即 window.closeModal，各关闭入口解析到的都是它），临时替换拦下全部关闭
-// 路径，关完立刻还原。opts: {title, name, extra, yes}（文案各通道自带）。
-function confirmAccountDelete(opts) {
-  if (AG_CONFIRM_OPEN) return Promise.resolve(false);
-  AG_CONFIRM_OPEN = true;
-  return new Promise(resolve => {
-    let done = false;
-    const finish = v => {
-      if (done) return;
-      done = true;
-      // 确认（v=true）时**不在这里清锁**：resolve 是微任务，调用方的 MOVING
-      // 置位要等下一拍——这中间的窗口里再点 ✕ 会叠开第二个确认框并永远等
-      // 不到表态（前端测试 test_delete_account_inflight_clicks_ignored 抓过）。
-      // 锁交给确认方（各 DeleteAccount 的 finally）在请求真正收尾后清；
-      // 取消（v=false）没有后续请求，立即清。
-      if (!v) AG_CONFIRM_OPEN = false;
-      resolve(v);
-    };
-    document.getElementById('modal-title').textContent = opts.title;
-    document.getElementById('modal-body').innerHTML =
-      `<p style="margin:0 0 6px">确定删除 <b>${esc(opts.name)}</b>？</p>` +
-      `<p class="muted" style="margin:0;font-size:12px">${opts.extra}</p>`;
-    setModalFoot(
-      `<button onclick="closeModal()">取消</button>` +
-      `<button class="danger" onclick="globalThis.__agDelYes()">${esc(opts.yes || '删除该账号')}</button>`);
-    const prevClose = globalThis.closeModal;
-    globalThis.closeModal = () => {
-      globalThis.closeModal = prevClose;   // 先还原再走原关闭，别的弹窗不受污染
-      finish(false);
-      if (prevClose) prevClose();
-    };
-    globalThis.__agDelYes = () => { finish(true); globalThis.closeModal(); };
-    document.getElementById('overlay').classList.add('show');
-  });
-}
-
+// 删除确认弹窗已抽到 benefits_accounts.js 的 confirmAccountDelete（公共件）。
+// 曾在本文件里还有一份同名旧定义（锁是 AG_CONFIRM_OPEN、按钮挂 __agDelYes），
+// 经典脚本后加载覆盖前加载，浏览器里实际生效的是它——而 dumate 的 finally 清的是
+// 公共件的 ACCT_CONFIRM_OPEN，确认过一次 DuMate ✕ 后 AG_CONFIRM_OPEN 永久卡死、
+// 后续所有通道删除确认被当成「取消」。删除旧定义、全链统一走公共件的锁。
 function agConfirmDelete(id) {
   const a = (AG_ACCTS || []).find(x => x.id === id);
   const name = (a && (a.email || a.id)) || id;
@@ -272,7 +231,7 @@ async function agDeleteAccount(id) {
   } catch (e) { toast('删除失败: ' + e.message, true); }
   finally {
     AG_MOVING = false;
-    AG_CONFIRM_OPEN = false;  // 确认时从 agConfirmDelete 接手的锁，到这里才放
+    ACCT_CONFIRM_OPEN = false;  // 确认时从 confirmAccountDelete 接手的锁，到这里才放
   }
 }
 
@@ -516,7 +475,7 @@ async function qoderDeleteAccount(id) {
   } catch (e) { toast('删除失败: ' + e.message, true); }
   finally {
     QODER_MOVING = false;
-    AG_CONFIRM_OPEN = false;
+    ACCT_CONFIRM_OPEN = false;
   }
 }
 

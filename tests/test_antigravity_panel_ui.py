@@ -29,7 +29,7 @@ import pytest
 
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
 # 2026-10 前端按职责拆分（benefits.js 超 700 行）：公共多账号 helper 抽到
-# benefits_accounts.js（confirmAccountDelete 单例 + __agDelYes 别名），
+# benefits_accounts.js（confirmAccountDelete 单例 + __acctDelYes），
 # ANTIGRAVITY 面板段挪到 benefits_panels.js（下一段是 QODER 面板段头）。
 BENEFITS_JS = _STATIC / "benefits_panels.js"
 HELPERS_JS = _STATIC / "benefits_accounts.js"
@@ -57,17 +57,10 @@ globalThis.BENEFITS = {};
 // 面板每次改完高度都该校准一次折叠，漏调就是「整块没裁、按钮不露」
 globalThis.__SYNC_CALLS = 0;
 globalThis.syncQuotaFold = () => { globalThis.__SYNC_CALLS++; };
-// antigravity/kimi/qoder 旧面板闭包读写 AG_CONFIRM_OPEN、调用 __agDelYes：
-// 公共 helper 里是单例 ACCT_CONFIRM_OPEN（跨通道锁）+ __acctDelYes，桩成别名
-// 指向同一变量/函数（旧面板段读写的都是本 stub 的全局，测试断言即所见）。
-Object.defineProperty(globalThis, 'AG_CONFIRM_OPEN', {
-  get: () => globalThis.ACCT_CONFIRM_OPEN,
-  set: v => { globalThis.ACCT_CONFIRM_OPEN = v; },
-});
-Object.defineProperty(globalThis, '__agDelYes', {
-  get: () => globalThis.__acctDelYes,
-  set: v => { globalThis.__acctDelYes = v; },
-});
+// 删除确认弹窗是公共件的 confirmAccountDelete 单例：锁 ACCT_CONFIRM_OPEN、
+// 确认按钮挂 __acctDelYes。panels 里旧的同名定义（AG_CONFIRM_OPEN/__agDelYes）
+// 已删——经典脚本后加载覆盖前加载，两份同名函数在浏览器里是灾难（dumate 清
+// ACCT_CONFIRM_OPEN、其余清 AG_CONFIRM_OPEN，确认过一次 ✕ 后锁永久卡死）。
 globalThis.document = {
   querySelector: sel => (Object.prototype.hasOwnProperty.call(QS, sel) ? QS[sel] : null),
   querySelectorAll: () => [],
@@ -108,7 +101,7 @@ def _run_js(body: str) -> str:
     assert match, "benefits.js 里找不到 ANTIGRAVITY 面板段（边界注释被改了？）"
     script = (
         _STUB
-        # 公共删除确认弹窗（单例 + AG_CONFIRM_OPEN 别名），面板段闭包引用它
+        # 公共删除确认弹窗（单例 + ACCT_CONFIRM_OPEN），面板段闭包引用它
         + HELPERS_JS.read_text(encoding="utf-8")
         # ANTIGRAVITY 面板段（renderAntigravityPanel + loadAntigravityAccounts +
         # AG_ACCTS/_ag_* 辅助；confirmAccountDelete 已走公共 helper）
@@ -544,7 +537,7 @@ const shown = {
   foot: globalThis.__FOOT,
   overlayShown: globalThis.MODAL['overlay'].classList.contains('show'),
 };
-globalThis.__agDelYes();                        // 点「删除该账号」
+globalThis.__acctDelYes();                      // 点「删除该账号」
 await p;
 console.log(JSON.stringify({
   shown, calls: CALLS, toasts: TOASTS, refreshed: REFRESHED,
@@ -634,7 +627,7 @@ globalThis.refreshAll = () => {};
 const p1 = agDeleteAccount('a@x.com');          // 开确认弹窗
 await new Promise(r => setTimeout(r, 5));
 const p2 = agDeleteAccount('a@x.com');   // 弹窗已开：第二个 ✕ 不叠层（resolve false）
-globalThis.__agDelYes();                        // 确认；resolve 是微任务，AG_MOVING
+globalThis.__acctDelYes();                      // 确认；resolve 是微任务，AG_MOVING
 await new Promise(r => setTimeout(r, 5));       // 随后置位——等它落地再模拟下一次点击
 const p3 = agDeleteAccount('a@x.com');   // POST 在飞，应被 AG_MOVING 挡掉
 await Promise.all([p1, p2, p3]);

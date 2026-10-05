@@ -369,7 +369,7 @@ def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
     return list_accounts()
 
 
-def rename_account(account_id: str, alias: str) -> AccountRef:
+def rename_account(account_id: str, alias: str) -> list[AccountRef]:
     """改一个账号的本地别名（管理页 ✎）。
 
     只改 index.json 条目的 ``alias`` 字段：cred 文件（原始凭据）与
