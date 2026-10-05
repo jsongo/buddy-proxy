@@ -167,58 +167,115 @@ def fetch_usages(base_url: str, access_token: str, timeout: float = 15.0) -> dic
     return _get_json(f"{normalize_base_url(base_url)}/usages", access_token, timeout)
 
 
+def _num(value: Any) -> float | None:
+    """上游数字（可能是字符串 "100" / 数字 / 缺失）→ float，缺失/非法返回 None。"""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out >= 0 else None
+
+
 def usages_to_items(data: dict[str, Any], prefix: str = "") -> list[dict[str, Any]]:
     """``/v1/usages`` 响应 → 额度条目（``percent`` 是**已用**，前端进度条语义）。
 
-    优先用 ``usages.limit_5h`` / ``limit_7d``（``used_ratio`` 0~1 + ``reset_time``），
-    5 小时窗口在前（周期由小到大，与 zcode 顺序契约一致）；老响应没有
-    ``usages`` 节点时回退顶层 ``usage: {limit, used, remaining, resetTime}``
-    （实测那是 7d 池的合成值）。
+    **绝对积分数优先**（真机 2026-10-05 实测：上游一直都在发，只是这里早先
+    只读了 ratio 把它丢了——用户看到的「剩 93.31 / 100」其实是百分比伪装成
+    积分）。逐窗口独立取数、互为回退：
+
+    - 5 小时窗口：``limits[0].detail``（``{limit, used, remaining, resetTime}``，
+      window.duration=300 分钟即 5h）→ 没有则 ``usages.limit_5h.used_ratio``
+    - 7 天池：顶层 ``usage``（``{limit, used, remaining, resetTime}``，实测是
+      7d 池的合成值）→ 没有则 ``usages.limit_7d.used_ratio``
+
+    5 小时窗口在前（周期由小到大，与 zcode 顺序契约一致）。ratio 兜底发的是
+    percent（total=100、unit=percent），绝对数发 credit——前端按数字直接渲染，
+    空响应（Free 层实测 ``{}``）返回 ``[]``。
     """
     buckets = data.get("usages") if isinstance(data.get("usages"), dict) else {}
     items: list[dict[str, Any]] = []
-    for key, label in (("limit_5h", "5 小时窗口"), ("limit_7d", "7 天池")):
-        bucket = buckets.get(key)
-        if not isinstance(bucket, dict):
-            continue
-        ratio = bucket.get("used_ratio")
-        if not isinstance(ratio, (int, float)):
-            continue
-        used = round(float(ratio) * 100, 2)
-        items.append({
-            "label": f"{prefix}{label}",
-            "used": used,
-            "total": 100,
-            "remaining": round(100 - used, 2),
-            "percent": used,
-            # 5h/7d 都是周期重置（不是权益到期），不给 expire_ts 防「快到期」误报
-            "reset_ts": iso_to_epoch(bucket.get("reset_time")) or None,
-            "expire_ts": None,
-            "unit": "percent",
-        })
-    if items:
-        return items
 
-    # 回退：顶层 usage（limit/used/remaining 是字符串数字）
+    # -- 5 小时窗口：limits[] 的绝对数优先 -------------------------------
+    detail = None
+    for lim in data.get("limits") or []:
+        if not isinstance(lim, dict):
+            continue
+        win = lim.get("window") or {}
+        try:
+            minutes = float(win.get("duration") or 0)
+        except (TypeError, ValueError):
+            minutes = 0.0
+        if str(win.get("timeUnit") or "").endswith("MINUTE") and minutes == 300:
+            detail = lim.get("detail")
+            break
+    detail = detail if isinstance(detail, dict) else {}
+    d_total, d_used = _num(detail.get("limit")), _num(detail.get("used"))
+    if d_total is not None and d_total > 0 and d_used is not None:
+        remaining = _num(detail.get("remaining"))
+        if remaining is None:
+            remaining = max(d_total - d_used, 0.0)
+        used_pct = round(d_used / d_total * 100, 2)
+        items.append({
+            "label": f"{prefix}5 小时窗口",
+            "used": round(d_used, 4),
+            "total": round(d_total, 4),
+            "remaining": round(remaining, 4),
+            "percent": used_pct,
+            "reset_ts": iso_to_epoch(detail.get("resetTime")) or None,
+            "expire_ts": None,
+            "unit": "credit",
+        })
+    else:
+        bucket = buckets.get("limit_5h")
+        ratio = bucket.get("used_ratio") if isinstance(bucket, dict) else None
+        if isinstance(ratio, (int, float)):
+            used = round(float(ratio) * 100, 2)
+            items.append({
+                "label": f"{prefix}5 小时窗口",
+                "used": used,
+                "total": 100,
+                "remaining": round(100 - used, 2),
+                "percent": used,
+                "reset_ts": iso_to_epoch(bucket.get("reset_time")) or None,
+                "expire_ts": None,
+                "unit": "percent",
+            })
+
+    # -- 7 天池：顶层 usage 的绝对数优先，ratio 兜底 ----------------------
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    try:
-        total = float(usage.get("limit"))
-        used = float(usage.get("used"))
-    except (TypeError, ValueError):
-        return []
-    if total <= 0:
-        return []
-    used_pct = round(used / total * 100, 2)
-    return [{
-        "label": f"{prefix}7 天池",
-        "used": used_pct,
-        "total": 100,
-        "remaining": round(100 - used_pct, 2),
-        "percent": used_pct,
-        "reset_ts": iso_to_epoch(usage.get("resetTime")) or None,
-        "expire_ts": None,
-        "unit": "percent",
-    }]
+    u_total, u_used = _num(usage.get("limit")), _num(usage.get("used"))
+    if u_total is not None and u_total > 0 and u_used is not None:
+        remaining = _num(usage.get("remaining"))
+        if remaining is None:
+            remaining = max(u_total - u_used, 0.0)
+        used_pct = round(u_used / u_total * 100, 2)
+        items.append({
+            "label": f"{prefix}7 天池",
+            "used": round(u_used, 4),
+            "total": round(u_total, 4),
+            "remaining": round(remaining, 4),
+            "percent": used_pct,
+            "reset_ts": iso_to_epoch(usage.get("resetTime")) or None,
+            "expire_ts": None,
+            "unit": "credit",
+        })
+    else:
+        bucket = buckets.get("limit_7d")
+        ratio = bucket.get("used_ratio") if isinstance(bucket, dict) else None
+        if isinstance(ratio, (int, float)):
+            used = round(float(ratio) * 100, 2)
+            items.append({
+                "label": f"{prefix}7 天池",
+                "used": used,
+                "total": 100,
+                "remaining": round(100 - used, 2),
+                "percent": used,
+                # 5h/7d 都是周期重置（不是权益到期），不给 expire_ts 防「快到期」误报
+                "reset_ts": iso_to_epoch(bucket.get("reset_time")) or None,
+                "expire_ts": None,
+                "unit": "percent",
+            })
+    return items
 
 
 def cred_expired_epoch(cred: dict[str, Any]) -> float:

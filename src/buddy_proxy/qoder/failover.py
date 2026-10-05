@@ -80,13 +80,17 @@ def accounts_status() -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for i, a in enumerate(accounts):
         cred = load_account_cred(a.id) or {}
-        exp = cred_to_credential(cred).expires_at_ms
+        # expires_at_ms 是**毫秒**，先除 1000 转 epoch 秒再和 time.time() 比——
+        # 直接相减会算出 4.97 亿小时（真机 2026-10-05 用户实报「token 剩
+        # 497759890.1h」）。其余通道的 expires 字段本就是秒，无此问题。
+        exp = cred_to_credential(cred).expires_at_ms / 1000
         hours_left = round((exp - time.time()) / 3600, 1) if exp > 0 else None
         left, kind = cooldown_left(a.id)
         items.append({
             "id": a.id,
             "email": a.email,
-            "name": a.name or a.email or a.id,
+            "name": a.alias or a.name or a.email or a.id,
+            "alias": a.alias,
             "region": a.region,
             "index": i + 1,
             "uid": str(cred.get("uid") or ""),

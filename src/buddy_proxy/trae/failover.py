@@ -75,7 +75,8 @@ def accounts_status() -> dict[str, Any]:
         items.append({
             "id": a.id,
             "uid": a.uid,
-            "nickname": a.nickname or a.uid or a.id,
+            "nickname": a.alias or a.nickname or a.uid or a.id,
+            "alias": a.alias,
             "index": i + 1,
             "token": "ok" if cred.get("refresh_token") else "missing",
             "hours_left": max(hours_left, 0.0) if hours_left is not None else None,

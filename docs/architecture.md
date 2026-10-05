@@ -86,6 +86,33 @@ as a drive-by refactor: it affects lifecycle code, compatibility shims, and
 existing isolated tests. Revisit it only when supporting multiple app instances,
 workers, or explicit provider shutdown lifecycles.
 
+## Multi-account state
+
+Each multi-account channel (trae / kimi / qoder / antigravity) keeps its own
+state dir `~/.buddy-proxy/<ch>/` with `index.json` (the account list) plus one
+0600 credential file per account. `AccountRef` in each `credentials.py` is the
+source of truth for index fields; **every** construction site must pass fields
+as keywords and carry `alias` (the display name edited via the admin ✎ button,
+default `""` = fall back to the default name). Two invariants protect it:
+
+- The index self-heal rewrite inside `list_accounts()` (which rebuilds
+  `AccountRef` from raw entries and rewrites the file) is the **only** place
+  that re-creates fields from an entry dict. Dropping a field there silently
+  erases it on the next enumeration — when adding an index field, that
+  `kept.append(AccountRef(...))` site is the one that gets missed.
+- `save_account_cred` upsert (same credential → existing account) only rewrites
+  the named credential keys (`nickname`/`name`/`email`); anything outside that
+  list (like `alias`) survives re-login by design. Do not "clean up" the dict
+  wholesale there.
+
+`rename_account(account_id, alias)` (also keyword-safe, file-locked like every
+other index write) is the sole writer of `alias`; the HTTP surface is
+`POST /ui/api/{ch}/accounts/rename` (`{id, alias}`, empty string clears it,
+`ValueError` → 404). Display names everywhere run one chain
+(`alias > name/email/nickname > id`) in `failover.accounts_status()`, trae
+check-in detail rows and the frontend panels, so the quota card and the
+check-in card never disagree about who is who.
+
 ## Models and settings
 
 - `web/models_config.json` is the source for static CodeBuddy/PAT catalog

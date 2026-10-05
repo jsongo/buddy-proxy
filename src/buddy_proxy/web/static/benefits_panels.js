@@ -124,13 +124,14 @@ function _ag_acct_for(idx) {
 }
 
 function _ag_sub_html(a) {
-  // 副标题（进度条上面那行 muted 小字）：缺 project / token 剩余 / 冷却。
+  // 副标题（进度条上面那行 muted 小字）：缺 project / 冷却。
   // blacklist（Google 风控拉黑）不是「冷却」语义——标注成疑似拉黑引导删除；
   // 时长 2h 以上按小时显示（6h 拉黑档读着不像「360min」）。
+  // 「token 剩 Xh」删掉了：access token 几小时自动刷新，读了只会误导
+  //（qoder 那边还曾把毫秒当秒算出 4.97 亿小时）——用户 2026-10-05 确认三通道一并删。
   if (!a) return '';
   const bits = [];
   if (!a.project_id) bits.push('缺 project');
-  if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
   for (const c of a.cooling || []) {
     const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
     bits.push(c.kind === 'blacklist' ? `疑似拉黑 剩${left}`
@@ -339,17 +340,20 @@ function renderAntigravityPanel() {
     const delBtn = acct
       ? `<button class="ghost danger" title="删除该账号（被 Google 拉黑/不再使用时）" ` +
         `onclick="agDeleteAccount('${acct.id}')">✕</button>` : '';
+    // ✎ 改名：同样要 id（同 ✕ 快照没到先不渲）。放按钮组最前=标题行行尾，
+    // 别插在名字和副标题之间——就地回填靠「名字元素的下一个兄弟是副标题」定位。
+    const renameBtn = acctRenameButton('antigravity', acct);
     // ↻ 刷新：作废本通道额度缓存重查（quota 缓存 TTL 5 分钟，等不及就用它）
     const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
       `onclick="refreshProviderQuota('antigravity', this)">↻</button>`;
-    // ▲▼ 顺位 + ✕ 删除 + ↻ 刷新合成一个右上角按钮组（用户视角=「账号名那一行」的行尾）。
+    // ✎ ▲▼ ✕ ↻ 合成一个右上角按钮组（用户视角=「账号名那一行」的行尾）。
     // 仍放块尾、绝对定位到右上角——loadAntigravityAccounts 的就地回填靠
     // 「名字元素的下一个兄弟是副标题」定位，中间插任何元素都会让它错乱。
     // 刷新按钮无条件渲染（单账号没有 ▲▼✕ 也能刷）。
-    const rowBtns = `<span class="ag-move">${refreshBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
     return `
     <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? acct.email : grp)}</span>
+      <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.email) : grp)}</span>
       ${_ag_sub_html(acct)}
       ${quotaItemsHtml(its, 'ag:' + grp)}
       ${rowBtns}
@@ -400,8 +404,8 @@ async function loadAntigravityAccounts() {
         ? document.querySelector('#antigravity-panel .pat-pkg-name')
         : document.querySelector(`#antigravity-panel [data-ag-idx="${a.index}"]`);
       if (!el) continue;
-      el.textContent = a.email;
-      // 副标题总是重写：状态变了（token 走低/冷却结束消失）要跟上，不是只防重复插
+      el.textContent = a.alias || a.email;
+      // 副标题总是重写：状态变了（冷却结束消失）要跟上，不是只防重复插
       if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-ag-sub')) {
         el.nextElementSibling.remove();
       }
@@ -432,11 +436,11 @@ function _qoder_acct_for(idx) {
 }
 
 function _qoder_sub_html(a) {
-  // 副标题（进度条上面那行 muted 小字）：区域 / token 剩余 / 冷却
+  // 副标题（进度条上面那行 muted 小字）：区域 / 冷却
+  // （「token 剩 Xh」删了：access token 几小时自动刷新，读了只会误导）
   if (!a) return '';
   const bits = [];
   if (a.region) bits.push(a.region === 'cn' ? 'CN 区' : 'Global 区');
-  if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
   for (const c of a.cooling || []) {
     const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
     bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
@@ -545,11 +549,17 @@ function renderQoderPanel() {
         `onclick="qoderDeleteAccount('${acct.id}')">✕</button>` : '';
     const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
       `onclick="refreshProviderQuota('qoder', this)">↻</button>`;
-    const rowBtns = `<span class="ag-move">${refreshBtn}${moveBtns}${delBtn}</span>`;
+    const renameBtn = acctRenameButton('qoder', acct);
+    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
+    // 合计行：qoder 的订阅额度/加油包/专属积分是并存的份额，加起来才是账号
+    // 总量（后端 sum_items 声明可合计）。quotaHeadSum 原本服务「列表头部」，
+    // 借用它产出同款「剩 X / Y」chip，放进账号卡标题行下。
+    const headSum = quotaHeadSum({items: its, sum_items: true});
     return `
     <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-qoder-idx="${idx}"` : ''}>${esc(acct ? (acct.name || acct.email || acct.id) : grp)}</span>
+      <span class="pat-pkg-name"${m ? ` data-qoder-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.email || acct.id) : grp)}</span>
       ${_qoder_sub_html(acct)}
+      ${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}
       ${quotaItemsHtml(its, 'qoder:' + grp)}
       ${rowBtns}
     </div>`;
@@ -593,7 +603,7 @@ async function loadQoderAccounts() {
         ? document.querySelector('#qoder-panel .pat-pkg-name')
         : document.querySelector(`#qoder-panel [data-qoder-idx="${a.index}"]`);
       if (!el) continue;
-      el.textContent = a.name || a.email || a.id;
+      el.textContent = a.alias || a.name || a.email || a.id;
       if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-qoder-sub')) {
         el.nextElementSibling.remove();
       }

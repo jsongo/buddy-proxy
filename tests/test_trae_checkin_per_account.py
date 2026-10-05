@@ -49,8 +49,25 @@ def test_status_multi_account_reports_each(monkeypatch):
     assert (a1["index"], a1["name"]) == (1, "U1")
     assert a1["checked_in"] is True and a1["claimable"] is False
     assert a2["checked_in"] is False and a2["claimable"] is True
+    # 明细带 id：签到行的 ✎ 改名按钮要拿它定位账号
+    assert a1["id"] == "u1" and a2["id"] == "u2"
     # 聚合态不受影响：任一可领 → 整体可领
     assert st["claimable"] is True and st["checked_in"] is False
+
+
+def test_status_name_prefers_alias(monkeypatch):
+    """显示名 alias 优先：✎ 改的名要和额度面板一致（全链路同一个名字）。"""
+    from buddy_proxy.trae.credentials import rename_account
+
+    _seed("u1", "u2")
+    rename_account("u1", "签到主力")
+    monkeypatch.setattr(failover, "_cooldowns", {})
+    monkeypatch.setattr(
+        "buddy_proxy.trae.provider.fetch_checkin_status",
+        lambda token="", account_id="": {"checked_in": True, "enable": True, "message": ""})
+    st = TraeProvider().checkin_status()
+    assert st["accounts"][0]["name"] == "签到主力"
+    assert st["accounts"][1]["name"] == "U2"  # 没别名的照旧 nickname
 
 
 def test_status_marks_failed_accounts(monkeypatch):

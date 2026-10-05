@@ -115,6 +115,9 @@ class AccountRef:
     region: str
     priority: int
     added_at: int
+    # 本地别名（管理页 ✎ 改）：只改显示名，原始凭据里的 name/email 不动；
+    # 空串 = 未设置（显示回退 email/id）。upsert/重登不碰它。
+    alias: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +365,7 @@ def list_accounts() -> list[AccountRef]:
                 region=str(e.get("region") or "") or "cn",
                 priority=int(e.get("priority") or 0),
                 added_at=int(e.get("added_at") or 0),
+                alias=str(e.get("alias") or ""),
             ))
         if changed:
             _atomic_write_json(index_path(), _index_payload([asdict(a) for a in kept]))
@@ -447,9 +451,11 @@ def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
     target["email"] = str(cred.get("email") or target.get("email") or "")
     target["name"] = str(cred.get("name") or target.get("name") or "")
     target["region"] = str(cred.get("region") or target.get("region") or "") or "cn"
+    # alias 不在 upsert 覆写之列：它是用户手起的本地别名，重登不改
     ref = AccountRef(id=aid, email=target["email"], name=target["name"],
                      region=target["region"], priority=int(target.get("priority") or 0),
-                     added_at=int(target.get("added_at") or 0))
+                     added_at=int(target.get("added_at") or 0),
+                     alias=str(target.get("alias") or ""))
     _atomic_write_json(account_cred_path(ref.id), dict(cred))
     _atomic_write_json(index_path(), _index_payload(entries))
     return ref
@@ -487,6 +493,26 @@ def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
         rank = {aid: i for i, aid in enumerate(ordered_ids)}
         for e in entries:
             e["priority"] = rank[str(e.get("id") or "")]
+        _atomic_write_json(index_path(), _index_payload(entries))
+    return list_accounts()
+
+
+def rename_account(account_id: str, alias: str) -> AccountRef:
+    """改一个账号的本地别名（管理页 ✎）。
+
+    只改 index.json 条目的 ``alias`` 字段：cred 文件（原始凭据）与
+    priority/added_at 都不动。``alias`` 去首尾空白；空串 = 清除别名，
+    显示回退默认名。账号不存在抛 ``ValueError``。返回改后的 list_accounts()。
+    """
+    aid = str(account_id or "")
+    text = str(alias or "").strip()
+    list_accounts()  # 先走唯一的枚举入口：自愈完再改，别在残缺索引上动刀
+    with _index_lock, _index_file_lock():
+        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
+        target = next((e for e in entries if str(e.get("id") or "") == aid), None)
+        if target is None:
+            raise ValueError(f"账号 {aid} 不存在")
+        target["alias"] = text
         _atomic_write_json(index_path(), _index_payload(entries))
     return list_accounts()
 

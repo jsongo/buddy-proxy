@@ -7,8 +7,9 @@
 
 - **标题=邮箱**：多账号按 ``data-ag-idx`` 对应替换；单账号组名没有前缀，
   唯一标题直接替换——别退回显示「AG #1」/「Antigravity」这种内部代号
-- **副标题=状态**：标题下一行 muted 小字（缺 project / token 剩余 / 冷却），
-  且数据变化时重写（冷却结束要消失）、不重复堆叠
+- **副标题=状态**：标题下一行 muted 小字（缺 project / 冷却），
+  且数据变化时重写（冷却结束要消失）、不重复堆叠；「token 剩 Xh」已删
+  （access token 几小时自动刷新，读了只会误导）
 - **不闪内部代号**：有 AG_ACCTS 快照时 render 直接渲染邮箱，30s 轮询重建
   面板不再闪回「AG #N」
 - **底部状态区已删**：状态全部上移为各账号副标题，不再有独立区块
@@ -126,8 +127,8 @@ def test_accounts_fill_names_and_subtitles():
     """多账号：标题按 data-ag-idx 换成邮箱，副标题带状态且不含 email。"""
     out = _run_js("""
 globalThis.__RESPONSE = {enabled: true, accounts: [
-  {index: 1, email: 'a@x.com', project_id: 'p', hours_left: 3.2, cooling: []},
-  {index: 2, email: 'b@x.com', project_id: '', hours_left: null,
+  {index: 1, email: 'a@x.com', alias: '生产号', project_id: 'p', hours_left: 3.2, cooling: []},
+  {index: 2, email: 'b@x.com', alias: '', project_id: '', hours_left: null,
    cooling: [{kind: 'quota', minutes_left: 4}]},
 ]};
 // 快照已有旧值（回填路径；null 会走「首份快照整卡重渲」分支）
@@ -145,9 +146,10 @@ console.log(JSON.stringify({
   sub2: QS['#antigravity-panel [data-ag-idx="2"]'].inserted.join('')}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
-    assert data["n1"] == "a@x.com", "标题 1 应替换成账号 1 的邮箱"
-    assert data["n2"] == "b@x.com", "标题 2 应替换成账号 2 的邮箱"
-    assert "token 剩 3.2h" in data["sub1"], data["sub1"]
+    assert data["n1"] == "生产号", "标题 1 优先显示别名（✎ 改的名）"
+    assert data["n2"] == "b@x.com", "标题 2 没别名回落邮箱"
+    assert "token 剩" not in data["sub1"], "「token 剩 Xh」已删"
+    assert "额度冷却 4min" in data["sub2"], data["sub2"]
     assert "缺 project" in data["sub2"] and "额度冷却 4min" in data["sub2"], data["sub2"]
     assert "a@x.com" not in data["sub1"] and "b@x.com" not in data["sub2"], \
         "邮箱在标题上，副标题只放状态"
@@ -168,7 +170,7 @@ console.log(JSON.stringify({
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["name"] == "solo@x.com", "单账号标题应替换成邮箱，而不是停在 'Antigravity'"
-    assert "token 剩 0.7h" in data["sub"]
+    assert "token 剩" not in data["sub"], "「token 剩 Xh」已删，副标题只剩冷却/缺 project 位"
 
 
 def test_changed_data_rewrites_subtitle_without_duplicating():
@@ -192,7 +194,7 @@ console.log(JSON.stringify({
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["removed"], "旧副标题要先移除，否则 30s 一轮会越堆越多"
-    assert "token 剩 2h" in data["sub"], "新副标题反映最新状态"
+    assert data["sub"] == "", "冷却结束后副标题整行消失（token 剩已删，无别的 bit）"
 
 
 def test_unchanged_data_leaves_dom_alone():
@@ -219,7 +221,7 @@ globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, 
   {label: 'AG #1 · Gemini 组（组内共享 weekly + 5h 双池）',
    remaining: 999, total: 1000, percent: 0.1, used: null, reset_ts: null},
 ]}}]};
-AG_ACCTS = [{index: 1, email: 'a@x.com', project_id: 'p', hours_left: 1.5, cooling: []}];
+AG_ACCTS = [{index: 1, id: 'a@x.com', email: 'a@x.com', project_id: 'p', hours_left: 1.5, cooling: []}];
 globalThis.__RESPONSE = {enabled: false};   // render 尾部会再拉一次，别让它改 DOM
 renderAntigravityPanel();
 console.log(JSON.stringify({html: PANEL.innerHTML}));
@@ -228,7 +230,11 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
     html = data["html"]
     assert "a@x.com" in html, "有快照就该直接渲染邮箱（不闪 AG #1）"
     assert ">AG #1<" not in html, "内部代号不该露出来"
-    assert "data-ag-sub" in html and "token 剩 1.5h" in html, "副标题（状态）在标题下"
+    # 账号一切正常（project 在、无冷却）时副标题整行不渲染——「token 剩」删了，
+    # 这个账号没有可说的 bit；有 bit（缺 project/冷却）时才出 data-ag-sub 行
+    assert "data-ag-sub" not in html and "token 剩" not in html, \
+        "正常账号无副标题行（token 剩已删，无可说的 bit）"
+    assert "acctRenamePrompt('antigravity','a@x.com')" in html, "标题行有 ✎ 改名入口"
     assert 'id="antigravity-accounts"' not in html and "账号状态" not in html, \
         "底部独立状态区已删，状态全部上移为副标题"
 

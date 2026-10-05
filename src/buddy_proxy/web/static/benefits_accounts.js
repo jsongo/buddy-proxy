@@ -57,15 +57,16 @@ function acctCoolLeft(min) {
 }
 
 /** 账号状态副标题（进度条上面那行 muted 小字）。
- *  通用 bits：region / token 剩余（hours_left）/ 冷却（cooling[].kind+minutes_left）。
+ *  通用 bits：region / 冷却（cooling[].kind+minutes_left）。
  *  kind='blacklist' 标「疑似拉黑」引导删除；kind='quota'→「额度冷却」，其余→「账号冷却」。
- *  通道特有 bit（如 dumate 的累计签到）经 subExtra(a, bits) 注入。 */
+ *  通道特有 bit（如 dumate 的累计签到）经 subExtra(a, bits) 注入。
+ *  不再显示「token 剩 Xh」：access token 几小时就自动刷新（qoder 甚至曾把毫秒当
+ *  秒算出 4.97 亿小时），对「还能用多久」毫无参考价值——用户 2026-10-05 明确不要。 */
 function acctSubHtml(a, subExtra, dataAttr) {
   if (!a) return '';
   const bits = [];
   if (subExtra) subExtra(a, bits);
   if (a.region) bits.push(a.region === 'cn' ? 'CN 区' : 'Global 区');
-  if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
   for (const c of a.cooling || []) {
     const left = acctCoolLeft(c.minutes_left);
     bits.push(c.kind === 'blacklist' ? `疑似拉黑 剩${left}`
@@ -74,6 +75,91 @@ function acctSubHtml(a, subExtra, dataAttr) {
   return bits.length
     ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" ${dataAttr}>${esc(bits.join(' · '))}</div>`
     : '';
+}
+
+/** ✎ 改名按钮（要账号 id；快照没到时不渲染，同 ✕）。
+ *  预填的当前显示名不内联进 onclick——alias 是用户自由文本（引号/反斜杠都可能有），
+ *  字符串字面量拼参数会碎；prompt 里按 id 从各通道快照现查。 */
+function acctRenameButton(pid, acct) {
+  return acct
+    ? `<button class="ghost" title="重命名该账号（只改显示名，凭据不动）" ` +
+      `onclick="acctRenamePrompt('${pid}','${acct.id}')">✎</button>` : '';
+}
+
+/** 改名弹窗（四通道共用，复用 index.html 的 overlay/modal 骨架）。
+ *  current 缺省时按 id 从快照数组现查；清空提交 = 恢复默认名（后端空串语义）。 */
+function acctRenamePrompt(pid, id, current) {
+  if (current == null) {
+    // 预填从快照数组现查（typeof 守卫同上——数组可能声明在未加载的文件里）
+    const snap = [].concat(
+      (typeof AG_ACCTS !== 'undefined' ? AG_ACCTS : []) || [],
+      (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : []) || [],
+      (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : []) || [],
+      (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : []) || [],
+      // trae 没有额度面板/快照数组，名字在签到明细 BENEFITS.providers[].checkin
+      // .accounts[].name（后端已按 alias 链下发，这里拿到的就是显示名）
+      (typeof BENEFITS !== 'undefined' && BENEFITS.providers
+        ? BENEFITS.providers.flatMap(p => (p.checkin && p.checkin.accounts) || []) : []));
+    const a = snap.find(x => x && x.id === id);
+    current = a ? (a.alias || a.name || a.email || a.nickname || a.id) : id;
+  }
+  document.getElementById('modal-title').textContent = '重命名账号';
+  document.getElementById('modal-body').innerHTML =
+    `<p style="margin:0 0 8px">给 <span class="mono">${esc(id)}</span> 起个显示名 ` +
+    `（只改管理页显示，凭据与顺位不动）：</p>` +
+    `<input id="acct-rename-input" type="text" maxlength="64" value="${esc(current || '')}" ` +
+    `style="width:100%" placeholder="留空则恢复默认名">` +
+    `<p class="muted" style="margin:8px 0 0;font-size:12px">清空并保存 = 恢复默认名（邮箱 / 官方昵称）。</p>`;
+  setModalFoot('<button onclick="closeModal()">取消</button>' +
+    `<button onclick="acctRenameSubmit('${pid}','${id}')">保存</button>`);
+  document.getElementById('overlay').classList.add('show');
+  const input = document.getElementById('acct-rename-input');
+  if (input) { input.focus(); input.select(); }
+}
+
+async function acctRenameSubmit(pid, id) {
+  const input = document.getElementById('acct-rename-input');
+  const alias = input ? input.value.trim() : '';
+  try {
+    const r = await api(`/ui/api/${pid}/accounts/rename`, {
+      method: 'POST', body: JSON.stringify({id, alias}),
+    });
+    // 就地更新快照（各面板的全局数组）+ 立即重渲，不等 30s 轮询。
+    // 快照数组都在别的文件里用 let 声明，这里 typeof 守卫着取——本文件是
+    // 'use strict'，直接引用未声明标识符会 ReferenceError（被 catch 吞成
+    // 「重命名失败」，改名看似发了请求实际没生效）。
+    // trae 不在 AG/QODER/KIMI/DUMATE 之列（它只有签到明细行、无快照数组），
+    // 名字由后端 name 链（alias 优先）下发，renderBenefits 重渲即生效。
+    const newAlias = (r && r.accounts && (r.accounts.find(x => x.id === id) || {}).alias) ?? alias;
+    const snaps = [
+      (typeof AG_ACCTS !== 'undefined' ? AG_ACCTS : null),
+      (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : null),
+      (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : null),
+      (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : null),
+    ];
+    for (const arr of snaps) {
+      const a = (arr || []).find(x => x.id === id);
+      if (a) a.alias = newAlias;
+    }
+    // trae 签到明细行没有 alias 字段、名字是后端 name 链渲染的——照 rename
+    // 响应（accounts_status 的显示名键是 nickname）就地改 name，免得要等下轮
+    // benefits 轮询才看到新名字
+    if (pid === 'trae' && typeof BENEFITS !== 'undefined' && BENEFITS.providers) {
+      const st = (r.accounts || []).find(x => x.id === id) || {};
+      for (const p of BENEFITS.providers) {
+        const row = (p.checkin && p.checkin.accounts || []).find(x => x.id === id);
+        if (row && st.nickname != null) row.name = st.nickname;
+      }
+    }
+    if (typeof renderAntigravityPanel === 'function') renderAntigravityPanel();
+    if (typeof renderKimiPanel === 'function') renderKimiPanel();
+    if (typeof renderQoderPanel === 'function') renderQoderPanel();
+    if (typeof renderBenefits === 'function') renderBenefits();
+    closeModal();
+    toast(alias ? `已重命名为「${alias}」` : '已恢复默认名');
+  } catch (e) {
+    toast(`重命名失败：${e && e.message ? e.message : e}`, true);
+  }
 }
 
 /** ▲▼ 顺位按钮（idx 渲染时 1-based，首尾禁用对应那个）。带 id 内联：重排响应回来后、

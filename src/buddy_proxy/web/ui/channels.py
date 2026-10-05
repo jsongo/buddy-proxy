@@ -116,6 +116,34 @@ async def ui_qoder_accounts_order(request: Request):
     return await asyncio.to_thread(failover.accounts_status)
 
 
+@app.post("/ui/api/qoder/accounts/rename")
+async def ui_qoder_accounts_rename(request: Request):
+    """改一个 qoder 账号的本地别名（管理页 ✎）。
+
+    只改 index.json 的 ``alias`` 字段（显示名），原始凭据与顺位不动；
+    空串 = 清除别名、回退默认显示名。返回改后的账号状态（与 GET 同构）。
+    """
+    _ensure_local(request)
+    try:
+        from ...qoder import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "qoder 通道不可用"}})
+    body = await request.json()
+    aid, alias = body.get("id"), body.get("alias")
+    if not isinstance(aid, str) or not aid.strip() or not isinstance(alias, str):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id 或 alias（要改的账号 id 与新别名）"}})
+    if len(alias.strip()) > 64:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "别名过长（≤64 字符）"}})
+    try:
+        await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
+    from ...qoder import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.post("/ui/api/qoder/accounts/delete")
 async def ui_qoder_accounts_delete(request: Request):
     """删除一个 qoder 账号（索引条目 + cred 文件 + 冷却标记）。
@@ -253,6 +281,34 @@ async def ui_antigravity_accounts_delete(request: Request):
     return await asyncio.to_thread(failover.accounts_status)
 
 
+@app.post("/ui/api/antigravity/accounts/rename")
+async def ui_antigravity_accounts_rename(request: Request):
+    """改一个 antigravity 账号的本地别名（管理页 ✎）。
+
+    只改 index.json 的 ``alias`` 字段（显示名），原始凭据与顺位不动；
+    空串 = 清除别名、回退默认显示名。返回改后的账号状态（与 GET 同构）。
+    """
+    _ensure_local(request)
+    try:
+        from ...antigravity import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "antigravity 通道不可用"}})
+    body = await request.json()
+    aid, alias = body.get("id"), body.get("alias")
+    if not isinstance(aid, str) or not aid.strip() or not isinstance(alias, str):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id 或 alias（要改的账号 id 与新别名）"}})
+    if len(alias.strip()) > 64:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "别名过长（≤64 字符）"}})
+    try:
+        await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
+    from ...antigravity import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.get("/ui/api/trae/accounts")
 async def ui_trae_accounts(request: Request):
     """trae work 各账号本地凭证/冷却状态（纯本地不触网，不含秘密）。"""
@@ -317,6 +373,34 @@ async def ui_trae_accounts_delete(request: Request):
     return await asyncio.to_thread(failover.accounts_status)
 
 
+@app.post("/ui/api/trae/accounts/rename")
+async def ui_trae_accounts_rename(request: Request):
+    """改一个 trae work 账号的本地别名（管理页 ✎）。
+
+    只改 index.json 的 ``alias`` 字段（显示名），原始凭据与顺位不动；
+    空串 = 清除别名、回退默认显示名。返回改后的账号状态（与 GET 同构）。
+    """
+    _ensure_local(request)
+    try:
+        from ...trae import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "trae 通道不可用"}})
+    body = await request.json()
+    aid, alias = body.get("id"), body.get("alias")
+    if not isinstance(aid, str) or not aid.strip() or not isinstance(alias, str):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id 或 alias（要改的账号 id 与新别名）"}})
+    if len(alias.strip()) > 64:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "别名过长（≤64 字符）"}})
+    try:
+        await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
+    from ...trae import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.get("/ui/api/kimi/accounts")
 async def ui_kimi_accounts(request: Request):
     """kimi 各账号本地凭证/冷却状态（纯本地，不触网，不含秘密）。"""
@@ -378,6 +462,34 @@ async def ui_kimi_accounts_delete(request: Request):
                             detail={"error": {"message": f"账号不存在: {aid}"}})
     from ...kimi import failover
     await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/kimi/accounts/rename")
+async def ui_kimi_accounts_rename(request: Request):
+    """改一个 kimi 账号的本地别名（管理页 ✎）。
+
+    只改 index.json 的 ``alias`` 字段（显示名），原始凭据与顺位不动；
+    空串 = 清除别名、回退默认显示名。返回改后的账号状态（与 GET 同构）。
+    """
+    _ensure_local(request)
+    try:
+        from ...kimi import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "kimi 通道不可用"}})
+    body = await request.json()
+    aid, alias = body.get("id"), body.get("alias")
+    if not isinstance(aid, str) or not aid.strip() or not isinstance(alias, str):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id 或 alias（要改的账号 id 与新别名）"}})
+    if len(alias.strip()) > 64:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "别名过长（≤64 字符）"}})
+    try:
+        await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
+    from ...kimi import failover
     return await asyncio.to_thread(failover.accounts_status)
 
 

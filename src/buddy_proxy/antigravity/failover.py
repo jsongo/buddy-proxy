@@ -114,7 +114,8 @@ def accounts_status() -> dict[str, Any]:
         left, kind = cooldown_left(a.id)
         items.append({
             "id": a.id,
-            "email": a.email or a.id,
+            "email": a.alias or a.email or a.id,
+            "alias": a.alias,
             "index": i + 1,
             "project_id": cred.get("project_id") or "",
             "token": "ok" if cred.get("refresh_token") else "missing",

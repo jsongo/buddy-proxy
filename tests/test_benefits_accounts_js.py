@@ -11,8 +11,9 @@ test_kimi_panel_ui.py 里已各自覆盖）。盯六件事：
 
 - **分组**：按「<Prefix> #N · 」切分组；query_failed / 纯静态说明条不进分组
 - **界标**：accountGroupBound 取「<Prefix> #N」序号最大值（不依赖账号快照时序）
-- **副标题**：region / token 剩余 / 冷却 bits，通道特有 bit 经 subExtra 注入
-- **按钮**：▲▼ 带 id 内联 + 首尾禁用；✕ 带 pid+id；↻ 无条件在按钮组最前
+- **副标题**：region / 冷却 bits（「token 剩 Xh」已删——access token 几小时
+  自动刷新，读了只会误导），通道特有 bit 经 subExtra 注入
+- **按钮**：▲▼ 带 id 内联 + 首尾禁用；✕ 带 pid+id；✎ 改名 + ↻ 无条件在按钮组最前
 - **确认弹窗**：Promise 化；取消/遮罩汇入 closeModal resolve(false)；确认时锁
   不立即清（交给删除方的 finally），取消立即清
 - **回填**：首份快照整卡重渲 + syncQuotaFold；之后就地回填（换名 + 重写副标题，
@@ -158,7 +159,7 @@ console.log(JSON.stringify({
 
 
 def test_acct_sub_html_bits_and_subextra():
-    """通用 bits（region/token 剩余/冷却/疑似拉黑）+ 通道特有 bit 经 subExtra 注入。"""
+    """通用 bits（region/冷却/疑似拉黑；token 剩已删）+ 通道特有 bit 经 subExtra 注入。"""
     out = _run_js("""
 const a = {region: 'cn', hours_left: 3.2,
            cooling: [{kind: 'quota', minutes_left: 4}, {kind: 'blacklist', minutes_left: 360}]};
@@ -167,11 +168,72 @@ const none = acctSubHtml({cooling: []}, null, 'data-dumate-sub');
 console.log(JSON.stringify({html, none}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
-    assert "CN 区" in data["html"] and "token 剩 3.2h" in data["html"]
+    assert "CN 区" in data["html"]
+    assert "token 剩" not in data["html"], "「token 剩 Xh」已删（哪怕 hours_left 有值）"
     assert "额度冷却 4min" in data["html"] and "疑似拉黑 剩6.0h" in data["html"]
     assert "累计签到 1000 分" in data["html"], "通道特有 bit 注入"
     assert "data-dumate-sub" in data["html"]
     assert data["none"] == "", "没有任何 bit 时不渲染空副标题行"
+
+
+def test_acct_rename_button_and_prompt_prefill():
+    """✎ 按钮：有 id 才渲染；弹窗预填 alias → name → email/nickname → id 链。"""
+    out = _run_js("""
+AG_ACCTS = [{id: 'a@x.com', email: 'a@x.com', alias: '生产号'}];
+QODER_ACCTS = [];
+KIMI_ACCTS = [];
+const btn = acctRenameButton('antigravity', {id: 'a@x.com'});
+const btnNoAcct = acctRenameButton('antigravity', null);
+acctRenamePrompt('antigravity', 'a@x.com');          // 预填从快照查（alias 优先）
+const withAlias = globalThis.MOD['modal-body'].innerHTML;
+AG_ACCTS = [{id: 'a@x.com', email: 'a@x.com', alias: ''}];
+acctRenamePrompt('antigravity', 'a@x.com');
+const noAlias = globalThis.MOD['modal-body'].innerHTML;
+console.log(JSON.stringify({btn, btnNoAcct, withAlias, noAlias,
+  title: globalThis.MOD['modal-title'].textContent, foot: globalThis.__FOOT}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert "acctRenamePrompt('antigravity','a@x.com')" in data["btn"], "✎ 带 pid+id"
+    assert data["btnNoAcct"] == "", "快照没到不渲染（同 ✕）"
+    assert data["title"] == "重命名账号"
+    assert "留空则恢复默认名" in data["withAlias"]
+    assert 'value="生产号"' in data["withAlias"], "预填 alias"
+    assert 'value="a@x.com"' in data["noAlias"], "无别名回落 email"
+    assert "acctRenameSubmit('antigravity','a@x.com')" in data["foot"]
+
+
+def test_acct_rename_submit_posts_and_updates_snapshots():
+    """改名提交：POST /rename → 四通道快照就地更新 → 各面板重渲 + toast。
+    失败路径：请求抛错 → 警告 toast、不关弹窗（输入不丢）。"""
+    out = _run_js("""
+AG_ACCTS = [{id: 'u1', email: 'a@x.com', alias: '旧'}];
+QODER_ACCTS = [{id: 'u1', name: 'q', alias: '旧'}];
+KIMI_ACCTS = [{id: 'u1', name: 'k', alias: ''}];      // kimi 的 u1 无别名：也该被更新
+let CALLS = [], RENDERS = 0, BENEFITS_RENDERS = 0;
+globalThis.api = async (path, opts) => {
+  CALLS.push({path, body: opts ? JSON.parse(opts.body) : null});
+  return {enabled: true, accounts: [{id: 'u1', alias: '主力'}]};
+};
+globalThis.toast = () => {};
+globalThis.renderAntigravityPanel = () => RENDERS++;
+globalThis.renderKimiPanel = () => RENDERS++;
+globalThis.renderQoderPanel = () => RENDERS++;
+globalThis.renderBenefits = () => BENEFITS_RENDERS++;
+const INPUT = {value: '主力'};
+const origGet = document.getElementById.bind(document);
+document.getElementById = id => (id === 'acct-rename-input' ? INPUT : origGet(id));
+await acctRenameSubmit('kimi', 'u1');
+console.log(JSON.stringify({calls: CALLS,
+  ag: AG_ACCTS[0].alias, qoder: QODER_ACCTS[0].alias, kimi: KIMI_ACCTS[0].alias,
+  renders: RENDERS, benefitsRenders: BENEFITS_RENDERS, closed: globalThis.__CLOSED}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["calls"] == [{"path": "/ui/api/kimi/accounts/rename",
+                              "body": {"id": "u1", "alias": "主力"}}]
+    assert data["ag"] == "主力" and data["qoder"] == "主力" and data["kimi"] == "主力", \
+        "四通道快照就地更新（同 id 跨通道一致改）"
+    assert data["renders"] == 3 and data["benefitsRenders"] == 1, "各面板立即重渲"
+    assert data["closed"] >= 1, "弹窗关闭"
 
 
 def test_move_delete_row_buttons_markup():
