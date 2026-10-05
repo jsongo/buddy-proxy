@@ -26,7 +26,7 @@ src/buddy_proxy/
   doubao/                # doubao domain (provider, cdp_client, payloads, ws)
   dumate/                # DuMate domain (discovery = local-proxy discovery + inapp-key,
                          #   cookies = pure-stdlib AES-256-GCM bceConsole cookie decrypt,
-                         #   checkin = daily sign-in, provider)
+                         #   checkin = daily sign-in + points quota/usage-records, provider)
 ```
 
 `core.state` imports `CodeBuddyClient` / `BaseProvider` only under

@@ -454,16 +454,34 @@ function quotaFoldToggle(btn) {
 }
 
 // ---- DUMATE 面板（底部整宽卡片，复用 benefits_accounts.js 的公共 helper）----
-// DuMate（百度搭子）复用本机 App 登录态，经本地代理转发。额度只有布尔态（有/无，
-// 已翻译成百分制进度条，见 dumate/provider.quota）。卡片布局与 antigravity/kimi/qoder
-// 同构（标题=账号名、副标题=累计签到、↻ 按钮组），但 dumate 是单账号且无 failover
-// 顺位——标题区换成「就绪态圆点 + 版本 + 本地代理地址」，账号信息（displayName +
-// 累计签到）走 /ui/api/dumate/accounts 经通用 acctLoad 回填。delete/order 是 no-op
-// （单账号，仅前端卡片刷新）。
+// DuMate（百度搭子）复用本机 App 登录态，经本地代理转发。卡片布局与 antigravity
+// 同款：外层 chart-card 头部（通道名 + tag + 就绪态圆点/版本/已登录），内层
+// .pat-quota-grid > .pat-pkg 一块装账号（标题=账号名 .pat-pkg-name、副标题=
+// 今日消耗/累计签到、右上 .ag-move 按钮组=↻+✕）。额度明细走 quotaItemsHtml：
+// 首条「订阅积分」即总结行（「剩 X / Y · 已用 Z%」+ 进度条，quotaItemHtml
+// 渲染），后面跟各积分包。单账号无 failover 顺位——▲▼ 不渲染，delete 是
+// no-op（仅前端卡片刷新）。账号名 + 副标题走 /ui/api/dumate/accounts 经通用
+// acctLoad 回填（就地回填按「.pat-pkg-name 紧后兄弟 data-dumate-sub」定位，
+// 渲染侧用 acctSubHtml 同款输出，保证两条路径结构一致）。
 const DUMATE_STATE = { accts: null };
 
 function _dumate_ready() {
   return !!(DUMATE_STATE.status && DUMATE_STATE.status.ready);
+}
+
+// 账号副标题 bits（渲染与 acctLoad 就地回填共用同一份逻辑）：
+// 今日消耗走 bceConsole records/usage 的真实流水合计（consumedPoints，正数），
+// 不是估算；拿不到（未登录/超时）就不显示这一位。
+function _dumate_sub_extra(a, bits) {
+  if (a.today_consumed != null) {
+    const n = Number(a.today_consumed);
+    if (Number.isFinite(n) && n > 0) {
+      bits.push(`今日消耗 ${fmtNum(n)} 分${a.today_calls ? `（${a.today_calls} 次）` : ''}`);
+    }
+  }
+  if (a.checkin_total_points != null) {
+    bits.push(`累计签到 ${a.checkin_total_points} 分（${a.checkin_total_times || 0} 次）`);
+  }
 }
 
 function renderDumatePanel() {
@@ -478,10 +496,15 @@ function renderDumatePanel() {
   const dotColor = ready ? 'var(--ok)' : (st && st.installed ? 'var(--warn)' : 'var(--err)');
   const stateText = ready ? '已就绪' : (st ? (st.installed ? 'App 未运行' : '未安装') : '检测中…');
   const ver = st && st.app_version ? ` · v${st.app_version}` : '';
-  const ep = st && st.base_url ? ` · ${st.base_url}` : '';
   const acct = acctFor(DUMATE_STATE, 1);
   const delBtn = acctDeleteButton('dumate', acct, '清除本地累计签到缓存');
-  const refreshBtn = acctRowButtons('dumate', '', delBtn);
+  // 单账号没有 ▲▼ 顺位（moveBtns 传空串），↻ + ✕ 两个。
+  const rowBtns = acctRowButtons('dumate', '', delBtn);
+  // 未就绪说明（未安装/未运行/检测中）：替换积分明细位置，整块 muted 提示。
+  const notReadyHint = st && st.installed === false
+    ? '未检测到 DuMate.app。请先安装并登录百度搭子（千帆桌面端）。'
+    : st && st.installed ? '已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。'
+    : '正在检测本地代理…';
 
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
@@ -491,19 +514,18 @@ function renderDumatePanel() {
         <span class="grow"></span>
         <span class="muted" style="font-size:11px;display:flex;align-items:center;gap:5px">
           <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor}"></i>
-          ${esc(stateText)}${esc(ver)}
+          ${esc(stateText)}${esc(ver)}${ready && st && st.bceconsole_authenticated ? ' · 已登录' : ''}
         </span>
-        ${refreshBtn}
       </div>
-      ${quotaItemsHtml(dm.quota.items || [], 'dumate')}
-      <div class="muted" style="font-size:11px;line-height:1.5;margin-top:6px">
-        ${ready
-          ? `本地代理在线${esc(ep)} · 模型 自动路由 / kimi-k3 / qwen3.8-max · 上下文 192k`
-          : esc(st && st.installed === false
-              ? '未检测到 DuMate.app。请先安装并登录百度搭子（千帆桌面端）。'
-              : st && st.installed ? '已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。'
-              : '正在检测本地代理…')}
-        ${ready && st && st.bceconsole_authenticated ? ' · 已登录' : ''}
+      <div class="pat-quota-grid">
+        <div class="pat-pkg">
+          <span class="pat-pkg-name">${esc(acct ? (acct.display_name || acct.id) : '本机账号')}</span>
+          ${acctSubHtml(acct, _dumate_sub_extra, 'data-dumate-sub')}
+          ${ready
+            ? quotaItemsHtml(dm.quota.items || [], 'dumate')
+            : `<div class="muted" style="font-size:11px;line-height:1.5;padding:8px 0">${esc(notReadyHint)}</div>`}
+          ${rowBtns}
+        </div>
       </div>
     </div>`;
   loadDumateAccounts();
@@ -528,12 +550,8 @@ async function loadDumateStatus() {
 const loadDumateAccounts = acctLoad(
   {
     pid: 'dumate',
-    nameOf: a => a.displayName || a.id,
-    subExtra: (a, bits) => {
-      if (a.checkin_total_points != null) {
-        bits.push(`累计签到 ${a.checkin_total_points} 分（${a.checkin_total_times || 0} 次）`);
-      }
-    },
+    nameOf: a => a.display_name || a.id,
+    subExtra: _dumate_sub_extra,
     render: renderDumatePanel,
   },
   DUMATE_STATE,

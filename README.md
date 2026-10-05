@@ -205,8 +205,9 @@ A built-in provider for Baidu's DuMate (千帆桌面端) desktop app. It connect
 - **Prerequisite**: DuMate.app installed, logged into a Baidu Cloud account, and **running**. After a reboot just reopen the app; `buddy login dumate` only does a status check.
 - **Models** (packet-captured + individually verified 2026-10): `dm-auto-model/text.L0` (auto-router, the app default), `kimi-k3`, `qwen3.8-max`. 192k context / 128k output, function calling works, and your `system` prompt is passed through and billed verbatim (a 9.6k-char system was metered exactly into `prompt_tokens`). DeepSeek / GLM-5.3 / overseas models (Claude / GPT / Gemini) are not open to Baidu consumer accounts.
 - **Check-in**: the auto check-in loop claims daily (`POST /api/dumate/points/loginBonus` via the bceConsole channel); the panel shows cumulative check-in points.
-- **Quota**: the local `/api/dumate/points/remaining` only returns a boolean (has/has-not); the numeric balance panel lives inside the app with no public API, so the panel shows "has quota / exhausted".
-- **Protocol**: OpenAI chat completions only; Anthropic `/v1/messages` is not supported (the DuMate gateway only speaks OpenAI-shaped requests).
+- **Quota**: numeric points via the app's own bceConsole endpoint (`GET /api/dumate/points/quota_overview`, the underscore variant — the camelCase one always 500s): subscription total/used/remaining plus per-package breakdown with expiry dates. Falls back to the local proxy's boolean `/api/dumate/points/remaining` when not logged in.
+- **Usage records**: real per-call point consumption via `GET /api/dumate/points/records/usage` (second-level `startAt`/`endAt` timestamps; ms returns 500). The panel subtitle shows today's consumed points and call count; `GET /ui/api/dumate/usage-records?days=N&page=&limit=` serves the raw ledger.
+- **Protocol**: OpenAI chat completions; Anthropic `/v1/messages` is converted back from the OpenAI-shaped response (same adapter as kimi/qoder), so Claude Code works directly.
 - **Dependencies**: pure Python stdlib (includes a zero-dependency AES-256-GCM to decrypt the bceConsole cookie).
 
 ## Trae provider (optional)

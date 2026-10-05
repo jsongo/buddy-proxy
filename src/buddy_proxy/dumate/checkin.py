@@ -150,6 +150,53 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
     }
 
 
+def fetch_usage_records(
+    *, start_ts: int, end_ts: int, page: int = 1, limit: int = 20, timeout: float = 15.0,
+) -> dict[str, Any] | None:
+    """查积分消耗流水（真实逐笔数据，bceConsole 通道）。
+
+    实测（2026-10-05）App 抓包：``GET /api/dumate/points/records/usage``，
+    query 参数 ``page`` / ``limit`` / ``startAt`` / ``endAt``，**秒级时间戳**
+    （毫秒会报 500「系统出现错误」；缺 startAt 报「参数错误:StartAt」）。
+
+    响应 ``{"code": 0, "success": true, "result": {"totalCount": N,
+    "consumedPoints": "1239.96", "list": [{"createdAt": 秒, "pointsChange": "-8.88",
+    "expectedPointsChange": "-8.88", "packageId": "...", "reason": ""}]}}``。
+    ``consumedPoints`` 是该区间合计消耗（正数字符串），``pointsChange`` 是单笔
+    带符号扣减。未登录 / 失败返回 None。
+    """
+    data = _bce_get(
+        f"/api/dumate/points/records/usage?page={page}&limit={limit}"
+        f"&startAt={int(start_ts)}&endAt={int(end_ts)}",
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    result = data.get("result") or {}
+    records: list[dict[str, Any]] = []
+    for it in result.get("list") or []:
+        try:
+            records.append({
+                "ts": int(it.get("createdAt") or 0),
+                "points": float(it.get("pointsChange") or 0),
+                "expected_points": float(it.get("expectedPointsChange") or 0),
+                "package_id": it.get("packageId") or "",
+                "conversation_name": it.get("conversationName") or "",
+                "reason": it.get("reason") or "",
+            })
+        except (TypeError, ValueError):
+            continue
+    try:
+        consumed = float(result.get("consumedPoints") or 0)
+    except (TypeError, ValueError):
+        consumed = 0.0
+    return {
+        "total_count": int(result.get("totalCount") or 0),
+        "consumed_points": consumed,
+        "records": records,
+    }
+
+
 def claim_checkin() -> dict[str, Any] | None:
     """领取今日签到；成功返回状态 dict，失败 / 未登录返回 None。"""
     auth = resolve_bceconsole_auth()

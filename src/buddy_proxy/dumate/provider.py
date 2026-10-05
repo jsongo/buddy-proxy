@@ -249,8 +249,11 @@ class DumateProvider(BaseProvider):
             remaining = q["remaining_points"]
             total = q["total_points"]
             used = q["used_points"]
+            # 「订阅积分」= 订阅套餐总额度（下面各积分包的合计），留在明细首位当
+            # 账号卡的总结行（用户 2026-10-05：卡片上要有「剩 X / Y · 已用 Z%」总结，
+            # 与 antigravity 账号卡同款；积分包明细跟在后面）。
             items = [{
-                "label": "可用积分",
+                "label": "订阅积分",
                 "used": round(used, 2),
                 "total": round(total, 2),
                 "remaining": round(remaining, 2),

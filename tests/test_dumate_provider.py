@@ -254,7 +254,7 @@ def test_quota_prefers_quota_overview_numeric():
         q = p.quota()
 
     head = q["items"][0]
-    assert head["label"] == "可用积分"
+    assert head["label"] == "订阅积分"
     assert head["remaining"] == 839.96
     assert head["total"] == 1000.0
     assert head["used"] == 160.04
@@ -319,6 +319,52 @@ def test_quota_overview_none_when_not_logged_in():
 
     with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth", return_value=None):
         assert dumate_checkin.fetch_quota_overview() is None
+
+
+def test_usage_records_parse():
+    """records/usage 响应 → total_count/consumed_points + 逐笔 records。
+
+    实测（2026-10-05）：startAt/endAt 是**秒级**时间戳（毫秒会 500）；
+    pointsChange 是带符号扣减字符串（"-8.88"），consumedPoints 是区间合计正数。
+    """
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
+    class _FakeResp:
+        status_code = 200
+        def json(self):
+            return {"code": 0, "success": True, "result": {
+                "totalCount": 168,
+                "consumedPoints": "1239.96",
+                "list": [
+                    {"createdAt": 1791174999, "pointsChange": "-8.88",
+                     "expectedPointsChange": "-8.88", "packageId": "p1",
+                     "conversationName": "调试会话", "reason": ""},
+                    {"createdAt": 1791174986, "pointsChange": "-9.68",
+                     "expectedPointsChange": "-9.68", "packageId": "p1",
+                     "conversationName": "", "reason": ""},
+                ],
+            }}
+
+    with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth") as auth, \
+         mock.patch.object(httpx, "Client") as client_cls:
+        auth.return_value.headers = lambda: {"Cookie": "x"}
+        client_cls.return_value.__enter__.return_value.get.return_value = _FakeResp()
+        r = dumate_checkin.fetch_usage_records(start_ts=1791100000, end_ts=1791200000)
+
+    assert r is not None
+    assert r["total_count"] == 168
+    assert r["consumed_points"] == 1239.96
+    assert len(r["records"]) == 2
+    assert r["records"][0]["ts"] == 1791174999
+    assert r["records"][0]["points"] == -8.88
+    assert r["records"][0]["conversation_name"] == "调试会话"
+
+
+def test_usage_records_none_when_not_logged_in():
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
+    with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth", return_value=None):
+        assert dumate_checkin.fetch_usage_records(start_ts=0, end_ts=1) is None
 
 
 # --- 签到（bceConsole 通道） ------------------------------------------------
