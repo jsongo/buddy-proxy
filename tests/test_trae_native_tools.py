@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from buddy_proxy import __main__ as m
 from buddy_proxy.core import state as st
 from buddy_proxy.trae import provider as tp_impl
+from buddy_proxy.trae.credentials import save_account_cred
 from buddy_proxy.trae.provider import TraeProvider
 
 
@@ -139,6 +140,17 @@ def native_env(monkeypatch):
     monkeypatch.setattr(tp_impl, "_send_native_chat", fake_native)
     monkeypatch.setattr(tp_impl, "send_trae_chat", fake_legacy)
     monkeypatch.setattr(tp_impl, "_auth", lambda: ("fake-token", "fake-uid"))
+
+    # 注入一个假 work 账号（conftest 已隔离 trae state 目录，这里落假 cred）。
+    # 多账号 failover 后，forward 走 failover.available_accounts() → list_accounts()
+    # 取当前账号 cred（不再读 _auth 单账号缓存）；没有账号会 429（通道耗尽）。
+    save_account_cred({
+        "uid": "fake-uid-1", "nickname": "Fake",
+        "access_token": "fake-token", "refresh_token": "fake-rt",
+        "expires_at": int(time.time()) + 3600,
+        "machine_id": "m", "device_id": "d", "api_host": "h",
+        "enterprise_id": "",
+    })
     return state, native_calls, legacy_calls
 
 

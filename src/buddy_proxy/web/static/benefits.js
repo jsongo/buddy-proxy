@@ -219,8 +219,8 @@ function renderBenefits() {
   syncNextTimeAuto();
 
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
-  // traepat/antigravity/kimi/qoder/dumate 的额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
-  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'dumate');
+  // traepat/antigravity/kimi/qoder/trae/dumate 的额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
+  const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'trae' && p.id !== 'dumate');
   document.getElementById('quota-list').innerHTML = qps.length ? qps.map(p => {
     const q = p.quota;
     const items = quotaItemsHtml(q.items || [], p.id);
@@ -237,6 +237,7 @@ function renderBenefits() {
   renderAntigravityPanel();
   renderKimiPanel();
   renderQoderPanel();
+  renderTraePanel();
   syncQuotaFold();  // 样式与布局就位后按实际高度校准（各面板都已重建完）
 }
 
@@ -1436,6 +1437,191 @@ async function loadQoderAccounts() {
         el.nextElementSibling.remove();
       }
       const sub = _qoder_sub_html(a);
+      if (sub) el.insertAdjacentHTML('afterend', sub);
+    }
+    syncQuotaFold();
+  } catch (e) {
+    // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
+  }
+}
+
+// ---- TRAE WORK 面板（qoder 同款布局：多账号额度分组 + ▲▼ 顺位 / ✕ 删除 / ↻ 刷新） ----
+let TRAE_ACCTS = null;  // 最近一次 accounts 快照；render 先用它，避免每 30s 闪回「Trae #N」
+let TRAE_MOVING = false;  // 面板账号操作（重排/删除）在途：期间忽略新的点按
+
+function _trae_acct_for(idx) {
+  // idx=null（单账号组名无 Trae #N 前缀）只在恰有一个账号时能对上
+  if (!TRAE_ACCTS) return null;
+  if (idx == null) return TRAE_ACCTS.length === 1 ? TRAE_ACCTS[0] : null;
+  return TRAE_ACCTS.find(a => a.index === idx) || null;
+}
+
+function _trae_sub_html(a) {
+  // 副标题（进度条上面那行 muted 小字）：token 剩余 / 冷却
+  if (!a) return '';
+  const bits = [];
+  if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
+  for (const c of a.cooling || []) {
+    const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
+    bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
+  }
+  return bits.length
+    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-trae-sub>${esc(bits.join(' · '))}</div>`
+    : '';
+}
+
+function _trae_move_btns(idx, n, id) {
+  // 上/下移按钮（与 _qoder_move_btns 同构；顺位语义按快照里该 id 的实际位次挪）
+  const arg = id ? `,'${id}'` : '';
+  return `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+    `onclick="traeMoveAccount(${idx},-1${arg})">▲</button>` +
+    `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
+    `onclick="traeMoveAccount(${idx},1${arg})">▼</button>`;
+}
+
+function traeConfirmDelete(id) {
+  const a = (TRAE_ACCTS || []).find(x => x.id === id);
+  const name = (a && (a.nickname || a.uid || a.id)) || id;
+  return confirmAccountDelete({
+    title: '删除 Trae 账号',
+    name,
+    extra: '该账号的凭据文件一并移除，转发不再使用它。不再使用或凭据失效' +
+      '（转发持续 401/429）的账号删掉后即不再白耗一轮 failover。',
+  });
+}
+
+async function traeMoveAccount(idx, delta, id) {
+  if (TRAE_MOVING) return;
+  TRAE_MOVING = true;
+  try {
+    if (!TRAE_ACCTS) {  // 按钮随额度数据先到、账号状态可能还没回：补一次快照
+      const r0 = await api('/ui/api/trae/accounts');
+      TRAE_ACCTS = r0.accounts || [];
+    }
+    const accts = TRAE_ACCTS;
+    if (id) {  // 按 id 校正到快照里的真实位次
+      const at = accts.findIndex(a => a.id === id);
+      if (at < 0) return;
+      idx = at + 1;
+    }
+    const to = idx + delta;
+    if (to < 1 || to > accts.length) return;
+    const ids = accts.map(a => a.id);
+    const [moved] = ids.splice(idx - 1, 1);
+    ids.splice(to - 1, 0, moved);
+    const r = await api('/ui/api/trae/accounts/order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids})});
+    TRAE_ACCTS = r.accounts || [];
+    const movedName = (accts.find(a => a.id === moved) || {}).nickname || moved;
+    toast(`${movedName} 已移到顺位 #${to}`);
+    refreshAll();
+  } catch (e) { toast('调整失败: ' + e.message, true); }
+  finally { TRAE_MOVING = false; }
+}
+
+async function traeDeleteAccount(id) {
+  if (TRAE_MOVING) return;
+  if (!(await traeConfirmDelete(id))) return;
+  const a = (TRAE_ACCTS || []).find(x => x.id === id);
+  const name = (a && (a.nickname || a.uid || a.id)) || id;
+  TRAE_MOVING = true;
+  try {
+    const r = await api('/ui/api/trae/accounts/delete', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id})});
+    TRAE_ACCTS = r.accounts || [];
+    toast(`${name} 已删除`);
+    refreshAll();
+  } catch (e) { toast('删除失败: ' + e.message, true); }
+  finally {
+    TRAE_MOVING = false;
+    AG_CONFIRM_OPEN = false;
+  }
+}
+
+function renderTraePanel() {
+  const panel = document.getElementById('trae-panel');
+  if (!panel) return;
+  const trae = (BENEFITS.providers || []).find(p => p.id === 'trae');
+  if (!trae) { panel.innerHTML = ''; return; }  // 通道未注册：整块不渲染
+
+  // 按「Trae #N」分组（label 形如「Trae #1 · 总额度」），qoder 同款切法。
+  const groups = new Map();
+  const notices = [];
+  for (const it of (trae.quota && trae.quota.supported ? trae.quota.items : []) || []) {
+    if (it.query_failed || (it.percent == null && it.used == null)) { notices.push(it); continue; }
+    const idx = it.label.indexOf(' · ');
+    const grp = idx >= 0 ? it.label.slice(0, idx) : 'Trae';
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  const n = Math.max(...[...groups.keys()]
+    .map(g => g.match(/^Trae #(\d+)$/)).filter(Boolean).map(mm => Number(mm[1])), 1);
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => {
+    const m = grp.match(/^Trae #(\d+)$/);
+    const idx = m ? Number(m[1]) : null;
+    const acct = _trae_acct_for(idx);
+    const moveBtns = (m && n > 1) ? _trae_move_btns(idx, n, acct && acct.id) : '';
+    const delBtn = acct
+      ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
+        `onclick="traeDeleteAccount('${acct.id}')">✕</button>` : '';
+    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
+      `onclick="refreshProviderQuota('trae', this)">↻</button>`;
+    const rowBtns = `<span class="ag-move">${refreshBtn}${moveBtns}${delBtn}</span>`;
+    return `
+    <div class="pat-pkg">
+      <span class="pat-pkg-name"${m ? ` data-trae-idx="${idx}"` : ''}>${esc(acct ? (acct.nickname || acct.uid || acct.id) : grp)}</span>
+      ${_trae_sub_html(acct)}
+      ${quotaItemsHtml(its, 'trae:' + grp)}
+      ${rowBtns}
+    </div>`;
+  }).join('');
+  const noticeHtml = notices.map(quotaItemHtml).join('');
+  const multi = n > 1;
+
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head">
+        <span class="name">Trae Work</span>
+        <span class="tag">${multi ? '多账号 · 自动切换' : 'Trae 订阅'}</span>
+        <span class="grow"></span>
+        <span class="muted" style="font-size:11px">${multi ? '401/429 自动冷却换号（按登录顺位）' : '401/429 自动切换下一个账号'}</span>
+      </div>
+      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
+      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login trae</span>）</div>'}
+    </div>`;
+  loadTraeAccounts();
+}
+
+async function loadTraeAccounts() {
+  try {
+    const r = await api('/ui/api/trae/accounts');
+    if (!r.enabled) { TRAE_ACCTS = []; return; }
+    const accts = r.accounts || [];
+    // 数据没变就不动 DOM——renderTraePanel 已用同一份快照渲染过
+    if (JSON.stringify(accts) === JSON.stringify(TRAE_ACCTS)) return;
+    const snapshotMissing = !TRAE_ACCTS || !TRAE_ACCTS.length;
+    TRAE_ACCTS = accts;
+    if (!accts.length) return;
+    if (snapshotMissing) {
+      renderTraePanel();
+      syncQuotaFold();
+      return;
+    }
+    // 就地回填：组名换成账号名、组名后插副标题（qoder 同款）
+    for (const a of accts) {
+      const el = (accts.length === 1)
+        ? document.querySelector('#trae-panel .pat-pkg-name')
+        : document.querySelector(`#trae-panel [data-trae-idx="${a.index}"]`);
+      if (!el) continue;
+      el.textContent = a.nickname || a.uid || a.id;
+      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-trae-sub')) {
+        el.nextElementSibling.remove();
+      }
+      const sub = _trae_sub_html(a);
       if (sub) el.insertAdjacentHTML('afterend', sub);
     }
     syncQuotaFold();

@@ -264,13 +264,12 @@ def main() -> int:
         "machine_id": machine_id,
         "device_id": device_id,
     }
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # 直接以 0600 权限创建（避免 write_text 后 chmod 前的短暂 0644 窗口）
-    fd = os.open(OUT_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps(out, ensure_ascii=False, indent=2))
+    # 落盘走多账号存储：按 uid/refresh_token upsert（重登同号更新、新号追加为
+    # 新账号）。save_account_cred 内部 fcntl 锁 + 0600 + 索引原子写。
+    from buddy_proxy.trae.credentials import save_account_cred
+    ref = save_account_cred(out)
     print()
-    print(f"[OK] 凭证已保存: {OUT_PATH}")
+    print(f"[OK] 凭证已保存（账号 #{ref.priority + 1}）: {ref.id}")
     print(f"    uid={out['uid']} nickname={out['nickname']} expires={out['expires_at']}")
     return 0
 

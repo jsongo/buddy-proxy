@@ -33,3 +33,8 @@ def _isolate_gemini_state_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("KIMI_STATE_DIR", str(tmp_path / "kimi"))
     monkeypatch.setenv("QODER_STATE_DIR", str(tmp_path / "qoder"))
     monkeypatch.setenv("QODER_AUTH_FILE", str(tmp_path / "qoder_auth.json"))
+    # trae work 多账号状态（`TRAE_WORK_STATE_DIR`，index.json + 每账号 cred
+    # 文件）与历史单账号迁移源（`TRAE_WORK_CRED_PATH`，即旧 trae_work.json）
+    # 同理：迁移/签到/额度/转发测试都会落盘或读盘，必须隔离防串真实账号。
+    monkeypatch.setenv("TRAE_WORK_STATE_DIR", str(tmp_path / "trae"))
+    monkeypatch.setenv("TRAE_WORK_CRED_PATH", str(tmp_path / "trae_work.json"))

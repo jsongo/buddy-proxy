@@ -1,4 +1,10 @@
-"""kimi 多账号 failover：稳定主备 + 内存冷却（antigravity 同思路）。
+"""kimi 多账号 failover：稳定主备 + 内存冷却。
+
+核心冷却状态机收敛到 :class:`buddy_proxy.core.account_failover.CooldownTracker`
+（antigravity/qoder/trae 共用，曾各自 copy-paste）。本模块保留 kimi 自己的
+:func:`accounts_status`（字段口径）并持有一个模块级 ``CooldownTracker`` 实例；
+``mark_cooldown / clear_cooldown / cooldown_left / cooldown_report`` 是兼容薄壳，
+行为与收敛前一致。
 
 永远从优先级最高的可用账号开始（登录/导入顺序即优先级），坏账号靠冷却被
 临时摘出候选。冷却状态只放内存（60s / 5min 级，进程重启清零的代价只是每
@@ -13,70 +19,44 @@ kimi 的上游是 Kimi Code 订阅端点，账号级错误就两类：429（额�
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from typing import Any
 
+from ..core.account_failover import CooldownTracker
 from .credentials import AccountRef, list_accounts, load_account_cred
 from .upstream import cred_expired_epoch
 
 log = logging.getLogger(__name__)
 
-#: 403 / 401 强刷后仍被拒：账号级问题，短冷却快速重探。
+#: 模块级冷却状态机（账号级，收敛自原 copy-paste 实现）。
+_tracker = CooldownTracker()
+
+#: 活引用 tracker 内部 dict（与 ``_tracker._cooldowns`` 同一对象）：测试与本通道
+#: 旧代码直接 ``failover._cooldowns.clear()`` / 赋值造过期条目，薄壳化后保留这个
+#: 入口让它们一行不改继续工作。
+_cooldowns = _tracker._cooldowns
+
+#: 兼容导出（原模块常量，外部可能引用）。
 _ACCOUNT_COOLDOWN_S = 60.0
-#: 429（额度耗尽）：对齐 antigravity/trae 首档 5min；Retry-After 可覆盖。
 _QUOTA_COOLDOWN_S = 300.0
-#: Retry-After 的合理区间（钳到 1s~7d 防御离谱值）。
-_RETRY_AFTER_MIN_S = 1.0
-_RETRY_AFTER_MAX_S = 7 * 86400.0
-
-_cooldowns: dict[str, tuple[float, str]] = {}  # account_id -> (until_epoch, kind)
-_lock = threading.Lock()
-
-
-def _fmt_left(seconds: float) -> str:
-    if seconds >= 90 * 60:
-        return f"{seconds / 3600:.1f}h"
-    return f"{seconds / 60:.1f}min"
 
 
 def mark_cooldown(account_id: str, *, retry_after: str | None = None,
                   quota: bool = False, reason: str = "") -> float:
     """把账号冷却一段时间。``retry_after``（Retry-After 头）优先于默认时长。"""
-    if quota:
-        default, kind = _QUOTA_COOLDOWN_S, "quota"
-    else:
-        default, kind = _ACCOUNT_COOLDOWN_S, "account"
-    seconds = default
-    if retry_after:
-        try:
-            seconds = max(_RETRY_AFTER_MIN_S, min(float(retry_after), _RETRY_AFTER_MAX_S))
-        except (TypeError, ValueError):
-            pass
-    with _lock:
-        _cooldowns[account_id] = (time.time() + seconds, kind)
-    if reason:
-        log.warning("kimi: 账号 %s 冷却 %s（%s）", account_id, _fmt_left(seconds), reason)
-    return seconds
+    return _tracker.mark(account_id, retry_after=retry_after,
+                         kind="quota" if quota else "account",
+                         reason=reason, log=log)
 
 
 def clear_cooldown(account_id: str) -> None:
     """清掉该账号的冷却标记（删除账号后调用，防内存残留）。"""
-    with _lock:
-        _cooldowns.pop(account_id, None)
+    _tracker.clear(account_id)
 
 
 def cooldown_left(account_id: str) -> tuple[float, str]:
     """剩余冷却秒数与类别（0, "" 表示没在冷却）。"""
-    with _lock:
-        entry = _cooldowns.get(account_id)
-    if not entry:
-        return 0.0, ""
-    until, kind = entry
-    left = until - time.time()
-    if left <= 0:
-        return 0.0, ""
-    return left, kind
+    return _tracker.left(account_id)
 
 
 def available_accounts() -> list[AccountRef]:
@@ -86,14 +66,7 @@ def available_accounts() -> list[AccountRef]:
 
 def cooldown_report() -> str:
     """全部账号冷却状态的一句话画像（通道耗尽报错用）。"""
-    parts = []
-    for a in list_accounts():
-        left, kind = cooldown_left(a.id)
-        if left <= 0:
-            continue
-        label = {"quota": "额度冷却"}.get(kind, "账号冷却")
-        parts.append(f"{a.id} {label}剩 {_fmt_left(left)}")
-    return "、".join(parts)
+    return _tracker.report([a.id for a in list_accounts()])
 
 
 def accounts_status() -> dict[str, Any]:
@@ -116,3 +89,8 @@ def accounts_status() -> dict[str, Any]:
             "cooling": ([{"kind": kind, "minutes_left": round(left / 60, 1)}] if left > 0 else []),
         })
     return {"enabled": bool(items), "accounts": items}
+
+
+#: 测试隔离用（原 ``_cooldowns.clear()`` 的等价入口）。
+def _clear_all_cooldowns() -> None:
+    _tracker.clear_all()
