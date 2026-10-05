@@ -237,7 +237,7 @@ uv run trae-cli chat -m glm-5.2 -q "hello"
 
 Auth is loaded automatically: the Work multi-account state dir `~/.buddy-proxy/trae/` (`index.json` + one 0600 cred per account; generated/appended by `python -m buddy_proxy.auth.trae_work_login` or `buddy login trae`, upserted by uid/refresh_token — relogin updates, a new account appends) first. The legacy single-account `~/.buddy-proxy/trae_work.json` (and `~/.ethan/trae_work.json`) is auto-migrated to account #1 on first read. Then the decrypted local Trae IDE `storage.json`. No manual token setup.
 
-Work channel multi-account **primary/backup failover**: account #1 by login order is preferred; account-level errors (401 credential expired / 429 quota) cool down for 60s/5min then fail over to the next. Checkin/quota query and claim **every account**; the admin panel has `▲▼` reorder / `✕` delete (same as qoder/kimi/antigravity).
+Work channel multi-account **primary/backup failover**: account #1 by login order is preferred; account-level errors (401 credential expired / 429 quota) cool down for 60s/5min then fail over to the next. Checkin/quota query and claim **every account**; the admin panel has `▲▼` reorder / `✕` delete (same as qoder/kimi/antigravity). With multiple accounts, the check-in status carries a per-account breakdown (`accounts`: index/name/state) and the check-in card renders one line per account (已签到 / 可领 / 查询失败 with the reason) — the aggregated badge alone could not tell which account actually failed; manual claims toast each account's result (who got +N, who failed). Single-account setups stay unchanged (no breakdown, same badge semantics).
 
 ## ZCode provider (optional)
 
