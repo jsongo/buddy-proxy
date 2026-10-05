@@ -66,7 +66,8 @@ def test_status_marks_failed_accounts(monkeypatch):
     st = TraeProvider().checkin_status()
 
     a2 = st["accounts"][1]
-    assert a2["error"] == "查询失败"
+    # error 带具体原因（不再是干巴巴的「查询失败」），排查 token/网络有据可依
+    assert "token 刷新失败" in a2["error"]
     assert "checked_in" not in a2
     assert st["checked_in"] is True  # u1 签了 → 聚合已签（无 claimable）
     assert "1/2 个账号查询失败" in st["message"]

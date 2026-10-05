@@ -176,7 +176,8 @@ class TraeProvider(BaseProvider):
             return self._checkin_status_one(data, label="", multi=False)
 
         if len(accounts) == 1:
-            return self._checkin_status_for_account(accounts[0], index=1, multi=False)
+            st, _err = self._checkin_status_for_account(accounts[0], index=1, multi=False)
+            return st
 
         # 多账号：并查，聚合任一可领 / 全部已签；per-account 明细放 ``accounts``
         # （管理页签到卡逐账号渲染「#N 已签 / 可领 / 查询失败」）。
@@ -187,10 +188,10 @@ class TraeProvider(BaseProvider):
         enabled_any = False
         for i, acct in enumerate(accounts, 1):
             name = acct.nickname or acct.uid or acct.id
-            st = self._checkin_status_for_account(acct, index=i, multi=True)
+            st, err = self._checkin_status_for_account(acct, index=i, multi=True)
             if st is None:
                 failed_accts.append(f"#{i}")
-                acct_details.append({"index": i, "name": name, "error": "查询失败"})
+                acct_details.append({"index": i, "name": name, "error": err or "查询失败"})
                 continue
             if not st.get("inactive"):
                 enabled_any = True
@@ -225,16 +226,18 @@ class TraeProvider(BaseProvider):
         return status
 
     def _checkin_status_for_account(
-            self, acct: Any, *, index: int, multi: bool) -> dict[str, Any] | None:
-        """单账号签到状态查询。返回 None 表示该账号查询失败（网络/token）。"""
+            self, acct: Any, *, index: int, multi: bool) -> tuple[dict[str, Any] | None, str]:
+        """单账号签到状态查询。返回 ``(status, error)``：查询失败时 status 为
+        None、error 带截断后的原因（进 per-account 明细的 title，光「查询失败」
+        说不清是 token 过期还是网络问题）。"""
         try:
             token, _cred = ensure_account_token(acct.id)
             data = fetch_checkin_status(token=token, account_id=acct.id)
         except Exception as e:  # noqa: BLE001 — 单账号失败不该让整页 500
             log.warning("trae 签到状态查询失败（%s）: %s", acct.id, e)
-            return None
+            return None, str(e)[:120]
         label = f"Trae #{index} · " if multi else ""
-        return self._checkin_status_one(data, label=label, multi=multi)
+        return self._checkin_status_one(data, label=label, multi=multi), ""
 
     def _checkin_status_one(
             self, data: dict[str, Any], *, label: str, multi: bool) -> dict[str, Any]:
