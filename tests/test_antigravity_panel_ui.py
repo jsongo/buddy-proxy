@@ -26,13 +26,13 @@ import subprocess
 
 import pytest
 
-BENEFITS_JS = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "src/buddy_proxy/web/static/benefits.js"
-)
-# 整段 ANTIGRAVITY 区块（renderAntigravityPanel + loadAntigravityAccounts +
-# AG_ACCTS/_ag_* 辅助），下一段是 trae 模型负载的 force=false 注释
-SEG_RE = re.compile(r"// ---- ANTIGRAVITY 面板.*?(?=\n// force=false)", re.S)
+_STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
+# 2026-10 前端按职责拆分（benefits.js 超 700 行）：公共多账号 helper 抽到
+# benefits_accounts.js（confirmAccountDelete 单例 + __agDelYes 别名），
+# ANTIGRAVITY 面板段挪到 benefits_panels.js（下一段是 QODER 面板段头）。
+BENEFITS_JS = _STATIC / "benefits_panels.js"
+HELPERS_JS = _STATIC / "benefits_accounts.js"
+SEG_RE = re.compile(r"// ---- ANTIGRAVITY 面板.*?(?=\n// ---- QODER 面板)", re.S)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑面板 JS（CI 有，本机可选）"
@@ -56,6 +56,17 @@ globalThis.BENEFITS = {};
 // 面板每次改完高度都该校准一次折叠，漏调就是「整块没裁、按钮不露」
 globalThis.__SYNC_CALLS = 0;
 globalThis.syncQuotaFold = () => { globalThis.__SYNC_CALLS++; };
+// antigravity/kimi/qoder 旧面板闭包读写 AG_CONFIRM_OPEN、调用 __agDelYes：
+// 公共 helper 里是单例 ACCT_CONFIRM_OPEN（跨通道锁）+ __acctDelYes，桩成别名
+// 指向同一变量/函数（旧面板段读写的都是本 stub 的全局，测试断言即所见）。
+Object.defineProperty(globalThis, 'AG_CONFIRM_OPEN', {
+  get: () => globalThis.ACCT_CONFIRM_OPEN,
+  set: v => { globalThis.ACCT_CONFIRM_OPEN = v; },
+});
+Object.defineProperty(globalThis, '__agDelYes', {
+  get: () => globalThis.__acctDelYes,
+  set: v => { globalThis.__acctDelYes = v; },
+});
 globalThis.document = {
   querySelector: sel => (Object.prototype.hasOwnProperty.call(QS, sel) ? QS[sel] : null),
   querySelectorAll: () => [],
@@ -95,7 +106,12 @@ def _run_js(body: str) -> str:
     match = SEG_RE.search(text)
     assert match, "benefits.js 里找不到 ANTIGRAVITY 面板段（边界注释被改了？）"
     script = (
-        _STUB + match.group(0)
+        _STUB
+        # 公共删除确认弹窗（单例 + AG_CONFIRM_OPEN 别名），面板段闭包引用它
+        + HELPERS_JS.read_text(encoding="utf-8")
+        # ANTIGRAVITY 面板段（renderAntigravityPanel + loadAntigravityAccounts +
+        # AG_ACCTS/_ag_* 辅助；confirmAccountDelete 已走公共 helper）
+        + match.group(0)
         + "\n(async () => {\n" + body
         + "\n})().catch(e => { console.error(e); process.exit(1); });\n"
     )

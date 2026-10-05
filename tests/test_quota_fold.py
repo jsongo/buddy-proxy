@@ -24,6 +24,10 @@ import pytest
 
 STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
 BENEFITS_JS = STATIC / "benefits.js"
+# 2026-10 前端按职责拆分（benefits.js 超 700 行）：面板段挪到 benefits_panels.js
+# （traepat/antigravity/qoder）与 benefits_checkin.js（kimi）。额度折叠函数
+# （quotaSpent/quotaItemsHtml/syncQuotaFold/quotaFoldToggle）仍在 benefits.js。
+PANELS_JS = [STATIC / "benefits_panels.js", STATIC / "benefits_checkin.js"]
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"
@@ -438,8 +442,11 @@ def test_all_three_panels_use_the_fold_helper():
     没变」，等于没修。kimi/qoder/trae 面板（复用 antigravity 的分组结构）也要跟上。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
     assert "quotaItemsHtml(q.items || [], p.id)" in text, "主额度列表没接上折叠"
-    calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", text)
-    assert sorted(calls) == ["ag", "kimi", "pat", "qoder", "trae"], f"各面板没接上折叠: {calls}"
+    # 面板段分布在拆出去的文件（pat/ag/kimi/qoder）——trae 通道在 main 上已
+    # 移除面板（其 models 走 trae 账号体系，不再有独立 trae 额度面板）。
+    panels = "".join(p.read_text(encoding="utf-8") for p in PANELS_JS)
+    calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", panels)
+    assert sorted(calls) == ["ag", "kimi", "pat", "qoder"], f"各面板没接上折叠: {calls}"
 
 
 def test_render_benefits_syncs_after_rebuild():

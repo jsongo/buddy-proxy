@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import json
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -82,17 +83,94 @@ def test_forward_503_when_app_not_running():
 # --- anthropic 协议拒绝 ----------------------------------------------------
 
 
-def test_forward_rejects_anthropic():
+def test_forward_anthropic_nonstream_wraps_to_message():
+    """anthropic 非流式：OpenAI 响应包一层转回 anthropic message 形状。"""
     import asyncio
 
     async def _run():
         p = DumateProvider()
-        with mock.patch.object(discovery, "discover", return_value=_endpoint()):
-            with pytest.raises(HTTPException) as ei:
-                await p.forward({"model": "kimi-k3", "messages": []}, "anthropic")
-        return ei.value.status_code
+        ep = _endpoint()
+        upstream_json = {
+            "id": "gd-1",
+            "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12},
+        }
 
-    assert asyncio.run(_run()) == 400
+        class _FakeResp:
+            status_code = 200
+            def json(self): return upstream_json
+
+        async def _fake_post(url, json=None, headers=None):
+            return _FakeResp()
+
+        with mock.patch.object(discovery, "discover", return_value=ep), \
+             mock.patch.object(p, "_get_client") as gc:
+            gc.return_value.post = _fake_post
+            resp = await p.forward(
+                {"model": "kimi-k3", "messages": [{"role": "user", "content": "hi"}]},
+                "anthropic",
+                original={"model": "kimi-k3", "messages": []},
+            )
+        return resp
+
+    resp = asyncio.run(_run())
+    assert resp.status_code == 200
+    body = json.loads(resp.body)
+    # anthropic message 形状：content 块 + stop_reason + usage
+    assert body["type"] == "message"
+    text_blocks = [b for b in body["content"] if b.get("type") == "text"]
+    assert any("pong" in b.get("text", "") for b in text_blocks)
+    assert body["stop_reason"] == "end_turn"
+    assert body["usage"]["input_tokens"] == 5
+    assert body["usage"]["output_tokens"] == 7
+
+
+def test_forward_anthropic_stream_emits_events():
+    """anthropic 流式：OpenAI SSE → anthropic 事件序列（start/delta/stop）。"""
+    import asyncio
+
+    async def _run():
+        p = DumateProvider()
+        ep = _endpoint()
+        sse_lines = "\n".join([
+            'data: {"choices":[{"delta":{"content":"po"},"index":0}]}',
+            'data: {"choices":[{"delta":{"content":"ng"},"index":0}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}',
+            "data: [DONE]",
+            "",
+        ])
+
+        class _FakeResp:
+            status_code = 200
+            async def aiter_lines(self):
+                for ln in sse_lines.splitlines():
+                    yield ln
+            async def aclose(self): pass
+
+        async def _fake_post(url, json=None, headers=None):
+            return _FakeResp()
+
+        with mock.patch.object(discovery, "discover", return_value=ep), \
+             mock.patch.object(p, "_get_client") as gc:
+            gc.return_value.post = _fake_post
+            resp = await p.forward(
+                {"model": "kimi-k3", "messages": [], "stream": True},
+                "anthropic",
+                original={"model": "kimi-k3", "messages": []},
+            )
+            # StreamingResponse 对 str 迭代器会逐段 encode——拼回 str 再断言语义
+            body = "".join([c.decode() if isinstance(c, bytes) else c
+                            for c in [c async for c in resp.body_iterator]])
+        return resp, body
+
+    resp, body = asyncio.run(_run())
+    assert resp.status_code == 200
+    assert "message_start" in body
+    assert "content_block_delta" in body
+    assert "message_stop" in body
+    # 内容真的传过去了
+    assert '"po"' not in body or "text_delta" in body
+    assert "input_tokens" in body and "output_tokens" in body
 
 
 # --- 转发直通（mock httpx） -------------------------------------------------
@@ -132,10 +210,69 @@ def test_forward_openai_nonstream_pass_through():
     assert resp.status_code == 200
 
 
-# --- 额度：布尔态 → 1/1 条目 ------------------------------------------------
+# --- 额度：quota_overview 数字余额 → 积分条目 + 本地布尔兜底 -----------------
 
 
-def test_quota_true_becomes_full():
+def _quota_overview_result():
+    return {
+        "isSubscribed": False,
+        "usedPoints": "160.04",
+        "totalPoints": "1000.00",
+        "modelThrottleInfo": {"throttled": False, "reason": "", "throttleType": ""},
+        "subscription": [],
+        "incremental": [
+            {"packageId": "p1", "usedPoints": "0.00", "totalPoints": "500.00",
+             "startDate": 1791129600, "expireDate": 1793807999,
+             "packageType": "grant_point", "source": "login_bonus",
+             "status": "active", "product": "dumate"},
+            {"packageId": "p2", "usedPoints": "160.04", "totalPoints": "500.00",
+             "startDate": 1790870400, "expireDate": 1793548799,
+             "packageType": "grant_point", "source": "login_bonus",
+             "status": "active", "product": "dumate"},
+        ],
+    }
+
+
+def test_quota_prefers_quota_overview_numeric():
+    """数字余额（quota_overview）优先：剩 839.96 / 1000，percent 16.0。"""
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
+    p = DumateProvider()
+    q_overview = {
+        "total_points": 1000.0, "used_points": 160.04, "remaining_points": 839.96,
+        "is_subscribed": False, "packages": [
+            {"package_id": "p1", "used_points": 0.0, "total_points": 500.0,
+             "start_ts": 1791129600, "expire_ts": 1793807999,
+             "source": "login_bonus", "status": "active"},
+            {"package_id": "p2", "used_points": 160.04, "total_points": 500.0,
+             "start_ts": 1790870400, "expire_ts": 1793548799,
+             "source": "login_bonus", "status": "active"},
+        ],
+        "throttled": False,
+    }
+    with mock.patch.object(dumate_checkin, "fetch_quota_overview", return_value=q_overview):
+        q = p.quota()
+
+    head = q["items"][0]
+    assert head["label"] == "可用积分"
+    assert head["remaining"] == 839.96
+    assert head["total"] == 1000.0
+    assert head["used"] == 160.04
+    assert head["percent"] == 16.0
+    assert head["unit"] == "points"
+    # 积分包明细：两个 500 包
+    pkgs = q["items"][1:]
+    assert len(pkgs) == 2
+    assert pkgs[0]["label"].startswith("积分包")
+    assert pkgs[0]["remaining"] == 500.0
+    assert pkgs[1]["remaining"] == 339.96
+    assert pkgs[0]["expire_ts"] == 1793807999
+
+
+def test_quota_falls_back_to_boolean_when_overview_fails():
+    """quota_overview 拿不到（未登录/网络失败）→ 退回本地布尔 → 百分制。"""
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
     p = DumateProvider()
     ep = _endpoint()
 
@@ -143,32 +280,45 @@ def test_quota_true_becomes_full():
         status_code = 200
         def json(self): return {"hasRemainingPoints": True}
 
-    with mock.patch.object(discovery, "discover", return_value=ep), \
+    with mock.patch.object(dumate_checkin, "fetch_quota_overview", return_value=None), \
+         mock.patch.object(discovery, "discover", return_value=ep), \
          mock.patch.object(httpx, "Client") as client_cls:
         client_cls.return_value.__enter__.return_value.get.return_value = _FakeResp()
         q = p.quota()
 
-    assert q["items"][0]["remaining"] == 1
-    assert q["items"][0]["used"] == 0
-    assert q["items"][0]["percent"] == 0.0
+    assert q["items"][0]["remaining"] == 100
+    assert q["items"][0]["unit"] == "percent"
 
 
-def test_quota_false_becomes_empty():
-    p = DumateProvider()
-    ep = _endpoint()
+def test_quota_overview_parse():
+    """_parse 层：quota_overview 响应 → total/used/remaining + packages。"""
+    from buddy_proxy.dumate import checkin as dumate_checkin
 
     class _FakeResp:
         status_code = 200
-        def json(self): return {"hasRemainingPoints": False}
+        def json(self):
+            return {"success": True, "result": _quota_overview_result()}
 
-    with mock.patch.object(discovery, "discover", return_value=ep), \
+    with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth") as auth, \
          mock.patch.object(httpx, "Client") as client_cls:
+        auth.return_value.headers = lambda: {"Cookie": "x"}
         client_cls.return_value.__enter__.return_value.get.return_value = _FakeResp()
-        q = p.quota()
+        q = dumate_checkin.fetch_quota_overview()
 
-    assert q["items"][0]["remaining"] == 0
-    assert q["items"][0]["used"] == 1
-    assert q["items"][0]["percent"] == 100.0
+    assert q is not None
+    assert q["total_points"] == 1000.0
+    assert q["used_points"] == 160.04
+    assert q["remaining_points"] == 839.96
+    assert len(q["packages"]) == 2
+    assert q["packages"][0]["source"] == "login_bonus"
+    assert q["packages"][0]["expire_ts"] == 1793807999
+
+
+def test_quota_overview_none_when_not_logged_in():
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
+    with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth", return_value=None):
+        assert dumate_checkin.fetch_quota_overview() is None
 
 
 # --- 签到（bceConsole 通道） ------------------------------------------------
@@ -203,3 +353,26 @@ def test_checkin_status_none_when_not_logged_in():
 
     with mock.patch.object(dumate_checkin, "resolve_bceconsole_auth", return_value=None):
         assert dumate_checkin.fetch_checkin_status() is None
+
+
+# --- 端点发现：pgrep 竞态（自身先出现）------------------------------------
+
+
+def test_find_main_server_pid_skips_pgrep_self_match():
+    """`pgrep -lf dumate-main-server` 输出里竞态出现 pgrep 自身（cmdline 也含
+    模式串）——旧过滤「cmdline 含串就匹配」会把自己当端点返回，discover() 随即
+    拿到空 key 失败（面板 /health 随机「未运行」）。修正后只认真实可执行文件路径。"""
+    from buddy_proxy.dumate import discovery as d
+
+    class _Fake:
+        stdout = (
+            "8316 pgrep -lf dumate-main-server\n"
+            "9007 /Applications/DuMate.app/Contents/Resources/extra-resource/"
+            "backend/bin/dumate-main-server -c config.yml --port=52414\n"
+        )
+
+    with mock.patch.object(d.subprocess, "run", return_value=_Fake()):
+        found = d._find_main_server_pid()
+    assert found is not None
+    assert found[0] == 9007, "跳过 pgrep 自身，命中真实端点进程"
+    assert "dumate-main-server" in found[1]

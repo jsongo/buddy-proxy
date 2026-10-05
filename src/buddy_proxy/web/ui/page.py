@@ -22,6 +22,9 @@ _STATIC_FILES = {
     "style.css": "text/css; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
     "benefits.js": "text/javascript; charset=utf-8",
+    "benefits_accounts.js": "text/javascript; charset=utf-8",
+    "benefits_checkin.js": "text/javascript; charset=utf-8",
+    "benefits_panels.js": "text/javascript; charset=utf-8",
     "charts.js": "text/javascript; charset=utf-8",
 }
 
