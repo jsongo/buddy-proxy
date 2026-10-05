@@ -328,3 +328,85 @@ console.log(JSON.stringify(calls));
     assert ["agMove", 2, 1, "a@x.com"] in data
     assert ["agDel", "a@x.com"] in data
     assert len(data) == 4, "未知 pid 不调用任何处理（也不报错中断后续）"
+
+
+# --- dumate 面板就绪态重渲（loadDumateStatus 拿 ready 后主动 render） ----------
+
+
+def test_dumate_status_ready_triggers_rerender():
+    """就绪态异步到达后必须立即重渲一次，否则首渲「检测中…」要等 30s 轮询。
+
+    这是 PR #85 review 评论 1 的回归：renderDumatePanel 本身此前没有 node
+    桩覆盖，回归全靠 Playwright 手测。这里把 benefits.js 的 dumate 段抽出来
+    跑（带 quotaItemsHtml/quotaItemHtml 桩），盯三件事：
+
+    - 首渲：status 未到 → 「检测中…」
+    - loadDumateStatus 拿到 ready → 主动 renderDumatePanel 一次（不再等轮询）
+    - App 未运行（installed=True, ready=False, 带 hint）→ 显示 hint 不显示已就绪
+    """
+    import re
+    text = (_STATIC / "benefits.js").read_text(encoding="utf-8")
+    seg = re.search(
+        r"// ---- DUMATE 面板.*$", text, re.S,
+    )
+    assert seg, "benefits.js 里找不到 DUMATE 面板段"
+    # benefits_accounts.js 提供 acctLoad/acctFor/acctDeleteButton/acctRowButtons
+    # （loadDumateAccounts 的初始化表达式在加载期就引用 acctLoad），必须先加载
+    script = (
+        _STUB
+        + HELPERS_JS.read_text(encoding="utf-8")
+        + "globalThis.quotaItemHtml = it => '<div class=\"qitem\">' + esc(it.label) + '</div>';\n"
+        + "globalThis.quotaItemsHtml = (items, key) =>\n"
+        + "  '<div class=\"qbody\" data-qfold=\"' + esc(key) + '\">' + items.map(globalThis.quotaItemHtml).join('') + '</div>';\n"
+        + "globalThis.api = async (path) => globalThis.__DM_RESPONSE;\n"
+        + seg.group(0)
+        + """
+(async () => {
+globalThis.BENEFITS = {providers: [{id: 'dumate', quota: {supported: true, items: [
+  {label: '可用积分', used: 160.04, total: 1000, remaining: 839.96, percent: 16.0,
+   reset_ts: null, expire_ts: null, unit: 'points'},
+]}}]};
+let RENDER_COUNT = 0;
+const origRender = renderDumatePanel;
+renderDumatePanel = function() { RENDER_COUNT++; return origRender(); };
+// 桩 document.getElementById('dumate-panel') → PANEL
+const origGetEl = document.getElementById.bind(document);
+document.getElementById = id => (id === 'dumate-panel' ? PANEL : origGetEl(id));
+globalThis.__DM_RESPONSE = {ready: false, installed: true, running: false,
+                            hint: '已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。'};
+renderDumatePanel();                        // 首渲（status 未到 → 检测中）
+const firstHtml = PANEL.innerHTML;
+const firstDetecting = firstHtml.includes('检测中…');
+await new Promise(r => setTimeout(r, 5));
+// 状态到手：ready
+globalThis.__DM_RESPONSE = {ready: true, installed: true, running: true,
+                            port: 52414, pid: 9007, app_version: '1.0.0',
+                            inapp_key_hint: 'abcd…(len64)',
+                            base_url: 'http://127.0.0.1:52414',
+                            bceconsole_authenticated: true,
+                            display_name: 'jsongo', checkin_total_points: 1000,
+                            checkin_total_times: 2};
+await loadDumateStatus();                   // 应主动 render 一次
+const readyHtml = PANEL.innerHTML;
+console.log(JSON.stringify({
+  firstDetecting,
+  firstReady: firstHtml.includes('已就绪'),
+  renderCount: RENDER_COUNT,
+  readyNow: readyHtml.includes('已就绪'),
+  stillDetecting: readyHtml.includes('检测中'),
+  showsLogin: readyHtml.includes('已登录'),
+  version: readyHtml.includes('v1.0.0'),
+}));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+    )
+    proc = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"node 执行失败:\n{proc.stderr}"
+    data = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert data["firstDetecting"] and not data["firstReady"], "首渲应是检测中"
+    assert data["renderCount"] == 2, "就绪态到达后要主动重渲一次"
+    assert data["readyNow"] and not data["stillDetecting"], "重渲后应显示已就绪"
+    assert data["showsLogin"], "已登录徽标要出来"
+    assert data["version"], "版本号 v1.0.0 要出来"

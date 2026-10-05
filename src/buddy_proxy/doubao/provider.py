@@ -221,17 +221,27 @@ class DoubaoProvider(BaseProvider):
         if body.get("stream"):
             include_usage = bool(
                 (body.get("stream_options") or {}).get("include_usage"))
+            gen = self._stream(prompt, use_deep_think, requested_model,
+                               conversation_id, bot_id, include_usage,
+                               model_spec=model_spec)
+            if protocol == "anthropic":
+                # Claude Code 等 /v1/messages 客户端：OpenAI chunk 流包一层
+                # 转回 anthropic 事件序列（trae/mimo/dumate 同款）。
+                gen = _to_anthropic_stream(gen, requested_model)
             return StreamingResponse(
-                self._stream(prompt, use_deep_think, requested_model,
-                             conversation_id, bot_id, include_usage,
-                             model_spec=model_spec),
+                gen,
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "close"},
             )
 
         message = await self._collect(prompt, use_deep_think, conversation_id,
                                       bot_id, model_spec=model_spec)
-        return JSONResponse(content=self._build_nonstream_response(message, requested_model))
+        resp_payload = self._build_nonstream_response(message, requested_model)
+        if protocol == "anthropic":
+            from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
+
+            resp_payload = chat_completion_to_anthropic_message(resp_payload, original)
+        return JSONResponse(content=resp_payload)
 
     def health(self) -> dict[str, Any]:
         return {
@@ -674,3 +684,60 @@ class DoubaoProvider(BaseProvider):
     def page_url(self) -> str:
         page = getattr(self._client, "page", None)
         return page.url if page else ""
+
+
+async def _to_anthropic_stream(
+    gen: AsyncIterator[str], model: str,
+) -> AsyncIterator[str]:
+    """豆包 OpenAI chunk 流 → Anthropic 事件流（/v1/messages 客户端形状）。
+
+    复用 ``anthropic_adapter.AnthropicStreamConverter``（dumate/kimi/mimo 同款）。
+    豆包上游 error 事件已转成 ``choices[0].delta.content = "[Error N]"`` chunk，
+    转换器会当普通文本发出去——保持「能拿到内容比凭空断流好」的口径。
+    """
+    from ..protocols.anthropic_adapter import AnthropicStreamConverter
+
+    converter = AnthropicStreamConverter(model)
+
+    def _emit(event_name: str, payload: dict[str, Any]) -> str:
+        return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _close_open() -> list[str]:
+        try:
+            return [_emit(n, p) for n, p in converter.close_open_blocks()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _abort(msg: str) -> list[str]:
+        out = _close_open()
+        out.append(_emit("error", {
+            "type": "error",
+            "error": {"type": "api_error", "message": msg},
+        }))
+        return out
+
+    try:
+        async for sse in gen:
+            for line in sse.splitlines():
+                line = line.strip()
+                if not line or line.startswith(":") or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(chunk, dict):
+                    continue
+                for name, payload in converter.feed_chunk(chunk):
+                    yield _emit(name, payload)
+        for name, payload in converter.finish():
+            yield _emit(name, payload)
+    except Exception as exc:  # noqa: BLE001 — 上游异常不该让客户端收到半截流
+        log.warning("doubao anthropic stream aborted: %s: %s", type(exc).__name__, exc)
+        for event in _abort(f"{type(exc).__name__}: {exc}"):
+            yield event
+        return
+    yield "data: [DONE]\n\n"

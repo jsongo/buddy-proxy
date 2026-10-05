@@ -513,10 +513,14 @@ function renderDumatePanel() {
 async function loadDumateStatus() {
   try {
     const r = await api('/ui/api/dumate/status');
+    const prev = DUMATE_STATE.status;
     DUMATE_STATE.status = r;
-    // 就绪态是异步拉回来的：刷新一次面板让圆点/版本/已登录反映新状态，
-    // 否则首渲的「检测中…」要等下个 30s 轮询才消失
-    if (r && r.ready) renderDumatePanel();
+    // 就绪态是异步拉回来的：状态**变化**时刷新一次面板让圆点/版本/已登录反映
+    // 新状态（否则首渲的「检测中…」要等下个 30s 轮询才消失）。只在变化时重渲
+    // ——renderDumatePanel 尾部会调本函数，无条件重渲会自己套自己死循环。
+    if (r && r.ready && JSON.stringify(r) !== JSON.stringify(prev)) {
+      renderDumatePanel();
+    }
   } catch (e) {
     DUMATE_STATE.status = null;  // 静默：下轮 30s 自动重试
   }
