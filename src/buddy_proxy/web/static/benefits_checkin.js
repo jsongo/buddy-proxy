@@ -114,11 +114,11 @@ function _kimi_acct_for(idx) {
 }
 
 function _kimi_sub_html(a) {
-  // 副标题（进度条上面那行 muted 小字）：token 剩余 / 冷却（kimi 只有
+  // 副标题（进度条上面那行 muted 小字）：冷却（kimi 只有
   // quota/account 两档冷却，没有 antigravity 的拉黑档）
+  // （「token 剩 Xh」删了：access token 几小时自动刷新，读了只会误导）
   if (!a) return '';
   const bits = [];
-  if (a.hours_left != null) bits.push(`token 剩 ${a.hours_left}h`);
   for (const c of a.cooling || []) {
     const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
     bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
@@ -145,7 +145,7 @@ function kimiConfirmDelete(id) {
     title: '删除 Kimi 账号',
     name,
     extra: '该账号的凭据文件一并移除，转发不再使用它。refresh_token 已作废' +
-      '（副标题 token 剩 0h 且转发持续失败）的账号删掉后即不再白耗一轮 failover。',
+      '（副标题持续显示账号冷却且转发失败）的账号删掉后即不再白耗一轮 failover。',
   });
 }
 
@@ -198,7 +198,7 @@ async function kimiDeleteAccount(id) {
   } catch (e) { toast('删除失败: ' + e.message, true); }
   finally {
     KIMI_MOVING = false;
-    AG_CONFIRM_OPEN = false;  // 确认时从 confirmAccountDelete 接手的锁，到这里才放
+    ACCT_CONFIRM_OPEN = false;  // 确认时从 confirmAccountDelete 接手的锁，到这里才放
   }
 }
 
@@ -269,10 +269,11 @@ function renderKimiPanel() {
     // ↻ 刷新：与 antigravity 卡片同款（refreshProviderQuota 通用）
     const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
       `onclick="refreshProviderQuota('kimi', this)">↻</button>`;
-    const rowBtns = `<span class="ag-move">${refreshBtn}${moveBtns}${delBtn}</span>`;
+    const renameBtn = acctRenameButton('kimi', acct);
+    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
     return `
     <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-kimi-idx="${idx}"` : ''}>${esc(acct ? (acct.name || acct.id) : grp)}</span>
+      <span class="pat-pkg-name"${m ? ` data-kimi-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.id) : grp)}</span>
       ${_kimi_sub_html(acct)}
       ${quotaItemsHtml(its, 'kimi:' + grp)}
       ${rowBtns}
@@ -320,7 +321,7 @@ async function loadKimiAccounts() {
         ? document.querySelector('#kimi-panel .pat-pkg-name')
         : document.querySelector(`#kimi-panel [data-kimi-idx="${a.index}"]`);
       if (!el) continue;
-      el.textContent = a.name || a.id;
+      el.textContent = a.alias || a.name || a.id;
       if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-kimi-sub')) {
         el.nextElementSibling.remove();
       }

@@ -190,7 +190,9 @@ Work 通道多账号**主备 failover**：按登录顺位优先用 #1，账号�
 `▲▼` 顺位调整 / `✕` 删除面板（同 qoder/kimi/antigravity）。
 多账号时签到状态带 **per-account 明细**（`accounts`：index/name/状态），签到卡逐账号
 渲染一行（已签到 / 可领 / 查询失败 + 原因）——只有聚合徽标说不清哪个账号没签上；
-手动打卡的 toast 也逐账号报结果（谁 +N、谁失败）。单账号无明细，行为不变。
+手动打卡的 toast 也逐账号报结果（谁 +N、谁失败）。明细里的 name 走
+alias > nickname > uid > id 显示名链（✎ 改的名与额度面板一致），行尾带 ✎ 改名入口。
+单账号无明细，行为不变。
 
 > **`buddy login trae` 排障**：若浏览器显示「登录成功」而 CLI 一直停在等待界面，
 > 九成是登录 URL 的参数没和 Trae CN 客户端对齐。关键项 `plugin_version` 必须是
@@ -393,6 +395,18 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
   失败结果只缓存 30 秒（成功结果仍缓存 5 分钟），网络抖动恢复后下一轮就能自愈
 - **Trae PAT 账号** — 每个账号一张卡片：本地凭证与冷却状态（纯本地读取，不触网）、一键补签
   Token（只补缺失/临期的，不打扰健康账号）、以及上游各模型在本通道的负载状态（10 分钟缓存）
+- **账号改名（alias）** — qoder / kimi / antigravity 额度卡与 trae 签到明细行的账号标题旁
+  有 **✎** 按钮，弹窗改的是**显示名**（`alias` 字段，只动本地索引显示，凭据与顺位不动），
+  `POST /ui/api/{ch}/accounts/rename`（`{id, alias}`，空串=恢复默认名）落盘；名字全链路一致
+  （额度卡标题与签到明细同一个名字）。alias 存在账号索引里独立于凭据——重登（upsert 只改
+  nickname/name/email）与索引自愈重写都不丢，清空即回退邮箱/官方昵称。
+- **账号副标题改版** — 三通道（qoder/kimi/antigravity）账号卡副标题的「token 剩 Xh」已删：
+  access token 几小时就自动刷新，那个数字对「还能用多久」毫无参考价值（qoder 还曾把
+  毫秒当秒算出 4.97 亿小时）。副标题只留有意义的位：区域 / 冷却（额度/账号/疑似拉黑）/
+  缺 project 等。kimi 的额度条目改为上游**绝对积分**优先（`limits[]`/`usage` 的
+  limit/used/remaining 直出，`used_ratio` 只作兜底）——早先读 ratio 时「剩 93.31/100」
+  其实是百分比伪装成积分。qoder 账号卡标题行下另加**合计行**「剩 N / M · 已用 x%」
+  （订阅额度+加油包+专属积分三份并存份额求和，后端 `sum_items` 声明）。
 - **模型停用与时段** — 可停用/启用单个 `(provider, model)` 组合（停用后该组合调用直接失败），
   也可给模型限定时段窗口（如 `22:00–08:00`、`12:00–14:00`）。两者都持久化到设置文件
 - **模型顺序（候选上游换档）** — 独立的**模型顺序**页签，**`model_order` 里配了几个键就显示几张
@@ -937,7 +951,14 @@ priority，重排后旧额度快照自动失效换新顺位；界面随即换位
 在飞请求落定再补发真重取，不被写前的旧响应顶回旧顺序）。每张账号卡右上角
 还有 **↻ 刷新**（kimi 面板同款）：`POST /ui/api/benefits/refresh` 作废本通道
 额度缓存立即重查（`benefits.invalidate_quota`，按键前缀删、不波及他通道与
-签到状态），不用等 5 分钟 TTL。主账号撞 429（额度）/ 403 /
+签到状态），不用等 5 分钟 TTL。卡片标题行的 **✎ 改名**（四通道同款：
+qoder/kimi/antigravity + trae 签到明细行）弹窗改**显示名**（`alias` 字段，
+`POST /ui/api/{qoder|kimi|antigravity|trae}/accounts/rename`）：只改管理页
+显示，凭据与顺位都不动；清空提交即恢复默认名（邮箱/官方昵称）。alias 是
+账号索引里的独立字段：重登（upsert 只碰 nickname/name/email 具名键）与
+索引自愈重写（`kept.append(AccountRef(...))` 是唯一从 entry 重建字段的点）
+都不会丢；显示名全链路同一套（额度卡标题、trae 签到明细行都走
+alias > name/email/nickname > id）。主账号撞 429（额度）/ 403 /
 凭据失效时进内存冷却（429 尊重 `Retry-After`，默认 5 分钟；普通 403/凭据问题
 60 秒；**403「Verify your account to continue.」= Google 风控拉黑**——账号
 能登录但上游一律拒，按 6 小时档冷却，面板副标题标注「疑似拉黑」）并
@@ -965,8 +986,8 @@ JSON，上限 8 个）。旧的单账号文件 `~/.buddy-proxy/antigravity_oauth
 `confirm()`，与站内弹窗组件同款）：索引
 条目、cred 文件与冷却标记一并移除，比手删 JSON 文件干净（手删也会被索引
 自愈兜住）。管理页有独立的 Antigravity 面板（Trae PAT 同款布局）：
-每账号一块（标题=账号邮箱，副标题=token 剩余 / 冷却 / 疑似拉黑 / 缺 project
-状态），
+每账号一块（标题=账号名——✎ 改过的别名优先、否则邮箱，副标题=冷却 /
+疑似拉黑 / 缺 project 状态），
 下面是它自己的各组进度条；登录新账号后 quota 快照随即失效重查（缓存键带
 账号指纹），不会顶着旧单账号数据满 TTL。
 

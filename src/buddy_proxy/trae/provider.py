@@ -187,11 +187,14 @@ class TraeProvider(BaseProvider):
         acct_details: list[dict[str, Any]] = []
         enabled_any = False
         for i, acct in enumerate(accounts, 1):
-            name = acct.nickname or acct.uid or acct.id
+            # 显示名 alias 优先（管理页 ✎ 改的名，签到卡与额度面板保持一致）；
+            # id 一并下发——签到明细行的 ✎ 改名按钮要拿它定位账号。
+            name = acct.alias or acct.nickname or acct.uid or acct.id
             st, err = self._checkin_status_for_account(acct, index=i, multi=True)
             if st is None:
                 failed_accts.append(f"#{i}")
-                acct_details.append({"index": i, "name": name, "error": err or "查询失败"})
+                acct_details.append({"index": i, "id": acct.id, "name": name,
+                                     "error": err or "查询失败"})
                 continue
             if not st.get("inactive"):
                 enabled_any = True
@@ -201,6 +204,7 @@ class TraeProvider(BaseProvider):
                 signed_accts.append(f"#{i}")
             acct_details.append({
                 "index": i,
+                "id": acct.id,
                 "name": name,
                 "checked_in": bool(st.get("checked_in")),
                 "claimable": bool(st.get("claimable")),
@@ -300,7 +304,8 @@ class TraeProvider(BaseProvider):
         messages: list[str] = []
         acct_details: list[dict[str, Any]] = []
         for i, acct in enumerate(accounts, 1):
-            name = acct.nickname or acct.uid or acct.id
+            # 显示名 alias 优先（同 checkin_status）；id 下发供明细行 ✎ 定位
+            name = acct.alias or acct.nickname or acct.uid or acct.id
             tag = f"#{i}"
             try:
                 token, _cred = ensure_account_token(acct.id)
@@ -312,19 +317,21 @@ class TraeProvider(BaseProvider):
                         total_credits += float(granted)
                     messages.append(f"{tag} 已领 {granted or ''}".strip())
                     acct_details.append({
-                        "index": i, "name": name, "ok": True,
+                        "index": i, "id": acct.id, "name": name, "ok": True,
                         "credits": granted if isinstance(granted, (int, float)) else None,
                         "message": str(data.get("message") or "")[:80],
                     })
                 else:
                     msg = str(data.get("message"))[:60]
                     messages.append(f"{tag} 失败：{msg}")
-                    acct_details.append({"index": i, "name": name, "ok": False, "message": msg})
+                    acct_details.append({"index": i, "id": acct.id, "name": name,
+                                         "ok": False, "message": msg})
             except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号
                 log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
                 msg = str(e)[:60]
                 messages.append(f"{tag} 失败：{msg}")
-                acct_details.append({"index": i, "name": name, "ok": False, "message": msg})
+                acct_details.append({"index": i, "id": acct.id, "name": name,
+                                     "ok": False, "message": msg})
         return {
             "checked_in": any_claimed,
             "extra_credits": total_credits if any_claimed else None,

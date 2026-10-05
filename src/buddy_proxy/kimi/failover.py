@@ -80,7 +80,8 @@ def accounts_status() -> dict[str, Any]:
         left, kind = cooldown_left(a.id)
         items.append({
             "id": a.id,
-            "name": a.name or a.id,
+            "name": a.alias or a.name or a.id,
+            "alias": a.alias,
             "index": i + 1,
             "base_url": str(cred.get("base_url") or ""),
             "user_id": str(cred.get("user_id") or ""),

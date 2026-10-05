@@ -108,6 +108,44 @@ def test_usages_to_items_legacy_fallback():
     assert usages_to_items({"usage": {"limit": "0", "used": "0"}}) == []
 
 
+def test_usages_to_items_absolute_credits_preferred():
+    """真机 2026-10-05 实测形状：limits[]/usage 带绝对积分数，必须优先于 ratio。
+
+    回归：早先只读 usages 分桶的 used_ratio，「剩 93.31 / 100」其实是百分比
+    伪装成积分；用户要的是剩余总积分。
+    """
+    data = {
+        "usage": {"limit": "100", "used": "11", "remaining": "89",
+                  "resetTime": "2026-10-12T02:11:53.675105Z"},
+        "limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                    "detail": {"limit": "100", "used": "8", "remaining": "92",
+                               "resetTime": "2026-10-05T14:11:53.675105Z"}}],
+        "usages": {"limit_5h": {"used_ratio": 0.075, "reset_time": "x"},
+                   "limit_7d": {"used_ratio": 0.11, "reset_time": "y"}},
+    }
+    items = usages_to_items(data)
+    assert [i["label"] for i in items] == ["5 小时窗口", "7 天池"]
+    five, seven = items
+    # 绝对数直出（remaining=上游原值，不是 100-percent 的百分比）
+    assert (five["remaining"], five["total"], five["unit"]) == (92.0, 100.0, "credit")
+    assert five["percent"] == 8.0
+    assert five["reset_ts"] == iso_to_epoch("2026-10-05T14:11:53.675105Z")
+    assert (seven["remaining"], seven["total"], seven["unit"]) == (89.0, 100.0, "credit")
+    assert seven["percent"] == 11.0
+
+
+def test_usages_to_items_absolute_partial_fallback_per_window():
+    """逐窗口独立回退：只有 7d 绝对数时，5h 走 ratio、7d 走绝对数。"""
+    data = {
+        "usage": {"limit": "200", "used": "50", "remaining": "150"},
+        "usages": {"limit_5h": {"used_ratio": 0.4, "reset_time": "2026-10-03T18:00:00Z"}},
+    }
+    items = usages_to_items(data)
+    assert [i["label"] for i in items] == ["5 小时窗口", "7 天池"]
+    assert items[0]["unit"] == "percent" and items[0]["percent"] == 40.0
+    assert items[1]["unit"] == "credit" and items[1]["remaining"] == 150.0
+
+
 def test_iso_and_cred_expiry():
     assert iso_to_epoch("2026-10-03T00:00:00Z") > 0
     assert iso_to_epoch("garbage") == 0.0

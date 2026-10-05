@@ -145,6 +145,19 @@ def test_accounts_status_shape():
     assert out["accounts"][0]["cooling"][0]["kind"] == "quota"
 
 
+def test_accounts_status_hours_left_is_hours_not_ms_bug():
+    """expires_at_ms 是毫秒，hours_left 必须是小时级（≤ 8784h/年）。
+
+    回归：曾把毫秒当秒直接与 time.time() 相减，算出 4.97 亿小时
+    （真机 2026-10-05 用户实报「token 剩 497759890.1h」）。
+    """
+    save_account_cred(_cred("a"))  # expires_at_ms = now + 1h
+    out = accounts_status()
+    hours = out["accounts"][0]["hours_left"]
+    assert hours is not None
+    assert 0 < hours <= 2.0  # 1 小时后过期，容一点换算误差；毫秒 bug 下会是 4.97e8
+
+
 def test_accounts_status_region_field():
     save_account_cred(_cred("gl", region="global"))
     out = accounts_status()
