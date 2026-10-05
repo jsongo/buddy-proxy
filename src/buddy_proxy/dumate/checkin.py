@@ -109,7 +109,8 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
     ``GET /api/dumate/points/quota_overview?timezone=...&clientType=...&ignoreLoginBonus=true``
     （**下划线**版；camelCase ``quotaOverview`` 是另一个端点、怎么调都是 500）。
     返回 dict 含 ``total_points`` / ``used_points`` / ``remaining_points`` /
-    ``is_subscribed`` / ``packages``（incremental 包列表）等；未登录 / 失败 None。
+    ``is_subscribed`` / ``packages``（subscription 付费主池 + incremental 赠送包，
+    ``total_points`` 就是两个池的合计）等；未登录 / 失败 None。
     """
     data = _bce_get(
         "/api/dumate/points/quota_overview"
@@ -127,7 +128,11 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
     packages = []
-    for p in result.get("incremental") or []:
+    # 两个池：subscription（付费订阅主池，plan_pro 等）+ incremental（login_bonus
+    # 赠送包）。totalPoints = 两者合计；只读 incremental 会漏掉订阅主池，面板明细
+    # 跟总结行对不上（实测：totalPoints=26000 = subscription 25000 + incremental
+    # 两个 500 包，但旧代码只列那两个包）。
+    for p in (result.get("subscription") or []) + (result.get("incremental") or []):
         try:
             packages.append({
                 "package_id": p.get("packageId") or "",
@@ -136,6 +141,7 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
                 "start_ts": p.get("startDate"),
                 "expire_ts": p.get("expireDate"),
                 "source": p.get("source") or "",
+                "package_type": p.get("packageType") or "",
                 "status": p.get("status") or "",
             })
         except (TypeError, ValueError):
