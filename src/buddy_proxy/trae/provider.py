@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextvars
 import json
 import logging
@@ -30,7 +31,14 @@ from .config import (
     _NATIVE_TOOLS_ENABLED,
     _debug_dump,
 )
-from .credentials import _auth
+from . import failover
+from .credentials import (
+    _auth,
+    ensure_account_token,
+    list_accounts,
+    load_account_cred,
+    set_current_work_account,
+)
 from .leak_guard import _StreamLeakCleaner, _sanitize_agent_leak
 from .native_tools import (
     _NativeToolAccumulator,
@@ -44,6 +52,24 @@ from .text_toolcall import _StreamToolCallSplitter, _parse_tool_calls, _tool_nam
 from .transport import send_trae_chat
 
 log = logging.getLogger(__name__)
+
+#: 多账号额度并发查询：整轮 deadline + 常驻线程池（与 antigravity/qoder 同口径）。
+#: 常驻（不是每轮新建）的理由见 trae/pat/quota.py：每轮新建 + shutdown(wait=False)
+#: 会让慢轮线程留在后台累积；常驻池上限封顶，慢轮占名额、后续轮次自然排队。
+_QUOTA_ROUND_DEADLINE_S = 8.0
+_QUOTA_WORKERS = 4
+_quota_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
+_quota_pool_lock = threading.Lock()
+
+
+def _quota_executor() -> "concurrent.futures.ThreadPoolExecutor":
+    global _quota_pool
+    with _quota_pool_lock:
+        if _quota_pool is None:
+            _quota_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_QUOTA_WORKERS, thread_name_prefix="trae-quota")
+        return _quota_pool
+
 
 class TraeProvider(BaseProvider):
     id = "trae"
@@ -124,8 +150,83 @@ class TraeProvider(BaseProvider):
 
     # ---- 打卡 / 额度（/ui 管理页消费，均经 asyncio.to_thread 调用） ----
 
+    def _work_accounts(self) -> list[Any]:
+        """遍历用的 work 账号列表（按 failover 顺位，剔除冷却中的）。
+
+        PAT 子类（``_pat_variant``）不经过 work 多账号体系——签到/额度是
+        个人账号专属，PAT 的 ``supports_checkin=False`` 本就挡住 UI 调度，
+        这里再兜一层：PAT 返回空列表，调用方各自退化为单账号（拿首个可用
+        work 账号）或返回 None（与改造前 PAT 行为一致）。
+        """
+        if self._is_pat_variant():
+            return []
+        return failover.available_accounts()
+
     def checkin_status(self) -> dict[str, Any] | None:
-        data = fetch_checkin_status()
+        """查今日签到状态。多账号**都查**，聚合：任一账号可领→可领；
+        全部已签→已签；个别账号失败只在日志记、不阻塞整页（与 qoder 一致）。"""
+        accounts = self._work_accounts()
+        if not accounts:
+            # 单账号（legacy 迁移前 / PAT 兜底）或全部在冷却：走首个可用账号
+            try:
+                data = fetch_checkin_status()
+            except Exception as e:  # noqa: BLE001 — 状态查询失败不该让整页 500
+                log.warning("trae 签到状态查询失败: %s", e)
+                return {"checked_in": False, "claimable": False, "message": str(e)[:200]}
+            return self._checkin_status_one(data, label="", multi=False)
+
+        if len(accounts) == 1:
+            return self._checkin_status_for_account(accounts[0], index=1, multi=False)
+
+        # 多账号：并查，聚合任一可领 / 全部已签
+        claimable_accts: list[str] = []
+        signed_accts: list[str] = []
+        failed_accts: list[str] = []
+        enabled_any = False
+        for i, acct in enumerate(accounts, 1):
+            st = self._checkin_status_for_account(acct, index=i, multi=True)
+            if st is None:
+                failed_accts.append(f"#{i}")
+                continue
+            if not st.get("inactive"):
+                enabled_any = True
+            if st.get("claimable"):
+                claimable_accts.append(f"#{i}")
+            elif st.get("checked_in"):
+                signed_accts.append(f"#{i}")
+        status: dict[str, Any] = {
+            "checked_in": bool(signed_accts) and not claimable_accts,
+            "claimable": bool(claimable_accts),
+            "inactive": not enabled_any and not claimable_accts and not signed_accts,
+            "message": "",
+        }
+        if claimable_accts:
+            status["message"] = f"账号 {'、'.join(claimable_accts)} 可领"
+        elif signed_accts:
+            status["message"] = f"账号 {'、'.join(signed_accts)} 已签"
+        if failed_accts:
+            status["message"] = (status["message"] + " " if status["message"] else "") + \
+                f"（{len(failed_accts)}/{len(accounts)} 个账号查询失败）"
+        if enabled_any:
+            status["next_ts"] = next_daily_reset()
+            status["next_ts_source"] = SOURCE_INFERRED
+        return status
+
+    def _checkin_status_for_account(
+            self, acct: Any, *, index: int, multi: bool) -> dict[str, Any] | None:
+        """单账号签到状态查询。返回 None 表示该账号查询失败（网络/token）。"""
+        try:
+            token, _cred = ensure_account_token(acct.id)
+            data = fetch_checkin_status(token=token, account_id=acct.id)
+        except Exception as e:  # noqa: BLE001 — 单账号失败不该让整页 500
+            log.warning("trae 签到状态查询失败（%s）: %s", acct.id, e)
+            return None
+        label = f"Trae #{index} · " if multi else ""
+        return self._checkin_status_one(data, label=label, multi=multi)
+
+    def _checkin_status_one(
+            self, data: dict[str, Any], *, label: str, multi: bool) -> dict[str, Any]:
+        """把上游 ``/ug/checkin_credits/status`` 原始响应收拢成统一签到状态。"""
         checked_in = bool(data.get("checked_in"))
         enabled = bool(data.get("enable", True))
         status: dict[str, Any] = {
@@ -145,17 +246,117 @@ class TraeProvider(BaseProvider):
         return status
 
     def checkin_claim(self) -> dict[str, Any] | None:
-        data = claim_checkin_credits()
-        if data.get("code") not in (0, None):
-            raise RuntimeError(data.get("message") or json.dumps(data, ensure_ascii=False)[:200])
+        """领取今日签到积分。多账号**每个都领**（用户决策），逐个尝试、
+        各自容错：单个账号失败（网络/token/已领过）不阻塞其它账号。汇总
+        ``extra_credits`` 为各账号实领之和，``message`` 据实说明每个账号结果。"""
+        accounts = self._work_accounts()
+        if not accounts:
+            # 单账号 legacy 兜底（PAT 由 supports_checkin=False 挡住 UI 调度，
+            # 走不到这里；即便走到也退回原单账号语义）
+            data = claim_checkin_credits()
+            if data.get("code") not in (0, None):
+                raise RuntimeError(data.get("message") or json.dumps(data, ensure_ascii=False)[:200])
+            return {
+                "checked_in": True,
+                "extra_credits": data.get("credits_granted", data.get("extra_credits")),
+                "message": data.get("message", ""),
+            }
+
+        total_credits: float = 0.0
+        any_claimed = False
+        messages: list[str] = []
+        for i, acct in enumerate(accounts, 1):
+            tag = f"#{i}"
+            try:
+                token, _cred = ensure_account_token(acct.id)
+                data = claim_checkin_credits(token=token, account_id=acct.id)
+                if data.get("code") in (0, None):
+                    any_claimed = True
+                    granted = data.get("credits_granted", data.get("extra_credits"))
+                    if isinstance(granted, (int, float)):
+                        total_credits += float(granted)
+                    messages.append(f"{tag} 已领 {granted or ''}".strip())
+                else:
+                    messages.append(f"{tag} 失败：{str(data.get('message'))[:60]}")
+            except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号
+                log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
+                messages.append(f"{tag} 失败：{str(e)[:60]}")
         return {
-            "checked_in": True,
-            "extra_credits": data.get("credits_granted", data.get("extra_credits")),
-            "message": data.get("message", ""),
+            "checked_in": any_claimed,
+            "extra_credits": total_credits if any_claimed else None,
+            "message": "；".join(messages) or "没有可领取的账号",
         }
 
     def quota(self) -> dict[str, Any] | None:
-        data = fetch_ent_usage()
+        """查额度（``/ug/usage``），多账号并发。多账号时各账号条目带
+        ``Trae #N · `` 前缀供前端分组；个别账号失败插 ``query_failed``
+        说明条（benefits 层认这个标记走短缓存）。"""
+        accounts = self._work_accounts()
+        if not accounts:
+            # 单账号 legacy 兜底（迁移前 / PAT）：保持原行为
+            try:
+                data = fetch_ent_usage()
+            except Exception as e:  # noqa: BLE001 — 额度查询失败不阻塞整页
+                log.warning("trae 额度查询失败: %s", e)
+                return None
+            items = self._quota_items(data, label_prefix="")
+            return {"items": items, "level": None}
+
+        multi = len(accounts) > 1
+        if multi:
+            pool = _quota_executor()
+            futures = [pool.submit(self._quota_one, a, i + 1, multi=True)
+                       for i, a in enumerate(accounts)]
+            deadline = time.monotonic() + _QUOTA_ROUND_DEADLINE_S
+            items: list[dict[str, Any]] = []
+            failed: list[str] = []
+            for acct, fut in zip(accounts, futures):  # 按 failover 顺位收集，UI 顺序稳定
+                name = f"#{acct.priority + 1}"
+                try:
+                    its, ok = fut.result(timeout=max(deadline - time.monotonic(), 0.05))
+                except Exception:  # noqa: BLE001 - 超时/异常账号都算失败
+                    its, ok = [], False
+                if not ok:
+                    failed.append(name)
+                else:
+                    items.extend(its)
+            if failed:
+                items.insert(0, {
+                    "label": "Trae 额度查询失败",
+                    "used": None, "total": None,
+                    "remaining": f"{len(failed)}/{len(accounts)} 个账号取不到额度"
+                                 f"（{'、'.join(failed)}）",
+                    "percent": None, "reset_ts": None,
+                    "query_failed": True,
+                })
+        else:
+            its, ok = self._quota_one(accounts[0], 1, multi=False)
+            items = its if ok else []
+
+        return {"items": items, "level": None}
+
+    def quota_epoch(self) -> str:
+        """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。"""
+        try:
+            accts = list_accounts()
+        except Exception:  # noqa: BLE001 - 拿不到就退回常量键
+            return "unknown"
+        return ",".join(f"{a.id}#{a.priority}" for a in accts) or "empty"
+
+    def _quota_one(self, acct: Any, index: int, *, multi: bool
+                   ) -> tuple[list[dict[str, Any]], bool]:
+        """单账号额度查询：``(items, ok)``。同步跑在常驻线程池里。"""
+        try:
+            token, _cred = ensure_account_token(acct.id)
+            data = fetch_ent_usage(token=token, account_id=acct.id)
+        except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞整页
+            log.warning("trae 额度查询失败（%s）: %s", acct.id, e)
+            return [], False
+        prefix = f"Trae #{index} · " if multi else ""
+        return self._quota_items(data, label_prefix=prefix), True
+
+    def _quota_items(self, data: dict[str, Any], *, label_prefix: str) -> list[dict[str, Any]]:
+        """把上游 ``/ug/usage`` 原始响应收拢成统一额度条目列表。"""
         us = data.get("usage_summary", {})
         items: list[dict[str, Any]] = []
         total, consumed = us.get("total_amount"), us.get("consumed_amount")
@@ -165,7 +366,7 @@ class TraeProvider(BaseProvider):
             remaining = None
             if isinstance(total, (int, float)) and isinstance(consumed, (int, float)):
                 remaining = round(total - consumed, 2)
-            items.append({"label": "总额度", "used": consumed, "total": total,
+            items.append({"label": f"{label_prefix}总额度", "used": consumed, "total": total,
                           "remaining": remaining, "percent": percent,
                           # 总额度是所有包的合计，没有单一到期日——到期告警
                           # 由下面各权益包自己承担，合计行不参与
@@ -212,7 +413,7 @@ class TraeProvider(BaseProvider):
                 # 按 0 算会把未知说成满血；这里是接口语义，值为 0 就是没消费。
                 used = round(float(amount), 2) if isinstance(amount, (int, float)) else 0.0
             packs.append({
-                "label": desc,
+                "label": f"{label_prefix}{desc}",
                 "used": used,
                 "total": round(limit_v, 2) if limit_v else None,
                 "percent": round(used / limit_v * 100) if used is not None and limit_v else None,
@@ -224,7 +425,7 @@ class TraeProvider(BaseProvider):
             })
         packs.sort(key=lambda it: it["expire_ts"] or 0)  # 先到期的排前面
         items.extend(packs)
-        return {"items": items, "level": None}
+        return items
 
     async def forward(
         self,
@@ -262,6 +463,71 @@ class TraeProvider(BaseProvider):
             if native_mode else None
         )
 
+        # ---- 多账号 failover：按顺位试可用 work 账号，账号级错误冷却换号 ----
+        # PAT 子类（TraePatProvider）覆写了发送路径且有自己的账号体系，不该被卷
+        # 进 work 多账号循环——直接单次转发（保持它原有的单账号语义）。
+        if self._is_pat_variant():
+            set_current_work_account(None)
+            try:
+                return await self._forward_once(
+                    body, protocol, original, requested_model, prompt,
+                    messages, tools, native, stream, agent_mode,
+                )
+            finally:
+                set_current_work_account(None)
+
+        accounts = failover.available_accounts()
+        if not accounts:
+            raise HTTPException(
+                status_code=429,
+                detail={"error": {
+                    "message": (f"trae work 所有账号均在冷却中：{failover.cooldown_report()}"
+                                "；额度冷却到点自动恢复"),
+                    "type": "rate_limit_error"}})
+        last_exc: BaseException | None = None
+        for i, acct in enumerate(accounts):
+            set_current_work_account(acct.id)
+            try:
+                return await self._forward_once(
+                    body, protocol, original, requested_model, prompt,
+                    messages, tools, native, stream, agent_mode,
+                )
+            except HTTPException as e:
+                last_exc = e
+                # 账号级错误（401 凭据失效 / 429 额度）且还有下一个账号：冷却换号；
+                # 其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
+                if self._is_account_error(e) and i < len(accounts) - 1:
+                    failover.mark_cooldown(
+                        acct.id, quota=e.status_code == 429,
+                        reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
+                    continue
+                raise
+            finally:
+                set_current_work_account(None)
+        # 全部账号失败
+        raise last_exc or HTTPException(status_code=429, detail=failover.cooldown_report())
+
+    def _is_pat_variant(self) -> bool:
+        """PAT 子类标记：TraePatProvider 覆写 ``_pat_variant=True``（见
+        pat_provider.py）。work 多账号 failover 只服务个人 work 通道。"""
+        return bool(getattr(self, "_pat_variant", False))
+
+    @staticmethod
+    def _is_account_error(e: HTTPException) -> bool:
+        """该 HTTPException 是否「换下一个账号可能好转」。
+
+        401 = 凭据失效（换号有意义）；429 = 额度/限流（换号有意义）。502/504 是
+        通道级（换号无意义，所有账号同网关）。其余业务 4xx 换号也无意义。
+        """
+        return e.status_code in (401, 429)
+
+    async def _forward_once(
+        self, body: dict[str, Any], protocol: str, original: dict[str, Any] | None,
+        requested_model: str, prompt: Any, messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]], native: dict[str, Any] | None,
+        stream: bool, agent_mode: bool,
+    ) -> StreamingResponse | JSONResponse:
+        """单账号实际转发（forward 的 failover 循环体）。"""
         if stream:
             include_usage = bool(
                 (body.get("stream_options") or {}).get("include_usage"))
@@ -269,13 +535,24 @@ class TraeProvider(BaseProvider):
             # usage（Claude Code 靠它统计 token），这里强制向 _stream 索取
             if protocol == "anthropic":
                 include_usage = True
-            gen = self._stream(prompt, requested_model,
-                               sanitize=not agent_mode, tools=tools or None,
-                               include_usage=include_usage, native=native)
-            if protocol == "anthropic":
-                gen = _wrap_anthropic_stream(gen, requested_model)
+            raw_gen = self._stream(prompt, requested_model,
+                                   sanitize=not agent_mode, tools=tools or None,
+                                   include_usage=include_usage, native=native)
+            # 首事件闸门：预驱动**原始** _stream 到第一个非心跳事件再决定放行
+            # 还是换号。trae 的 _stream 在等上游时会先吐「: heartbeat」保活——
+            # 那是给下游超时看的，此刻 StreamingResponse 还没建、客户端一个字节
+            # 都没收到，丢掉心跳无影响；第一个语义事件前的账号级错误（读线程透
+            # 传）此刻抛出可安全换号（还没向客户端吐过内容，防重复计费）。见到
+            # 语义事件即 committed，绝不重放。anthropic 包装在闸门之后（包住
+            # 「缓冲 + 续跑」的拼接流）。
+            gated = _gate_first_event(raw_gen)
+            if isinstance(gated, BaseException):
+                raise gated
+            replay = _replay_prefixed(gated.buffered, gated.gen)
+            gen = _wrap_anthropic_stream(replay, requested_model) \
+                if protocol == "anthropic" else replay
             return StreamingResponse(
-                gen,
+                _sync_to_async_iter(gen),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "close"},
             )
@@ -691,3 +968,75 @@ class TraeProvider(BaseProvider):
             },
         }
 
+
+
+# ---------------------------------------------------------------------------
+# 流式首事件闸门（多账号 failover 用）
+# ---------------------------------------------------------------------------
+
+class _GatedStream:
+    """闸门结果：``buffered`` 是预驱动期间攒下的**语义**事件（心跳已丢），
+    ``gen`` 是在途生成器（committed 后续跑它，不重开）。"""
+
+    def __init__(self, buffered: list[str], gen: Any) -> None:
+        self.buffered = buffered
+        self.gen = gen
+
+
+async def _sync_to_async_iter(it: Any) -> Any:
+    """把同步 iterator 包装成 async iterator（喂 StreamingResponse）。
+
+    starlette 的 StreamingResponse 只认 async iterator；本通道的 ``_stream``
+    及 ``_wrap_anthropic_stream`` 都是同步生成器（读线程 + queue 轮询），
+    改造前后都靠这层同步→异步适配喂给 StreamingResponse（由事件循环对
+    ``next()`` 做线程池调度，不在主线程跑同步阻塞代码）。
+    """
+    it = iter(it)
+    while True:
+        try:
+            yield next(it)
+        except StopIteration:
+            return
+
+
+def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":
+    """预驱动 ``_stream``（**同步**生成器）到第一个语义事件。
+
+    ``_stream`` 是读线程 + queue 轮询的同步生成器（非 async）——下游
+    :func:`_wrap_anthropic_stream` 也按同步 ``Iterator[str]`` 消费，本闸门
+    同步迭代即可；StreamingResponse 那边由 starlette 对同步 iterator 做
+    线程池适配（与改造前一致）。
+
+    返回 :class:`_GatedStream`（成功，可放行）或捕获到的异常（换号/透传）。
+    心跳帧（``: heartbeat``）与空帧跳过不缓冲；第一个含 ``data:`` 的语义帧
+    即 committed，连同缓冲返回。任何异常在第一个语义帧**之前**抛出都安全换号
+    （客户端未收字节）。
+    """
+    buffered: list[str] = []
+    try:
+        for piece in gen:
+            text = piece if isinstance(piece, str) else piece.decode("utf-8", "replace")
+            stripped = text.strip()
+            # 心跳/注释帧：保活用，不是内容，丢掉
+            if not stripped or stripped.startswith(":"):
+                continue
+            buffered.append(text)
+            return _GatedStream(buffered, gen)
+        # 没有任何语义事件就结束：空流假成功，当错误交调用方换号
+        return HTTPException(status_code=502, detail="trae stream returned no content")
+    except HTTPException as e:
+        return e
+    except Exception as e:  # noqa: BLE001 — 读线程透传的原始异常
+        return e
+
+
+def _replay_prefixed(buffered: list[str], gen: Any) -> Any:
+    """先补放闸门缓冲的语义帧，再续跑在途生成器（不重开，防二次消费）。
+
+    同步生成器（与 ``_stream`` 同型）；补放后直接 ``for`` 续跑在途迭代器，
+    不重开（重开会二次消费上游 / 触发二次计费）。
+    """
+    for piece in buffered:
+        yield piece
+    for piece in gen:
+        yield piece

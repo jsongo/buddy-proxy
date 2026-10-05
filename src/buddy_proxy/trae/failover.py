@@ -1,19 +1,15 @@
-"""qoder 多账号 failover：稳定主备 + 内存冷却。
+"""trae work 多账号 failover：稳定主备 + 内存冷却。
 
 核心冷却状态机收敛到 :class:`buddy_proxy.core.account_failover.CooldownTracker`
-（antigravity/kimi/trae 共用）。本模块保留 qoder 自己的
-:func:`accounts_status`（字段口径）与 :func:`available_accounts` 的 **region
-过滤**——qoder 的 CN / 全球版账号不通用（连错域 401），请求级 failover 只在
-同区账号间轮转。
+（antigravity/kimi/qoder 共用）。本模块保留 trae 自己的
+:func:`accounts_status`（字段口径：uid/nickname）并持有一个模块级实例。
 
 永远从优先级最高的可用账号开始（登录顺序即优先级），坏账号靠冷却被临时摘出
 候选。冷却状态只放内存（60s / 5min 级，进程重启清零的代价只是每账号重探一次）；
 全账号都冷却时 :func:`available_accounts` 为空，转发直接 429——通道级快速失败。
 
-qoder 的上游错误分两类：401（token 失效）与 403/429（额度/权益门——2026-10-03
-起三方模型被收回就是带内 code 112 的 403）。403 里既可能是账号级（额度尽、
-权益收回）也可能是请求级（模型不存在），按 code 与文案粗分：带 112/pricing 的
-按账号冷却；其余 403 与 4xx 原样透传。
+trae work 的上游错误：401（token 失效）与 403/429（额度/权益）。trae work
+不分 region（全 CN）。
 """
 
 from __future__ import annotations
@@ -23,15 +19,15 @@ import time
 from typing import Any
 
 from ..core.account_failover import CooldownTracker
-from .credentials import AccountRef, list_accounts, load_account_cred, cred_to_credential
+from .credentials import AccountRef, list_accounts, load_account_cred
 
 log = logging.getLogger(__name__)
 
-#: 模块级冷却状态机（账号级，收敛自原 copy-paste 实现）。
+#: 模块级冷却状态机。
 _tracker = CooldownTracker()
 
 #: 活引用 tracker 内部 dict（同 ``_tracker._cooldowns``）：测试直接
-#: ``failover._cooldowns.clear()`` / 赋值造过期条目，薄壳化后保留入口。
+#: ``failover._cooldowns.clear()`` / 赋值造过期条目，保留入口。
 _cooldowns = _tracker._cooldowns
 
 #: 兼容导出（原模块常量，外部可能引用）。
@@ -57,16 +53,9 @@ def cooldown_left(account_id: str) -> tuple[float, str]:
     return _tracker.left(account_id)
 
 
-def available_accounts(region: str | None = None) -> list[AccountRef]:
-    """当前可用的账号（按 failover 顺位）。
-
-    ``region`` 给出时只回该区账号——qoder 的 CN / 全球版账号不通用（连错域
-    401），混域 failover 每轮必败一次，白白多付一次往返。
-    """
-    out = [a for a in list_accounts() if cooldown_left(a.id)[0] <= 0]
-    if region:
-        out = [a for a in out if a.region == region]
-    return out
+def available_accounts() -> list[AccountRef]:
+    """当前可用的账号（按 failover 顺位）：全部账号剔除冷却中的。"""
+    return [a for a in list_accounts() if cooldown_left(a.id)[0] <= 0]
 
 
 def cooldown_report() -> str:
@@ -80,16 +69,14 @@ def accounts_status() -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for i, a in enumerate(accounts):
         cred = load_account_cred(a.id) or {}
-        exp = cred_to_credential(cred).expires_at_ms
+        exp = int(cred.get("expires_at") or 0)
         hours_left = round((exp - time.time()) / 3600, 1) if exp > 0 else None
         left, kind = cooldown_left(a.id)
         items.append({
             "id": a.id,
-            "email": a.email,
-            "name": a.name or a.email or a.id,
-            "region": a.region,
+            "uid": a.uid,
+            "nickname": a.nickname or a.uid or a.id,
             "index": i + 1,
-            "uid": str(cred.get("uid") or ""),
             "token": "ok" if cred.get("refresh_token") else "missing",
             "hours_left": max(hours_left, 0.0) if hours_left is not None else None,
             "cooling": ([{"kind": kind, "minutes_left": round(left / 60, 1)}] if left > 0 else []),

@@ -361,7 +361,10 @@ class Handler(BaseHTTPRequestHandler):
                 "machine_id": login_state.get("machine_id", ""),
                 "device_id": login_state.get("device_id", ""),
             }
-            _write_cred_secure(OUT_PATH, out)
+            # 落盘走多账号存储：按 uid/refresh_token upsert（重登同号更新、
+            # 新号追加为新账号）。save_account_cred 内部 fcntl 锁 + 0600。
+            from buddy_proxy.trae.credentials import save_account_cred
+            ref = save_account_cred(out)
             # 先写终态再删 STATE：CLI 优先读 RESULT，删除 STATE 是旧版兜底信号
             _write_result(
                 True,
@@ -375,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
             STATE_PATH.unlink(missing_ok=True)
             msg = f"<h3>登录成功！</h3><p>uid={html.escape(out['uid'])} nickname={html.escape(out['nickname'])}</p><p>凭证已保存，可以关闭此页面</p>"
             self.wfile.write(msg.encode())
-            print(f"\n[OK] 凭证已保存: {OUT_PATH}")
+            print(f"\n[OK] 凭证已保存（账号 #{ref.priority + 1}）: {ref.id}")
             print(f"    uid={out['uid']} nickname={out['nickname']}")
             print(f"    expires_at={out['expires_at']}")
 

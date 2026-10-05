@@ -175,10 +175,15 @@ uv run trae-cli usage             # 权益/用量（总额、已用比例、权�
 uv run trae-cli chat -m glm-5.2 -q "你好"    # 发一条对话测试
 ```
 
-认证自动加载：优先 Work 凭证 `~/.buddy-proxy/trae_work.json`（由
-`python -m buddy_proxy.auth.trae_work_login` 或 `buddy login trae` 生成；遗留的
-`~/.ethan/trae_work.json` 会在首次读取时自动迁移），其次解密本机 Trae IDE `storage.json`，
-无需手动配置 token。
+认证自动加载：优先 Work 多账号状态目录 `~/.buddy-proxy/trae/`（`index.json` + 每账号
+一份 0600 cred；由 `python -m buddy_proxy.auth.trae_work_login` 或 `buddy login trae`
+生成/追加，按 uid/refresh_token upsert——重登同号更新、新号追加）。历史单账号
+`~/.buddy-proxy/trae_work.json`（及遗留 `~/.ethan/trae_work.json`）会在首次读取时自动
+迁移为账号 #1。其次解密本机 Trae IDE `storage.json`，无需手动配置 token。
+
+Work 通道多账号**主备 failover**：按登录顺位优先用 #1，账号级错误（401 凭据失效 /
+429 额度）冷却 60s/5min 后自动换下一个；签到/额度**每账号都查都领**，管理页有
+`▲▼` 顺位调整 / `✕` 删除面板（同 qoder/kimi/antigravity）。
 
 > **`buddy login trae` 排障**：若浏览器显示「登录成功」而 CLI 一直停在等待界面，
 > 九成是登录 URL 的参数没和 Trae CN 客户端对齐。关键项 `plugin_version` 必须是

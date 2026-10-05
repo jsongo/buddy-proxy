@@ -24,6 +24,10 @@ class TraePatProvider(TraeProvider):
     name = "Trae PAT (服务账号直连)"
     # 打卡/积分是个人账号专属，服务账号不支持（避免出现在 /ui 打卡列表里）
     supports_checkin = False
+    # PAT 子类标记：provider.forward 的多账号 failover 只服务个人 work 通道。
+    # TraePatProvider 覆写了发送路径且有自己的账号体系，必须单账号直通——
+    # 否则 forward 循环会拿 work 账号列表去跑 PAT 请求（串号 + 错误账号标记）。
+    _pat_variant = True
 
     def models(self) -> Sequence[dict[str, Any]]:
         if not pat_enabled():

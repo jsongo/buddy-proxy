@@ -129,13 +129,20 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
 
     def _report_ok() -> int:
         try:
-            cred = json.loads(OUT_PATH.read_text())
-            expires = cred.get("expires_at", "")
-            expires = expires[:10] if isinstance(expires, str) else expires
-            print(
-                f"[OK] Trae Work 登录完成：uid={cred.get('uid')} "
-                f"昵称={cred.get('nickname')} 有效期至={expires}"
-            )
+            from buddy_proxy.trae.credentials import list_accounts, load_account_cred
+            accounts = list_accounts()
+            if accounts:
+                cred = load_account_cred(accounts[0].id) or {}
+                expires = cred.get("expires_at", "")
+                expires = expires[:10] if isinstance(expires, str) else expires
+                n = len(accounts)
+                suffix = f"（共 {n} 个账号）" if n > 1 else ""
+                print(
+                    f"[OK] Trae Work 登录完成{suffix}：uid={cred.get('uid')} "
+                    f"昵称={cred.get('nickname')} 有效期至={expires}"
+                )
+            else:
+                print("[OK] Trae Work 登录完成")
         except Exception:
             print("[OK] Trae Work 登录完成")
         return 0

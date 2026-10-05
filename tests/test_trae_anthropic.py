@@ -100,6 +100,17 @@ def trae_env(monkeypatch):
     from buddy_proxy.trae import provider as _trae_provider_impl
     monkeypatch.setattr(_trae_provider_impl, "send_trae_chat", fake_send)
     monkeypatch.setattr(_trae_provider_impl, "_auth", lambda: ("fake-token", "fake-uid"))
+    # 注入一个假 work 账号（conftest 已隔离 trae state 目录）。多账号 failover 后
+    # forward 走 failover.available_accounts() → list_accounts() 取当前账号 cred，
+    # 没有账号会 429（通道耗尽）。
+    from buddy_proxy.trae.credentials import save_account_cred
+    save_account_cred({
+        "uid": "fake-uid-1", "nickname": "Fake",
+        "access_token": "fake-token", "refresh_token": "fake-rt",
+        "expires_at": int(time.time()) + 3600,
+        "machine_id": "m", "device_id": "d", "api_host": "h",
+        "enterprise_id": "",
+    })
     # 本文件验证文本协议路径（教学 + 文本解析）；原生 function calling 通道
     # 的离线测试见 test_trae_native_tools.py
     monkeypatch.setattr(_trae_provider_impl, "_NATIVE_TOOLS_ENABLED", False)
