@@ -1008,9 +1008,12 @@ def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":
     线程池适配（与改造前一致）。
 
     返回 :class:`_GatedStream`（成功，可放行）或捕获到的异常（换号/透传）。
-    心跳帧（``: heartbeat``）与空帧跳过不缓冲；第一个含 ``data:`` 的语义帧
-    即 committed，连同缓冲返回。任何异常在第一个语义帧**之前**抛出都安全换号
-    （客户端未收字节）。
+    心跳帧（``: heartbeat``）与空帧跳过不缓冲。第一个含 ``data:`` 的语义帧
+    默认即 committed；**但若该帧是账号级错误**（``_stream`` 的 ``except
+    HTTPException`` 把 401/429 yield 成 ``{"error": {...}}`` 错误 chunk 再
+    return，是假成功）则**不缓冲、直接返回对应 HTTPException** 让 failover
+    换号——此时客户端未收字节，换号安全。真正的异常在第一个语义帧**之前**
+    抛出也都安全换号（客户端未收字节）。
     """
     buffered: list[str] = []
     try:
@@ -1020,6 +1023,11 @@ def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":
             # 心跳/注释帧：保活用，不是内容，丢掉
             if not stripped or stripped.startswith(":"):
                 continue
+            # 账号级错误帧（_stream 把 HTTPException yield 成 error chunk）：
+            # 不缓冲、直接当异常换号，别让它假成功混过闸门。
+            err = _account_error_from_frame(stripped)
+            if err is not None:
+                return err
             buffered.append(text)
             return _GatedStream(buffered, gen)
         # 没有任何语义事件就结束：空流假成功，当错误交调用方换号
@@ -1028,6 +1036,41 @@ def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":
         return e
     except Exception as e:  # noqa: BLE001 — 读线程透传的原始异常
         return e
+
+
+#: 错误 chunk 里判定「换下一个账号可能好转」的 HTTP 状态码（与
+#: ``TraeProvider._is_account_error`` 一致）。
+_ACCOUNT_ERROR_CODES = (401, 429)
+
+
+def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":
+    """从单个 SSE 帧里识别账号级错误（``{"error": {"code": 401|429, ...}}``）。
+
+    ``_stream`` 的 ``except HTTPException`` 会把账号级错误 yield 成
+    ``error_chunk``（payload 是 ``{"error": {"message", "type", "code"}}``）
+    再 ``return``——那是假成功。本函数在闸门里把这类帧还原成 HTTPException，
+    让 forward 的 failover 循环冷却换号。非账号级错误帧返回 None（放行，由
+    下游/包装层按原样处理）。
+    """
+    if not stripped_frame.startswith("data:"):
+        return None
+    payload = stripped_frame[5:].strip()
+    try:
+        data = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    err = data.get("error")
+    if not isinstance(err, dict):
+        return None
+    try:
+        code = int(err.get("code"))
+    except (TypeError, ValueError):
+        return None
+    if code not in _ACCOUNT_ERROR_CODES:
+        return None
+    return HTTPException(status_code=code, detail=str(err.get("message") or "trae upstream error"))
 
 
 def _replay_prefixed(buffered: list[str], gen: Any) -> Any:
