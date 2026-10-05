@@ -64,7 +64,21 @@ async function claimNow(pid) {
     const r = await api('/ui/api/checkin', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({provider: pid})});
-    toast(r.ok ? `✓ ${pid} 打卡成功` : `打卡失败: ${r.message || r.error || '未知原因'}`, !r.ok);
+    if (!r.ok) {
+      toast(`打卡失败: ${r.message || r.error || '未知原因'}`, true);
+    } else if (Array.isArray(r.accounts) && r.accounts.length > 1) {
+      // 多账号通道（trae）：逐账号报结果——「成功」两个字盖不住个别账号的失败
+      const bad = r.accounts.filter(a => a.ok === false);
+      const got = r.accounts.filter(a => a.ok && a.credits != null)
+        .map(a => `${a.name || '#' + a.index} +${fmtCredit(a.credits)}`).join('、');
+      if (bad.length) {
+        toast(`✓ ${pid} 部分失败：${got ? got + '；' : ''}${bad.map(a => `${a.name || '#' + a.index} ${a.message || '失败'}`).join('、')}`, true);
+      } else {
+        toast(`✓ ${pid} 全部签到成功${got ? '：' + got : ''}`);
+      }
+    } else {
+      toast(`✓ ${pid} 打卡成功`);
+    }
     refreshAll();
   } catch (e) { toast('打卡失败: ' + e.message, true); }
 }

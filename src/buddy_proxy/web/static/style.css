@@ -282,6 +282,13 @@
   .benefit-row { display: grid; align-items: center; gap: 10px 14px;
                  grid-template-columns: auto minmax(0, 1fr) auto; }
   .ck-pkg { padding: 12px 14px; }
+  /* 多账号 per-account 明细（trae）：子卡内底部逐账号一行。缩进对齐通道名
+     （色块 9px + gap 9px），徽标复用 .br-state，失败原因跟在名字后。 */
+  .ck-accts { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line);
+              display: flex; flex-direction: column; gap: 5px; }
+  .ck-acct { display: flex; align-items: center; gap: 8px; min-width: 0;
+             padding-left: 18px; flex-wrap: wrap; }
+  .ck-acct-name { font-size: 11.5px; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .br-id { display: flex; align-items: center; gap: 9px; min-width: 0; }
   /* 通道色块：用 pcolor() 上色，与日历 tooltip / 图表里的同通道颜色一致 */
   .br-dot { flex: none; width: 9px; height: 9px; border-radius: 3px; }

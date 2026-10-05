@@ -223,6 +223,13 @@ silent:
   real claim timestamps and must be labelled `inferred` — the UI shows "≈".
   When `next_ts` cannot be computed (season over, campaign inactive), the field
   is omitted rather than filled with a stale timestamp.
+- **Multi-account channels report per-account check-in detail.** Trae's
+  aggregated badge (`checked_in`/`claimable`) cannot say *which* account
+  failed, so `checkin_status` (multi-account) and `checkin_claim` attach an
+  `accounts` list (`index`/`name`/state, or `error: 查询失败` for a failed
+  probe) and the check-in card renders one line per account; the claim toast
+  reports each account's outcome too. Single-account responses omit the list
+  — the badge *is* the account's state, and a one-row breakdown is noise.
 - **A cached status snapshot expires at its own rotation, not just its TTL.**
   The UI counts down to `next_ts`, so the refresh right after that moment must
   actually show the new state — but the 300 s snapshot cache would otherwise

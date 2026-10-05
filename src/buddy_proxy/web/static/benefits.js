@@ -204,6 +204,18 @@ function renderBenefits() {
     if (c.streak_days >= 2) chips.push(`连续 ${c.streak_days} 天`);
     if (c.activity_name) chips.push(c.activity_name);
     const meta = chips.map(t => `<span class="br-chip">${esc(t)}</span>`).join('');
+    // 多账号通道的 per-account 明细（trae checkin_status/checkin_claim 下发的
+    // accounts 列表）：一行一账号，徽标 + 失败原因。整体聚合态说不清「哪个
+    // 号没签上」，用户反馈过这个盲点。
+    const acctsHtml = (c.accounts || []).map(a => {
+      const s = a.error ? `<span class="br-state bad" title="${esc(a.error)}">查询失败</span>`
+        : a.inactive ? '<span class="br-state">无活动</span>'
+        : a.ok === false ? '<span class="br-state bad">失败</span>'
+        : (a.claimable ? '<span class="br-state pending">可领</span>'
+          : '<span class="br-state ok">已签到</span>');
+      const extra = a.message ? `<span class="muted" style="font-size:11px">${esc(a.message)}</span>` : '';
+      return `<div class="ck-acct">${s}<span class="ck-acct-name">${esc(a.name || ('#' + a.index))}</span>${extra}</div>`;
+    }).join('');
     // 照 antigravity 面板的卡中卡（pat-pkg）包一层：两列平摊时裸行 + 底线
     // 会把左右两列糊成一片，子卡（亮底 + 描边 + 圆角）分隔一眼能看出来
     return `<div class="pat-pkg ck-pkg">
@@ -217,6 +229,7 @@ function renderBenefits() {
           <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
         </div>
       </div>
+      ${acctsHtml ? `<div class="ck-accts">${acctsHtml}</div>` : ''}
     </div>`;
   }).join('') : '<div class="empty" style="grid-column:1/-1;padding:14px 0">当前没有支持打卡的通道</div>';
   // 数据换了新的一批 data-next-ts，重算一次并决定要不要起 ticker

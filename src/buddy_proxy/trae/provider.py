@@ -178,15 +178,19 @@ class TraeProvider(BaseProvider):
         if len(accounts) == 1:
             return self._checkin_status_for_account(accounts[0], index=1, multi=False)
 
-        # 多账号：并查，聚合任一可领 / 全部已签
+        # 多账号：并查，聚合任一可领 / 全部已签；per-account 明细放 ``accounts``
+        # （管理页签到卡逐账号渲染「#N 已签 / 可领 / 查询失败」）。
         claimable_accts: list[str] = []
         signed_accts: list[str] = []
         failed_accts: list[str] = []
+        acct_details: list[dict[str, Any]] = []
         enabled_any = False
         for i, acct in enumerate(accounts, 1):
+            name = acct.nickname or acct.uid or acct.id
             st = self._checkin_status_for_account(acct, index=i, multi=True)
             if st is None:
                 failed_accts.append(f"#{i}")
+                acct_details.append({"index": i, "name": name, "error": "查询失败"})
                 continue
             if not st.get("inactive"):
                 enabled_any = True
@@ -194,11 +198,19 @@ class TraeProvider(BaseProvider):
                 claimable_accts.append(f"#{i}")
             elif st.get("checked_in"):
                 signed_accts.append(f"#{i}")
+            acct_details.append({
+                "index": i,
+                "name": name,
+                "checked_in": bool(st.get("checked_in")),
+                "claimable": bool(st.get("claimable")),
+                "inactive": bool(st.get("inactive")),
+            })
         status: dict[str, Any] = {
             "checked_in": bool(signed_accts) and not claimable_accts,
             "claimable": bool(claimable_accts),
             "inactive": not enabled_any and not claimable_accts and not signed_accts,
             "message": "",
+            "accounts": acct_details,
         }
         if claimable_accts:
             status["message"] = f"账号 {'、'.join(claimable_accts)} 可领"
@@ -261,11 +273,31 @@ class TraeProvider(BaseProvider):
                 "extra_credits": data.get("credits_granted", data.get("extra_credits")),
                 "message": data.get("message", ""),
             }
+        if len(accounts) == 1:
+            # 单账号直通：不带 accounts 明细（与 checkin_status 的单账号分支对称，
+            # 徽标本身就是它的状态，逐账号展开纯属噪音）
+            acct = accounts[0]
+            try:
+                token, _cred = ensure_account_token(acct.id)
+                data = claim_checkin_credits(token=token, account_id=acct.id)
+            except Exception as e:  # noqa: BLE001 — 与多账号循环同款容错
+                log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
+                raise RuntimeError(str(e)[:200]) from e
+            if data.get("code") not in (0, None):
+                raise RuntimeError(data.get("message") or json.dumps(data, ensure_ascii=False)[:200])
+            granted = data.get("credits_granted", data.get("extra_credits"))
+            return {
+                "checked_in": True,
+                "extra_credits": granted,
+                "message": data.get("message", ""),
+            }
 
         total_credits: float = 0.0
         any_claimed = False
         messages: list[str] = []
+        acct_details: list[dict[str, Any]] = []
         for i, acct in enumerate(accounts, 1):
+            name = acct.nickname or acct.uid or acct.id
             tag = f"#{i}"
             try:
                 token, _cred = ensure_account_token(acct.id)
@@ -276,15 +308,25 @@ class TraeProvider(BaseProvider):
                     if isinstance(granted, (int, float)):
                         total_credits += float(granted)
                     messages.append(f"{tag} 已领 {granted or ''}".strip())
+                    acct_details.append({
+                        "index": i, "name": name, "ok": True,
+                        "credits": granted if isinstance(granted, (int, float)) else None,
+                        "message": str(data.get("message") or "")[:80],
+                    })
                 else:
-                    messages.append(f"{tag} 失败：{str(data.get('message'))[:60]}")
+                    msg = str(data.get("message"))[:60]
+                    messages.append(f"{tag} 失败：{msg}")
+                    acct_details.append({"index": i, "name": name, "ok": False, "message": msg})
             except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号
                 log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
-                messages.append(f"{tag} 失败：{str(e)[:60]}")
+                msg = str(e)[:60]
+                messages.append(f"{tag} 失败：{msg}")
+                acct_details.append({"index": i, "name": name, "ok": False, "message": msg})
         return {
             "checked_in": any_claimed,
             "extra_credits": total_credits if any_claimed else None,
             "message": "；".join(messages) or "没有可领取的账号",
+            "accounts": acct_details,
         }
 
     def quota(self) -> dict[str, Any] | None:
