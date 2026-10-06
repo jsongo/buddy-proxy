@@ -281,7 +281,7 @@ The quota panel reads `/api/monitor/usage/quota/limit`. Its `limits[]` entries s
 
 ### ZCode Start Plan response errors
 
-For `zcode-start/glm-5.3-flash`, a successful upstream reply must be an Anthropic Message (or a stream starting with `message_start`). An upstream HTTP 200 containing a quota/error JSON object or a stream with no valid start event now returns HTTP 429 for quota errors (including code `1308`) or HTTP 502 for malformed replies, rather than passing a misleading HTTP 200 to Claude Code. When model-order routing is configured, these pre-commit failures can fail over to the next candidate.
+For `zcode-start/glm-5.3-flash`, a successful upstream reply must be an Anthropic Message (or a stream starting with `message_start`). An upstream HTTP 200 containing a quota/error JSON object or a stream with no valid start event now returns HTTP 429 for quota errors (including code `1308`) or HTTP 502 for malformed replies, rather than passing a misleading HTTP 200 to Claude Code. When model-order routing is configured, these pre-commit failures can fail over to the next candidate. The OpenAI-compatible streaming converter also accepts upstream SSE framed with either LF or CRLF, including line endings split across network chunks.
 
 ### GLM provider (official, optional)
 

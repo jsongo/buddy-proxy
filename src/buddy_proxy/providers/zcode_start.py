@@ -550,8 +550,13 @@ async def _anthropic_sse_to_openai_stream(
         buf = b""
         async for raw in response.aiter_bytes():
             buf += raw
-            while b"\n\n" in buf:
-                frame, buf = buf.split(b"\n\n", 1)
+            # 上游合法 SSE 可用 CRLF 分隔，按完整行寻找帧界，不依赖 \n\n 子串。
+            while True:
+                normalized = buf.replace(b"\r\n", b"\n")
+                end = normalized.find(b"\n\n")
+                if end < 0:
+                    break
+                frame, buf = normalized[:end], normalized[end + 2:]
                 event_name = ""
                 data_lines: list[bytes] = []
                 for line in frame.split(b"\n"):
