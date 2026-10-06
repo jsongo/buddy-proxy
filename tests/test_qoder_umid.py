@@ -138,6 +138,27 @@ def test_binary_candidates_env_override(monkeypatch):
     assert all("Qoder" in p for p in umid._binary_candidates("global"))
 
 
+def test_binary_candidates_cover_user_level_applications():
+    """用户级安装（~/Applications）也要覆盖：前缀替换，不能拼出 Applications/Applications。"""
+    cands = umid._binary_candidates("global")
+    assert "/Applications/Qoder.app/Contents/Resources/umid/runtime-info" in cands
+    home_app = str(
+        umid.Path.home() / "Applications/Qoder.app/Contents/Resources/umid/runtime-info"
+    )
+    assert home_app in cands
+    assert not any("Applications/Applications" in p for p in cands)
+
+
+def test_machine_identity_logs_when_binary_missing(monkeypatch, caplog):
+    """二进制缺失要有 debug 留痕（回退静态指纹后海外区新号会误报无可领，排查靠它）。"""
+    monkeypatch.setattr(umid, "_find_binary", lambda region: None)
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="buddy_proxy.qoder.umid"):
+        assert machine_identity("global", "u1") is None
+    assert any("回退静态指纹" in r.message for r in caplog.records)
+
+
 # --- provider 集成 ---------------------------------------------------------
 
 

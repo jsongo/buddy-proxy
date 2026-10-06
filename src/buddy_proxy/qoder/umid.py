@@ -130,6 +130,10 @@ def machine_identity(region_key: str, account: str) -> MachineIdentity | None:
             # 连 BaseException 都吞：这里跑在 to_thread 工作线程里，任何异常
             # 泄漏都会炸掉整页签到状态聚合；指纹是纯增益，拿不到就回退静态头。
             log.warning("qoder runtime-info 指纹生成失败（%s）: %s", region_key, exc)
+    else:
+        # 二进制缺失也留痕（负缓存期内只打一次）：没装桌面端时海外区新号会
+        # 拿不到签到条目、界面误报「无可领签到奖励」——没有这行日志只能靠猜。
+        log.debug("qoder runtime-info 二进制未找到（%s），活动面回退静态指纹", region_key)
     ttl = _IDENTITY_TTL_S if value is not None else _FAILURE_TTL_S
     _cache[key] = (now + ttl, value)
     return value
