@@ -91,11 +91,13 @@ def test_429_marks_quota_cooldown():
             return ei.value
     exc = asyncio.run(run())
     assert exc.status_code == 429
-    # u1 是 429（账号级）→ 冷却 quota 档；u2 是最后一个账号，直接 raise 不再冷却
+    # u1 是 429（账号级）→ 冷却 quota 档；u2 是最后一个账号也**照常冷却**
+    #（2026-10-06 行为变更：最后账号失败此前不落冷却，下一轮请求还会先打它、
+    # 白吃一次同样的失败才轮到别人）
     _l1, k1 = failover.cooldown_left(accounts[0].id)
     _l2, k2 = failover.cooldown_left(accounts[1].id)
     assert k1 == "quota"
-    assert k2 == "" and _l2 == 0.0
+    assert k2 == "quota" and _l2 > 0.0
 
 
 def test_last_account_error_reraised():
@@ -230,3 +232,87 @@ def test_pat_variant_error_reraised_no_cooldown():
     assert exc.status_code == 429
     assert failover.cooldown_left("u1")[0] == 0
     assert failover.cooldown_left("u2")[0] == 0
+
+
+# -- 上游 SSE 额度码的账号级分类（2026-10-06：双账号一空一满仍报 4008） ----
+#
+# 根因：上游 error 帧的 code 是**上游码**（4008 等），不是 HTTP 状态码——
+# 非流式 _collect 一律 raise 502、流式闸门只认 401/429 两种形态，4008 两条
+# 路都进不了 failover 循环的账号级分支，A 号没额度 B 号有钱也直接透传报错。
+
+
+def test_sse_error_status_classification():
+    from buddy_proxy.trae.sse import _sse_error_status
+
+    # 额度类（账号级，换号可能好转）→ 429
+    for code in (4008, 4011, 4021, 4031):
+        assert _sse_error_status(code) == 429, code
+    # 鉴权类 → 401
+    for code in (1001, 4010):
+        assert _sse_error_status(code) == 401, code
+    # 通道级/未知 → 502（不触发换号）
+    for code in (4001, 4013, "x", None):
+        assert _sse_error_status(code) == 502, code
+
+
+def test_gate_reclaims_upstream_quota_code_frame():
+    """流式闸门：error_chunk 带上游码（4008）也要还原成 HTTPException 换号。"""
+    from buddy_proxy.trae.provider import _account_error_from_frame
+
+    def frame(code):
+        payload = json.dumps({"error": {"message": "boom", "type": "upstream_error",
+                                        "code": code}}, ensure_ascii=False)
+        return f"data: {payload}"
+
+    # 上游额度码 → 429；鉴权码 → 401
+    assert _account_error_from_frame(frame(4008)).status_code == 429
+    assert _account_error_from_frame(frame(4031)).status_code == 429
+    assert _account_error_from_frame(frame(1001)).status_code == 401
+    # HTTP 形态（_stream 自己抛的 HTTPException）照旧
+    assert _account_error_from_frame(frame(401)).status_code == 401
+    assert _account_error_from_frame(frame(429)).status_code == 429
+    # 通道级（4001/未知码/非 error 帧）→ None 放行
+    assert _account_error_from_frame(frame(4001)) is None
+    assert _account_error_from_frame(frame("x")) is None
+    assert _account_error_from_frame('data: {"choices": []}') is None
+
+
+def test_collect_maps_upstream_quota_frame_to_429(monkeypatch):
+    """非流式：上游 error 帧 code=4008 → HTTPException 429（进 failover 循环）。"""
+    raw = ('event: error\n'
+           'data: {"code": 4008, "message": "Your requests have exceeded the quota."}\n\n')
+    monkeypatch.setattr("buddy_proxy.trae.provider.send_trae_chat",
+                        lambda *a, **k: raw)
+    p = TraeProvider()
+    with pytest.raises(HTTPException) as ei:
+        p._collect([{"role": "user", "content": "hi"}], "glm-5.2")
+    assert ei.value.status_code == 429
+    assert "4008" in str(ei.value.detail)
+
+
+def test_forward_4008_account_fails_over_to_funded_account():
+    """端到端形状：#1 号额度尽（上游 4008 → 429）、#2 号有钱 → 自动换号成功。"""
+    accounts = _seed_accounts("empty", "funded")
+    p = TraeProvider()
+    calls: list[str] = []
+
+    async def fake_forward_once(body, protocol, original, requested_model,
+                                prompt, messages, tools, native, stream, agent_mode):
+        acct = _CURRENT_WORK_ACCOUNT.get()
+        calls.append(acct)
+        if acct == accounts[0].id:
+            # _collect 把上游 4008 映射成 429 后抛出，detail 是友好中文文案
+            raise HTTPException(status_code=429, detail="Trae 账号请求额度已超限 (code: 4008)")
+        return _ok_response()
+
+    async def run():
+        with mock.patch.object(TraeProvider, "_forward_once", side_effect=fake_forward_once):
+            return await _forward(p)
+    resp = asyncio.run(run())
+
+    assert resp.status_code == 200
+    assert calls == [accounts[0].id, accounts[1].id]
+    _left, kind = failover.cooldown_left(accounts[0].id)
+    assert kind == "quota" and _left > 0
+    # 用尽的号进 quota 冷却后，后续请求直接从 funded 开始，不再先撞 4008
+    assert failover.available_accounts()[0].id == accounts[1].id

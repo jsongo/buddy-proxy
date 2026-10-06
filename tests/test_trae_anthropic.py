@@ -30,6 +30,16 @@ from buddy_proxy.protocols.anthropic_adapter import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_trae_cooldowns():
+    """额度类上游错误（4031/4008…）会落 5 分钟冷却；不清理会污染同进程后续用例。"""
+    from buddy_proxy.trae import failover
+
+    failover._cooldowns.clear()
+    yield
+    failover._cooldowns.clear()
+
+
 # ---------------------------------------------------------------------------
 # Trae 上游 SSE fixture（send_trae_chat 的返回值形态）
 # ---------------------------------------------------------------------------
@@ -691,34 +701,37 @@ def test_messages_tool_result_roundtrip(client, trae_env):
 
 
 def test_messages_stream_upstream_error(client, trae_env):
-    """上游 event: error（如 4031 配额耗尽）→ anthropic event: error，不伪装成正文。"""
+    """上游 event: error（4031 配额耗尽）在**首事件前**被闸门还原成 HTTP 429。
+
+    4031/4008 属账号级额度错误（2026-10-06 起），流式闸门在客户端未收字节时
+    直接还原 HTTPException 交 failover 换号——单账号场景透传 429（anthropic
+    标准错误形状）。核心语义不变：错误绝不伪装成正文/message_start。
+    """
     state, _ = trae_env
     state._upstream_sse = (
         'event: error\ndata: {"code": 4031, "message": ""}\n\n'
         "event: done\ndata: {}\n\n"
     )
     r = client.post("/v1/messages", json=_anthropic_body(stream=True))
-    assert r.status_code == 200
-
-    events = _parse_sse_events(r.text)
-    # 第一个事件是 error，不含 message_start / 伪正文（否则 Claude Code 会循环）
-    names = [n for n, _ in events]
-    assert names[0] == "error"
-    assert "message_start" not in names
-    err = events[0][1]
-    assert err["type"] == "error"
-    assert "4031" in err["error"]["message"]
+    assert r.status_code == 429
+    body = r.json()
+    assert body["type"] == "error"
+    assert "4031" in body["error"]["message"]
 
 
 def test_messages_nonstream_upstream_error(client, trae_env):
-    """非流式上游错误 → Anthropic 标准错误形状（而非 FastAPI detail 包裹）。"""
+    """非流式上游错误 → Anthropic 标准错误形状（而非 FastAPI detail 包裹）。
+
+    4031 是账号级额度码（2026-10-06 起 → HTTP 429 进 failover 分类），不再是
+    一律 502；错误形状（type=error / api_error）不变。
+    """
     state, _ = trae_env
     state._upstream_sse = (
         'event: error\ndata: {"code": 4031, "message": ""}\n\n'
         "event: done\ndata: {}\n\n"
     )
     r = client.post("/v1/messages", json=_anthropic_body(stream=False))
-    assert r.status_code == 502
+    assert r.status_code == 429
     body = r.json()
     assert body["type"] == "error"
     assert body["error"]["type"] == "api_error"

@@ -27,6 +27,16 @@ from buddy_proxy.trae.credentials import save_account_cred
 from buddy_proxy.trae.provider import TraeProvider
 
 
+@pytest.fixture(autouse=True)
+def _clear_trae_cooldowns():
+    """额度类上游错误（4031/4008…）会落 5 分钟冷却；不清理会污染同进程后续用例。"""
+    from buddy_proxy.trae import failover
+
+    failover._cooldowns.clear()
+    yield
+    failover._cooldowns.clear()
+
+
 # ---------------------------------------------------------------------------
 # 上游 SSE fixture：原生通道响应形态（event:output 携带结构化 tool_calls）
 # ---------------------------------------------------------------------------
@@ -300,7 +310,8 @@ def test_native_non_4001_error_no_fallback(client, native_env):
     state, native_calls, legacy_calls = native_env
     state._native_sse = SSE_NATIVE_ERROR_4031
     r = client.post("/v1/chat/completions", json=_chat_body(stream=False))
-    assert r.status_code == 502
+    # 4031 是账号级额度码（2026-10-06 起 → 429 进 failover 分类），不再一律 502
+    assert r.status_code == 429
     assert "4031" in r.json().get("detail", "") or "4031" in r.text
     assert legacy_calls == []
 
