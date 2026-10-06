@@ -69,7 +69,8 @@ evict_port_squatters() {
     local holder job
     holder="$(lsof -ti tcp:"$PROXY_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
     [[ -n "$holder" ]] || return 0
-    job="$(launchctl print "gui/$UID/$SERVICE_LABEL" 2>/dev/null | awk '/^	pid = /{print $3; exit}' || true)"
+    # [:space:] 而非字面 tab：tab 藏在源码里，编辑器一转空格就静默失配
+    job="$(launchctl print "gui/$UID/$SERVICE_LABEL" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}' || true)"
     [[ "$holder" == "$job" ]] && return 0  # 就是本 job 的进程，交给 kickstart/bootout 流转
     if ps -o command= -p "$holder" 2>/dev/null | grep -q "buddy_proxy"; then
         log "清理占用 ${PROXY_PORT} 的野实例 pid=${holder}（非 launchd job 进程，留着必成 errno 48 死循环）"
