@@ -31,6 +31,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 # static/* 整目录带上：UI 拆分后除 index.html 还有 css/js，别只挑 html
 "buddy_proxy.web" = ["models_config.json", "static/*"]
+# 随包的 per-account 覆盖表/静态目录，漏带会在 wheel 安装下静默退回兜底
+"buddy_proxy.qoder" = ["models.json"]
+"buddy_proxy.kimi" = ["models.json"]
 
 [dependency-groups]
 dev = [

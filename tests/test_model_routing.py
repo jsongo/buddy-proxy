@@ -427,17 +427,18 @@ def test_real_qoder_yields_auto_to_codebuddy():
 
 
 def test_real_qoder_and_zcode_overlap_is_resolved_by_registration_order():
-    """``glm-5.3`` 不再由 qoder 认领——三方模型已被上游收回。
+    """``glm-5.3`` 恢复由 qoder 精确认领（2026-10-05 目录恢复）。
 
-    2026-10-03 起 qoder 目录里三方模型整批 ``enable=false``（调用 403
-    code 112），``models()`` 不再发布 ``qoder/glm-5.3`` 这类 id，精确轮
-    自然不再认领——裸名 ``glm-5.3`` 由此完全归 zcode（它真有这个模型）。
-    这条改为锁「qoder 让路」：哪天上游恢复了，这里是第一个该改回的地方。
+    2026-10-03 曾实测三方模型整批 enable=false，当时 qoder 在精确轮让路、
+    裸名 ``glm-5.3`` 完全归 zcode；2026-10-05 复测目录恢复（权益收回是
+    账号级分桶，全量账号 enable=true），qoder 真的又能服务这个模型，恢复
+    精确认领。与 zcode 的重叠不再靠「让路」解决，而是由 **model_order**
+    仲裁（用户配置里 glm-5.3 的候选序 zcode 前置、qoder 兜底）。
     """
     q = _real_qoder()
     for name in ("glm-5.3", "glm-5.3-flash"):
-        assert q.accepts_model(name, aliases=False) is False, (
-            f"{name} 已被上游停用，qoder 不该再认领（流量应走 zcode）"
+        assert q.accepts_model(name, aliases=False) is True, (
+            f"{name} 目录已恢复，qoder 应在精确轮认领（顺序由 model_order 定）"
         )
 
 

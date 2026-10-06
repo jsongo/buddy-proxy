@@ -67,12 +67,13 @@ async def ui_stats(request: Request):
     # models_config，其余通道取各自 models() 声明的 credits。
     snap["credits_map"] = {}
     for m in load_models_from_local_config():
-        if m.get("credits"):
+        # `is not None` 而非真值判断：0.0 是合法倍率（免费模型），真值判断会吞掉
+        if m.get("credits") is not None:
             snap["credits_map"][f"codebuddy/{m['id']}"] = m.get("credits")
     for p in getattr(state, "providers", {}).values():
         prefix = f"{p.id}/"
         for m in p.models():
-            if m.get("credits"):
+            if m.get("credits") is not None:
                 mid = str(m.get("id") or "")
                 # models() 的 id 可能已带「provider/」前缀（如 qoder 的
                 # to_openai_model），剥掉再拼键——否则键变成 qoder/qoder/x，

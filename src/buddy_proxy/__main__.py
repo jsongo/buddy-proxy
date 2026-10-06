@@ -134,6 +134,36 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
             os.environ[key] = value
 
 
+async def _qoder_model_refresh_loop(provider) -> None:
+    """qoder 模型目录常驻刷新循环：先刷一次再按 CACHE_TTL_S 节奏重复。
+
+    失败只 log 不退出——下一轮目录刷新自会补上；循环随进程生命周期常驻。
+    """
+    import asyncio
+    import logging
+
+    from buddy_proxy.qoder.catalog import CACHE_TTL_S
+
+    log = logging.getLogger(__name__)
+    while True:
+        try:
+            models = await provider.refresh_models()
+            log.info("qoder 模型目录已刷新（%d 个模型）", len(models))
+        except Exception as exc:  # noqa: BLE001 - 目录刷新失败不影响转发
+            log.warning("qoder 模型目录刷新失败: %s", exc)
+        await asyncio.sleep(CACHE_TTL_S)
+
+
+def _install_qoder_model_warmup(provider) -> None:
+    """把目录预热挂到应用启动（fire-and-forget 常驻任务，随进程生命周期）。"""
+    import asyncio
+
+    async def _start() -> None:
+        asyncio.create_task(_qoder_model_refresh_loop(provider))  # noqa: RUF006
+
+    app.router.on_startup.append(_start)
+
+
 def main():
     import buddy_proxy.core.state as _state
 
@@ -206,6 +236,8 @@ def main():
                              "凭据跑 `buddy login kimi` 或在管理面板导入 token JSON）")
     parser.add_argument("--dumate", action="store_true", default=os.getenv("DUMATE_ENABLED", "") == "1",
                         help="启用 DuMate provider（百度搭子/千帆桌面端本地代理；需本机已安装并登录 DuMate.app 且在运行）")
+    parser.add_argument("--zcode-start", action="store_true", default=os.getenv("ZCODE_START_ENABLED", "") == "1",
+                        help="启用 ZCode Start Plan (Trust Build) provider（glm-5.3-flash，凭据自动从 ~/.zcode/cli/config.json 读取）")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
                              "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
@@ -272,6 +304,10 @@ def main():
         logger.info("Qoder provider enabled (%s / %s 个账号)",
                     _qh.get("base_url"), len(_qh.get("accounts") or []))
         print(f"[Qoder] Enabled ({qoder.region().label} / {len(_qh.get('accounts') or [])} 个账号)")
+
+        # 模型目录预热 + 周期刷新：目录是账号级分桶且纯内存（重启即丢），不预热
+        # 的话启动后列表回落到本地兜底表、首次转发前 catalog 一直是空的。
+        _install_qoder_model_warmup(qoder)
     else:
         print("[Qoder] Disabled (pass --qoder or QODER_ENABLED=1 to enable)")
 
@@ -340,6 +376,20 @@ def main():
         print("[DuMate] Enabled (local proxy)")
     else:
         print("[DuMate] Disabled (pass --dumate or DUMATE_ENABLED=1 to enable)")
+
+    if args.zcode_start:
+        from buddy_proxy.providers.zcode_start import ZCodeStartPlanProvider
+
+        zcode_start = ZCodeStartPlanProvider()
+        try:
+            zcode_start.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("zcode-start provider 认证未就绪：%s", exc.detail)
+        providers[zcode_start.id] = zcode_start
+        logger.info("ZCode Start Plan provider enabled (%s)", zcode_start.health().get("base_url"))
+        print("[ZCode Start Plan] Enabled (glm-5.3-flash)")
+    else:
+        print("[ZCode Start Plan] Disabled (pass --zcode-start or ZCODE_START_ENABLED=1 to enable)")
 
     if args.trae:
         from buddy_proxy.trae.provider import TraeProvider

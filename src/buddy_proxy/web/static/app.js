@@ -1016,6 +1016,8 @@ function orderRow(item, idx, marks, scope) {
   // 目录里的值带「 credits」后缀（如 "x1.62 credits"），徽章里剥掉、原文进悬浮提示
   const mult = ((STATS || {}).credits_map || {})[orderKey(item.provider, item.model)];
   const multTxt = mult ? String(mult).replace(/\s*credits\s*$/i, '') : '';
+  // per-account 模型支持画像（qoder 特有）：该模型只在部分账号上可用
+  const sup = (models.find(m => m.id === item.model) || {}).support;
   return `<div class="order-row" draggable="true" data-idx="${idx}" data-scope="${esc(scope)}">
     <span class="order-grip" title="拖拽调整顺序">⠿</span>
     <span class="order-no muted mono">${idx + 1}</span>
@@ -1030,6 +1032,7 @@ function orderRow(item, idx, marks, scope) {
     <datalist id="${id}">${list}</datalist>
     <span class="order-flags">
       ${multTxt ? `<span class="tag mult" title="积分倍率：${esc(mult)}（估算参考，非实际扣费）">${esc(multTxt)}</span>` : ''}
+      ${sup ? `<span class="tag" title="受账号限制，仅支持：${esc((sup.accounts || []).join('、'))}">部分账号</span>` : ''}
       ${left ? `<span class="tag bad" title="冷却中，剩余 ${left}s；期间请求会跳过它">⏸ ${left}s</span>` : ''}
       ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
     </span>
