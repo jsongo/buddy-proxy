@@ -45,7 +45,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity); trae/qoder accept --region cn|global
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 ./buddy update             # update to the latest code (git pull -> uv sync -> restart)
 
@@ -240,6 +240,14 @@ uv run trae-cli chat -m glm-5.2 -q "hello"
 Auth is loaded automatically: the Work multi-account state dir `~/.buddy-proxy/trae/` (`index.json` + one 0600 cred per account; generated/appended by `python -m buddy_proxy.auth.trae_work_login` or `buddy login trae`, upserted by uid/refresh_token — relogin updates, a new account appends) first. The legacy single-account `~/.buddy-proxy/trae_work.json` (and `~/.ethan/trae_work.json`) is auto-migrated to account #1 on first read. Then the decrypted local Trae IDE `storage.json`. No manual token setup.
 
 Work channel multi-account **primary/backup failover**: account #1 by login order is preferred; account-level errors (401 credential expired / 429 quota) cool down for 60s/5min then fail over to the next. Checkin/quota query and claim **every account**; the admin panel has `▲▼` reorder / `✕` delete (same as qoder/kimi/antigravity). With multiple accounts, the check-in status carries a per-account breakdown (`accounts`: index/name/state) and the check-in card renders one line per account (已签到 / 可领 / 查询失败 with the reason) — the aggregated badge alone could not tell which account actually failed; manual claims toast each account's result (who got +N, who failed). Each line's name follows the alias > nickname > uid > id display chain (an ✎ rename shows up here too, matching the quota panels) and carries an ✎ rename button of its own. Single-account setups stay unchanged (no breakdown, same badge semantics).
+
+### CN / international editions (dual region)
+
+Trae and Qoder both come in a domestic (CN) and an international edition, and the two are separate account systems — different hosts, incompatible tokens (a CN token on the international gateway is a guaranteed 401).
+
+- **Login picks the region** — `buddy login trae --region global` / `buddy login qoder --region global` (aliases 海外 / 国际版 / 国际 → `global`, 国内 → `cn`; an interactive terminal asks when the flag is omitted, non-interactive falls back to `TRAE_REGION` / `QODER_REGION`). The region is persisted on the account and **failover never crosses regions**.
+- **Independent channel ids** — once at least one `global` account is logged in, `--trae` / `--qoder` additionally register `traeintl` / `qoderintl` (same idea as `traepat`): address them as `traeintl/<model>` / `qoderintl/<model>` and the CN and international channels run side by side, each with its own model catalog, quota card and cooldown pool. Nothing changes when you only have CN accounts. (The intl ids carry **no Trae check-in** — the international edition has no check-in endpoint at all, verified 404 on all three candidate hosts.)
+- **Billing differs** — Trae CN bills in **credits**; the international edition bills a **dollar Usage balance** (`is_dollar_usage_billing`). The quota card and the low-balance banner follow the unit each account actually reports — the banner's absolute `< 300` threshold is credits-only, dollar accounts are judged on the remaining percentage instead (a $20 plan must not fire the 300 rule daily).
 
 ## ZCode provider (optional)
 

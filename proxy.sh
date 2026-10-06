@@ -8,8 +8,9 @@
 #   ./proxy.sh status                            # 查看状态
 #   ./proxy.sh logs                              # 跟踪日志
 #   ./proxy.sh ui                                # 确保在跑并打开管理页 http://127.0.0.1:8787/ui
-#   ./proxy.sh login    [provider] [--no-browser] # 登录上游账号（默认 codebuddy；
+#   ./proxy.sh login    [provider] [--no-browser] [--region cn|global] # 登录上游账号（默认 codebuddy；
 #                                                # provider: codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity）
+#                                                # --region 仅 trae/qoder 生效（两区账号不通用；交互终端不给会问一句）
 #                                                # 登录成功后若网关在运行，需 restart 生效
 #
 # 支持环境变量（start 命令生效）：
@@ -252,6 +253,12 @@ cmd_login() {
                 # workbuddy 是 codebuddy 的别名（登录模块内同样会归一）
                 provider="codebuddy" ;;
             --no-browser)
+                extra+=("$1") ;;
+            # trae/qoder 选区（cn/global）：两种写法都透传给 python 侧
+            --region)
+                [[ $# -ge 2 ]] || { log "--region 缺少取值（cn/global）"; exit 2; }
+                extra+=("$1" "$2"); shift ;;
+            --region=*)
                 extra+=("$1") ;;
             *)
                 log "未知参数: $1"

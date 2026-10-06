@@ -36,7 +36,7 @@ def test_status_multi_account_reports_each(monkeypatch):
     _seed("u1", "u2")
     monkeypatch.setattr(failover, "_cooldowns", {})
 
-    def _fetch(token="", account_id=""):
+    def _fetch(token="", account_id="", region=""):
         if account_id == "u2":
             return {"checked_in": False, "enable": True, "message": ""}
         return {"checked_in": True, "enable": True, "message": "success"}
@@ -74,7 +74,7 @@ def test_status_marks_failed_accounts(monkeypatch):
     _seed("u1", "u2")
     monkeypatch.setattr(failover, "_cooldowns", {})
 
-    def _fetch(token="", account_id=""):
+    def _fetch(token="", account_id="", region=""):
         if account_id == "u2":
             raise RuntimeError("token 刷新失败")
         return {"checked_in": True, "enable": True, "message": "success"}
@@ -96,7 +96,7 @@ def test_status_single_account_has_no_accounts_list(monkeypatch):
     monkeypatch.setattr(failover, "_cooldowns", {})
     monkeypatch.setattr(
         "buddy_proxy.trae.provider.fetch_checkin_status",
-        lambda token="", account_id="": {"checked_in": True, "enable": True})
+        lambda token="", account_id="", region="": {"checked_in": True, "enable": True})
     st = TraeProvider().checkin_status()
     assert "accounts" not in st
 
@@ -108,7 +108,7 @@ def test_claim_multi_account_reports_each(monkeypatch):
     _seed("u1", "u2")
     monkeypatch.setattr(failover, "_cooldowns", {})
 
-    def _claim(token="", account_id=""):
+    def _claim(token="", account_id="", region=""):
         if account_id == "u1":
             return {"code": 0, "credits_granted": 100, "message": "OK"}
         return {"code": 1, "message": "already signed"}
@@ -127,7 +127,7 @@ def test_claim_failure_still_carries_account_detail(monkeypatch):
     _seed("u1", "u2")
     monkeypatch.setattr(failover, "_cooldowns", {})
 
-    def _claim(token="", account_id=""):
+    def _claim(token="", account_id="", region=""):
         if account_id == "u2":
             raise RuntimeError("网络超时")
         return {"code": 0, "credits_granted": 100, "message": "OK"}
@@ -145,6 +145,6 @@ def test_claim_single_account_has_no_accounts_list(monkeypatch):
     monkeypatch.setattr(failover, "_cooldowns", {})
     monkeypatch.setattr(
         "buddy_proxy.trae.provider.claim_checkin_credits",
-        lambda token="", account_id="": {"code": 0, "credits_granted": 100})
+        lambda token="", account_id="", region="": {"code": 0, "credits_granted": 100})
     st = TraeProvider().checkin_claim()
     assert "accounts" not in st

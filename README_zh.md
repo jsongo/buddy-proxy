@@ -52,7 +52,7 @@ uv run python -m buddy_proxy --login --desensitize
 ```bash
 ./buddy start              # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # 登录/自检上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/dumate/mimo/qoder/gemini/antigravity/kimi）
+./buddy login [provider]   # 登录/自检上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/dumate/mimo/qoder/gemini/antigravity/kimi）；trae/qoder 支持 --region cn|global
 ./buddy ui                 # 仅打开管理页（必要时先启动）
 ./buddy update             # 更新到最新代码（git pull -> uv sync -> 重启）
 
@@ -193,6 +193,24 @@ Work 通道多账号**主备 failover**：按登录顺位优先用 #1，账号�
 手动打卡的 toast 也逐账号报结果（谁 +N、谁失败）。明细里的 name 走
 alias > nickname > uid > id 显示名链（✎ 改的名与额度面板一致），行尾带 ✎ 改名入口。
 单账号无明细，行为不变。
+
+### 国内版 / 国际版（双区域）
+
+Trae 和 Qoder 都有国内版与国际版，且两套是**互不相通的账号体系**——域名不同、
+token 不通用（拿 CN 的 token 连国际网关必 401）。
+
+- **登录选区**——`buddy login trae --region global` / `buddy login qoder --region global`
+  （别名 海外 / 国际版 → `global`，国内 → `cn`；交互终端不给 `--region` 会问一句，
+  非交互回退 `TRAE_REGION` / `QODER_REGION`）。region 随账号落盘，**failover 绝不跨区**。
+- **独立通道 id**——只要登录过至少一个 `global` 区账号，`--trae` / `--qoder` 分支就会
+  额外注册 `traeintl` / `qoderintl`（思路同 `traepat`）：用 `traeintl/<模型>` /
+  `qoderintl/<模型>` 寻址，国内与国际通道并行在线，各自的模型目录、额度卡、冷却池
+  互不混淆。只有国内账号时一切照旧。（intl 通道**不带 Trae 签到**——国际版根本没有
+  签到端点，三个候选 host 实测全部 404。）
+- **计费口径不同**——Trae 国内版按**积分**计费；国际版按**美元 Usage 余额**计费
+  （`is_dollar_usage_billing`）。额度卡与余额告急横幅跟随账号实际上报的量纲——横幅
+  的绝对值 `< 300` 门槛只对积分成立，美元账号走剩余占比规则（$20 的套餐不能天天
+  触发 300 门槛误报）。
 
 > **`buddy login trae` 排障**：若浏览器显示「登录成功」而 CLI 一直停在等待界面，
 > 九成是登录 URL 的参数没和 Trae CN 客户端对齐。关键项 `plugin_version` 必须是

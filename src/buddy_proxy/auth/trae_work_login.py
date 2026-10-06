@@ -31,8 +31,14 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from buddy_proxy.trae.config import TRAE_REGIONS, resolve_trae_region
+
 CLIENT_ID = "en1oxy7wnw8j9n"  # SOLO stable
 APP_VERSION = "0.1.43"
+# CN 默认值。两区共用同一套参数（client_id / handoff 哨兵），只有 host 不同：
+# 2026-10-05 无凭据实测，CN SOLO client_id 在海外 ExchangeToken 端点同样放行
+# 到 refresh 校验阶段（401 "refresh token is invalid" 而非 client 拒绝）。
+# 运行时一律经 resolve_trae_region() 取址，这两个常量只作向后兼容的默认值。
 API_HOST = "https://api.trae.com.cn"
 AUTH_HOST = "https://www.trae.cn/authorization"
 #: 触发授权页「本机回调」分支的**唯一**特殊值。授权页把它当版本号解析：
@@ -75,15 +81,20 @@ def _http_post_json(url: str, body: dict, headers: dict, timeout: int = 60) -> d
         return json.loads(resp.read().decode() or "{}")
 
 
-def build_login_url(port: int = 18080) -> tuple[str, str, str, int]:
-    """构造 trae.cn 授权页 URL（对齐客户端 ``handleHandoffExternalSso``）。
+def build_login_url(port: int = 18080, region: str | None = None) -> tuple[str, str, str, int]:
+    """构造授权页 URL（对齐客户端 ``handleHandoffExternalSso``）。
 
     返回 ``(url, machine_id, device_id, port)``。
 
-    参数必须与 Trae CN 客户端一致，否则授权页走不到「本机回调」分支：
+    ``region`` 决定授权页 host（``www.trae.cn`` / ``www.trae.ai``）——两区账号
+    不通用，登错区拿到的是另一套 uid，且后续 chat/额度都得连对应域。缺省走
+    ``resolve_trae_region()``（``TRAE_REGION`` env > ``cn``）。
+
+    参数必须与 Trae 客户端一致，否则授权页走不到「本机回调」分支：
     最要命的是 ``plugin_version``——传数字形态会被授权页规范化并丢掉
     ``auth_callback_url``（页面照常显示登录成功，却永不回跳本机）。
     """
+    reg = resolve_trae_region(region)
     machine_id = secrets.token_hex(16)
     device_id = secrets.token_hex(16)
     # 一次性 nonce：server 只接受带匹配 nonce 的回调，防止本机恶意网页
@@ -114,15 +125,17 @@ def build_login_url(port: int = 18080) -> tuple[str, str, str, int]:
         "machine_id": machine_id,
         "device_id": device_id,
     }
-    url = AUTH_HOST + "?" + urllib.parse.urlencode(params)
+    url = reg.authorization_url() + "?" + urllib.parse.urlencode(params)
     # 状态文件供 trae_work_login_server.py 使用：machine_id/device_id 必须
-    # 复用同一对（避免每请求随机指纹触发风控），nonce 用于回调防伪造。
+    # 复用同一对（避免每请求随机指纹触发风控），nonce 用于回调防伪造，
+    # region 让回调服务知道该拿哪个 oauth_api 换 token（它拿不到 CLI 的参数）。
     # 走 _write_secret（0600）：nonce 泄漏就等于防伪形同虚设。
     _write_secret(STATE_PATH, {
         "machine_id": machine_id,
         "device_id": device_id,
         "nonce": nonce,
         "port": port,
+        "region": reg.key,
         "created_at": int(time.time()),
     })
     # 新一次尝试：清掉上一轮终态，免得 CLI 一启动就吃到旧结果
@@ -182,10 +195,12 @@ def extract_refresh_token(callback_url: str) -> str:
     return (qs.get("refreshToken") or [""])[0]
 
 
-def exchange_token(refresh_token: str) -> dict:
+def exchange_token(refresh_token: str, region: str | None = None) -> dict:
+    """refreshToken → access_token。``region`` 决定 oauth_api host（CN/海外各一套）。"""
+    reg = resolve_trae_region(region)
     body = {"ClientID": CLIENT_ID, "RefreshToken": refresh_token, "ClientSecret": "-", "UserID": ""}
     resp = _http_post_json(
-        API_HOST + "/cloudide/api/v3/trae/oauth/ExchangeToken",
+        reg.exchange_token_url(),
         body,
         {"Content-Type": "application/json", "User-Agent": f"Trae/{APP_VERSION}"},
     )
@@ -202,10 +217,11 @@ def exchange_token(refresh_token: str) -> dict:
     return {"access_token": token, "refresh_token": new_refresh, "expires_at": expires_at}
 
 
-def get_user_info(token: str) -> dict:
+def get_user_info(token: str, region: str | None = None) -> dict:
+    reg = resolve_trae_region(region)
     try:
         ui = _http_post_json(
-            API_HOST + "/cloudide/api/v3/trae/GetUserInfo",
+            reg.user_info_url(),
             {"ReqSource": "IDE", "IDEVersion": APP_VERSION},
             {"Content-Type": "application/json", "x-cloudide-token": token,
              "User-Agent": f"Trae/{APP_VERSION}"},
@@ -221,10 +237,21 @@ def get_user_info(token: str) -> dict:
         return {}
 
 
-def main() -> int:
-    url, machine_id, device_id, _port = build_login_url()
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="buddy_proxy.auth.trae_work_login",
+        description="Trae Work (SOLO) 手动粘贴登录",
+    )
+    parser.add_argument("--region", choices=sorted(TRAE_REGIONS), default=None,
+                        help="国内版 cn（默认）/ 海外版 global；两区账号不通用")
+    args = parser.parse_args(argv)
+    reg = resolve_trae_region(args.region)
+
+    url, machine_id, device_id, _port = build_login_url(region=reg.key)
     print("=" * 60)
-    print("Trae Work (SOLO) 登录")
+    print(f"Trae Work (SOLO) 登录 · {reg.label}")
     print("=" * 60)
     print()
     print("步骤：")
@@ -248,8 +275,8 @@ def main() -> int:
         print("[!] 回调链接缺少 refreshToken", file=sys.stderr)
         return 1
 
-    cred = exchange_token(refresh_token)
-    user = get_user_info(cred["access_token"])
+    cred = exchange_token(refresh_token, region=reg.key)
+    user = get_user_info(cred["access_token"], region=reg.key)
 
     out = {
         "uid": user.get("uid") or "",
@@ -258,9 +285,12 @@ def main() -> int:
         "access_token": cred["access_token"],
         "refresh_token": cred["refresh_token"],
         "expires_at": cred["expires_at"],
+        # 账号所属区域：credentials.save_account_cred 会持久化到 index.json，
+        # failover 同区轮转、transport 选 chat 网关都靠它。
+        "region": reg.key,
         # OAuth 域（ExchangeToken/GetUserInfo 用），**不是聊天网关**：
-        # 聊天固定连 trae/config.py 的 BASE_URL_CN，读本字段会 404（实测）。
-        "api_host": API_HOST,
+        # 聊天连 region.chat_base，读本字段会 404（实测）。
+        "api_host": reg.oauth_api,
         "machine_id": machine_id,
         "device_id": device_id,
     }
@@ -269,7 +299,7 @@ def main() -> int:
     from buddy_proxy.trae.credentials import save_account_cred
     ref = save_account_cred(out)
     print()
-    print(f"[OK] 凭证已保存（账号 #{ref.priority + 1}）: {ref.id}")
+    print(f"[OK] 凭证已保存（{reg.label} · 账号 #{ref.priority + 1}）: {ref.id}")
     print(f"    uid={out['uid']} nickname={out['nickname']} expires={out['expires_at']}")
     return 0
 

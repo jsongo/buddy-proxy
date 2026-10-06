@@ -1,10 +1,11 @@
-"""Trae 常量与配置：URL、版本头、模型映射、环境开关、调试/心跳工具。"""
+"""Trae 常量与配置：区域、URL、版本头、模型映射、环境开关、调试/心跳工具。"""
 
 from __future__ import annotations
 
 import hashlib
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -16,6 +17,136 @@ BASE_URL_SG = "https://a0ai-api-sg.byteintlapi.com"
 IDE_VERSION = "3.3.67"
 IDE_VERSION_CODE = "20260401"
 X_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
+
+
+# ───────────────────────── 区域（国内版 / 海外版） ─────────────────────────
+#
+# Trae 有两套**账号互不通用**的区域，各有一套域名（照 qoder 的 Region 模式）。
+# 下面每个端点都是 2026-10-05 无凭据探测的实测结论（能区分「端点存在但没鉴权」
+# 与「路由根本不存在」，判据见各行注释）：
+#
+# - **chat 网关**：两侧同一组路径（``/api/agent/v3/llm_utils_chat`` 等）都回
+#   401 + ``code 1001``（= 端点在、只是没带 token），路径与错误结构完全一致，
+#   所以 transport 只需换 base URL。
+# - **额度**：同一个 ``ide_user_ent_usage`` 接口，但**版本号不同**——CN 是
+#   ``/trae/api/v2/``，海外只有 ``/trae/api/v1/``（v2 在海外是 Akamai TLB 层
+#   404，不是应用级）。两侧响应都带 ``is_dollar_usage_billing`` flag。
+# - **签到**：CN 的 ``/trae/api/v2/ug/checkin_credits/{status,claim}`` 回
+#   200 + ``code 1001``（路由在）；海外在 grow-normal / growsg-normal /
+#   api.trae.ai 三处**全部回应用级 404 "Page not found"** —— 海外版没有签到
+#   系统，故 ``has_checkin=False``，自动签到必须跳过海外账号（否则会天天打
+#   一串 404 进 checkin.jsonl 污染日历）。
+# - **计费口径**：CN 是**积分制**（``is_credits_billing``，权益包
+#   ``currency=1`` + ``credits_limit`` / ``credits_amount``）；海外是**美元
+#   Usage 余额制**（官网 pricing 实测：Free $1 一次性不刷新、Pro $20、
+#   Pro+ $60、Ultra $200，按 token 折算成 Usage 扣减、订阅期开始时刷新；
+#   ``is_pay_freshman`` 时新人一次性赠 $3）。额度展示必须分叉，把美元报成
+#   「积分」会误导。
+# - **package-type 头**：CN ``stable_cn`` / 海外 ``stable_i18n``。
+
+@dataclass(frozen=True)
+class TraeRegion:
+    """一个区域的端点集合（对齐 ``qoder.config.Region`` 的口径）。"""
+
+    key: str
+    label: str
+    #: chat 网关基址（``BASE_URL_CN`` / ``BASE_URL_SG``）。
+    chat_base: str
+    #: UG（user growth）基址：额度 / 签到都挂它下面。
+    ug_base: str
+    #: 额度接口的版本号（CN ``v2`` / 海外 ``v1``，见上方实测注释）。
+    ug_usage_version: str
+    #: OAuth 域（ExchangeToken / GetUserInfo）。**不是** chat 网关：
+    #: 聊天走它会 404（2026-09 实测，见 trae_work_login.OUT_PATH 旁注释）。
+    oauth_api: str
+    #: 浏览器授权页基址。
+    auth_host: str
+    #: ``package-type`` 头的值。
+    package_type: str
+    #: 上游有没有每日签到（海外实测无 → False）。
+    has_checkin: bool
+    #: 计费口径：``credits``（积分）/ ``dollar``（美元 Usage 余额）。
+    billing: str
+
+    def usage_url(self) -> str:
+        """权益/额度用量接口。"""
+        return f"{self.ug_base}/trae/api/{self.ug_usage_version}/pay/ide_user_ent_usage"
+
+    def checkin_url(self, action: str) -> str:
+        """签到接口（``action`` = ``status`` / ``claim``）；无签到的区域不应调用。"""
+        return f"{self.ug_base}/trae/api/v2/ug/checkin_credits/{action}"
+
+    def exchange_token_url(self) -> str:
+        """refreshToken → access_token。"""
+        return f"{self.oauth_api}/cloudide/api/v3/trae/oauth/ExchangeToken"
+
+    def user_info_url(self) -> str:
+        return f"{self.oauth_api}/cloudide/api/v3/trae/GetUserInfo"
+
+    def authorization_url(self) -> str:
+        return f"https://{self.auth_host}/authorization"
+
+
+#: 已知区域。默认区域可由 ``TRAE_REGION`` 环境变量覆盖。
+TRAE_REGIONS: dict[str, TraeRegion] = {
+    "cn": TraeRegion(
+        key="cn",
+        label="Trae 国内版",
+        chat_base=BASE_URL_CN,
+        ug_base="https://api.trae.cn",
+        ug_usage_version="v2",
+        oauth_api="https://api.trae.com.cn",
+        auth_host="www.trae.cn",
+        package_type="stable_cn",
+        has_checkin=True,
+        billing="credits",
+    ),
+    "global": TraeRegion(
+        key="global",
+        label="Trae 海外版",
+        chat_base=BASE_URL_SG,
+        ug_base="https://growsg-normal.trae.ai",
+        ug_usage_version="v1",
+        oauth_api="https://api.trae.ai",
+        auth_host="www.trae.ai",
+        package_type="stable_i18n",
+        has_checkin=False,
+        billing="dollar",
+    ),
+}
+
+#: 默认区域 key。
+DEFAULT_TRAE_REGION = "cn"
+
+
+def default_trae_region_key() -> str:
+    """默认区域：``TRAE_REGION`` 显式指定 > ``cn``。
+
+    两区账号不通用（连错域 401），所以区域必须显式可配；缺省按 CN——
+    历史账号全是 CN，这样迁移前的凭据行为不变。
+    """
+    env = (os.environ.get("TRAE_REGION") or "").strip().lower()
+    return env if env in TRAE_REGIONS else DEFAULT_TRAE_REGION
+
+
+def resolve_trae_region(key: str | None = None) -> TraeRegion:
+    """按 key 取区域；空/未知 key 回退默认区域（不抛——配置层容错）。"""
+    k = (key or default_trae_region_key()).strip().lower()
+    return TRAE_REGIONS.get(k) or TRAE_REGIONS[default_trae_region_key()]
+
+
+def resolve_trae_region_by_chat_base(base_url: str) -> TraeRegion:
+    """由 chat 网关 base URL 反查区域（legacy 单账号分支用）。
+
+    legacy 分支（``TRAE_TOKEN`` / 本机登录态）没有账号级 region 字段，只有
+    一个 base_url，据此反查即可选出对的模型表。认不出（自定义网关/测试
+    mock）就回退默认区域——模型名原样透传，不会比现状更差。
+    """
+    needle = (base_url or "").rstrip("/")
+    for reg in TRAE_REGIONS.values():
+        if needle and needle == reg.chat_base.rstrip("/"):
+            return reg
+    return resolve_trae_region()
 
 # Trae Work (SOLO) 客户端版本。
 # 注意：服务端按版本号 gating 新模型——旧版本（0.1.43/20260716）请求 glm-5.3
@@ -214,8 +345,47 @@ _WORK_FUNCTION_OVERRIDE: dict[str, str] = {
     "glm-5.3-flash": "chat_v3",
 }
 
+# ───────────────── 海外版（global）模型目录 ─────────────────
+#
+# 海外版是**另一套模型池**（Claude / GPT / Gemini 系为主），与上面 CN 表里的
+# GLM / Doubao / Qwen 几乎不重叠，所以四张表都必须分开——CN 的 config_name、
+# 分级、倍率、图片能力全是 CN 侧实测值，套到海外会两头出错（把海外没有的模型
+# 报成可用 → 客户端请求后上游 4001；把海外模型漏报 → /v1/models 里看不见）。
+#
+# **留空是刻意的**，不是没写完：
+# 这三张表只能由「拿海外账号真发请求」的结果填，不能照 CN 表推、也不能照
+# 官网价目表抄——`deepseek-v4.1-pro` 就是反例（价目表上有、上游精确匹配拒绝）。
+# 收录判据与 CN 侧一致：**上游认这个名字并回真实 usage**，必要时再补能力指纹。
+# 空表时模型名原样透传，上游不认就诚实地 4001 冒出来，比猜一个名字糊弄过去好。
+#
+# 待办：用海外账号跑 probe 枚举可用 config_name（同 CN 当初的收录流程），
+# 再填 MODEL_TIERS_INTL / MODEL_CREDITS_INTL / MODEL_SUPPORTS_IMAGES_INTL。
+MODEL_MAP_INTL: dict[str, str] = {}
+MODEL_TIERS_INTL: dict[str, list[str]] = {}
+MODEL_CREDITS_INTL: dict[str, str] = {}
+MODEL_SUPPORTS_IMAGES_INTL: set[str] = set()
+
+def model_tables(region_key: str = "cn"):
+    """该区域的四张模型表（映射 / 分级 / 倍率 / 图片能力）。
+
+    按 key **现取**模块级变量，不在导入时快照成 dict：日后实测补齐海外目录时
+    若是整体重新赋值（``MODEL_TIERS_INTL = {...}``）而不是原地 update，
+    快照会静默指向旧的空表，海外通道就永远报不出模型。
+    """
+    if (region_key or "cn").strip().lower() == "global":
+        return (MODEL_MAP_INTL, MODEL_TIERS_INTL, MODEL_CREDITS_INTL,
+                MODEL_SUPPORTS_IMAGES_INTL)
+    return (MODEL_MAP, MODEL_TIERS, MODEL_CREDITS, MODEL_SUPPORTS_IMAGES)
+
+
+def map_model_for(region_key: str, requested: str) -> str:
+    """按区域解析外部模型名 -> 上游 config_name（未命中则原样透传）。"""
+    return model_tables(region_key)[0].get(requested, requested)
+
+
 def _map_model(requested: str) -> str:
     return MODEL_MAP.get(requested, requested)
+
 
 
 _DEBUG_SENSITIVE_KEYS = {"raw", "body", "content", "messages", "token", "uid", "tool_calls", "arguments"}

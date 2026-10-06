@@ -32,14 +32,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from buddy_proxy.auth.trae_work_login import _write_secret, extract_refresh_token  # noqa: E402
+from buddy_proxy.auth.trae_work_login import (  # noqa: E402
+    _write_secret,
+    exchange_token,
+    extract_refresh_token,
+    get_user_info,
+)
+from buddy_proxy.trae.config import resolve_trae_region  # noqa: E402
 
 CLIENT_ID = "en1oxy7wnw8j9n"
 APP_VERSION = "0.1.43"
 # OAuth 域：仅用于 ExchangeToken / GetUserInfo（/cloudide/api/v3/trae/*），
 # 也被写进凭证的 api_host 字段。**不是聊天网关**——实测它对该路径一律 404。
+# 运行时按 region 取址（见 do_GET），这两个常量只作 CN 默认值/向后兼容。
 API_HOST = "https://api.trae.com.cn"
 # 聊天网关（与 trae/config.py 的 BASE_URL_CN 一致）：/api/agent/v3/llm_utils_chat
+# 同样按 region 取址；海外版是 a0ai-api-sg.byteintlapi.com。
 CHAT_HOST = "https://trae-api-cn.mchost.guru"
 OUT_PATH = Path.home() / ".buddy-proxy" / "trae_work.json"
 # 与 trae_work_login.py 共享的本次登录状态（nonce + machine_id/device_id）
@@ -147,68 +155,27 @@ def _write_cred_secure(path: Path, data: dict) -> None:
         f.write(json.dumps(data, ensure_ascii=False, indent=2))
 
 
-def _http_post_json(url: str, body: dict, headers: dict, timeout: int = 60) -> dict:
-    req = urllib.request.Request(url, method="POST")
-    for k, v in headers.items():
-        req.add_header(k, v)
-    data = json.dumps(body).encode()
-    with urllib.request.urlopen(req, data, timeout=timeout) as resp:
-        return json.loads(resp.read().decode() or "{}")
-
-
-def exchange_token(refresh_token: str) -> dict:
-    body = {"ClientID": CLIENT_ID, "RefreshToken": refresh_token, "ClientSecret": "-", "UserID": ""}
-    resp = _http_post_json(
-        API_HOST + "/cloudide/api/v3/trae/oauth/ExchangeToken",
-        body,
-        {"Content-Type": "application/json", "User-Agent": f"Trae/{APP_VERSION}"},
-    )
-    result = resp.get("Result") or {}
-    token = result.get("Token") or ""
-    if not token:
-        raise RuntimeError(f"ExchangeToken 失败: {json.dumps(resp, ensure_ascii=False)[:300]}")
-    new_refresh = result.get("RefreshToken") or refresh_token
-    expires_at = int(result.get("TokenExpireAt") or 0)
-    if expires_at > 10**12:
-        expires_at //= 1000
-    if expires_at <= time.time():
-        expires_at = int(time.time()) + int(result.get("TokenExpireDuration") or 1209600)
-    return {"access_token": token, "refresh_token": new_refresh, "expires_at": expires_at}
-
-
-def get_user_info(token: str) -> dict:
-    try:
-        ui = _http_post_json(
-            API_HOST + "/cloudide/api/v3/trae/GetUserInfo",
-            {"ReqSource": "IDE", "IDEVersion": APP_VERSION},
-            {"Content-Type": "application/json", "x-cloudide-token": token,
-             "User-Agent": f"Trae/{APP_VERSION}"},
-        )
-        u = ui.get("Result") or ui
-        return {
-            "uid": str(u.get("UserID") or ""),
-            "nickname": str(u.get("ScreenName") or ""),
-            "enterprise_id": str(u.get("EnterpriseID") or ""),
-        }
-    except Exception as e:
-        print(f"[*] GetUserInfo 失败: {e}", file=sys.stderr)
-        return {}
-
-
 def test_work_chat(work: dict) -> str:
     """用 Work 通道发一条测试消息。
 
     请求头复用 ``trae.credentials._work_headers``，与真实聊天路径完全一致：
     手写头会漏掉 ``User-Agent``，上游按异常客户端限流返回 4011（实测），
     把「网络/凭证正常」误报成失败。
+
+    聊天网关按 ``work["region"]`` 取址（CN/海外各一套），模型名也照该区
+    映射——海外账号拿 CN 的 ``glm-5.2`` 去连海外网关必失败。测试用的模型
+    从该区模型表里挑一个，挑不到就退回 ``glm-5.2``（CN 老路径不变）。
     """
     import uuid
 
+    from buddy_proxy.trae.config import map_model_for
     from buddy_proxy.trae.credentials import _work_headers
 
+    reg = resolve_trae_region(work.get("region"))
+    model = map_model_for(reg.key, "glm-5.2")
     body = {
         "messages": [{"role": "user", "content": [{"type": "text", "text": "1+1等于几"}]}],
-        "model": "glm-5.2",
+        "model": model,
         "function": "solo_work_lite",
         "stream": True,
         "request_id": str(uuid.uuid4()),
@@ -218,9 +185,9 @@ def test_work_chat(work: dict) -> str:
         **_work_headers(work),
         "Accept": "text/event-stream",
     }
-    # 聊天走专用网关，不能用 work["api_host"]：那是 OAuth 域，
+    # 聊天走 region 的 chat_base，不能用 work["api_host"]：那是 OAuth 域，
     # 对 /api/agent/v3/llm_utils_chat 恒返回 404（实测）。
-    url = CHAT_HOST.rstrip("/") + "/api/agent/v3/llm_utils_chat"
+    url = reg.chat_base.rstrip("/") + "/api/agent/v3/llm_utils_chat"
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
@@ -346,9 +313,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
 
+        # 区域从共享 state 取（build_login_url 写入）——回调服务是独立进程，
+        # 拿不到 CLI 的参数。缺省按默认区域（向后兼容：老 state 无 region 字段）。
+        reg = resolve_trae_region(login_state.get("region"))
         try:
-            cred = exchange_token(refresh_token)
-            user = get_user_info(cred["access_token"])
+            cred = exchange_token(refresh_token, region=reg.key)
+            user = get_user_info(cred["access_token"], region=reg.key)
             out = {
                 "uid": user.get("uid") or "",
                 "nickname": user.get("nickname") or "",
@@ -356,8 +326,11 @@ class Handler(BaseHTTPRequestHandler):
                 "access_token": cred["access_token"],
                 "refresh_token": cred["refresh_token"],
                 "expires_at": cred["expires_at"],
+                # 账号所属区域：save_account_cred 持久化到 index.json，
+                # failover 同区轮转、transport 选 chat 网关都靠它。
+                "region": reg.key,
                 # OAuth 域，**不是聊天网关**（见文件头 API_HOST 注释）。
-                "api_host": API_HOST,
+                "api_host": reg.oauth_api,
                 "machine_id": login_state.get("machine_id", ""),
                 "device_id": login_state.get("device_id", ""),
             }
@@ -372,18 +345,22 @@ class Handler(BaseHTTPRequestHandler):
                 nonce=expected_nonce,
                 uid=out["uid"],
                 nickname=out["nickname"],
+                region=reg.key,
                 expires_at=out["expires_at"],
             )
             # 一次性消费：成功落盘后删除状态文件，重放/重复回调一律拒绝
             STATE_PATH.unlink(missing_ok=True)
-            msg = f"<h3>登录成功！</h3><p>uid={html.escape(out['uid'])} nickname={html.escape(out['nickname'])}</p><p>凭证已保存，可以关闭此页面</p>"
+            msg = (f"<h3>登录成功！</h3>"
+                   f"<p>{html.escape(reg.label)} · uid={html.escape(out['uid'])} "
+                   f"nickname={html.escape(out['nickname'])}</p>"
+                   f"<p>凭证已保存，可以关闭此页面</p>")
             self.wfile.write(msg.encode())
-            print(f"\n[OK] 凭证已保存（账号 #{ref.priority + 1}）: {ref.id}")
+            print(f"\n[OK] 凭证已保存（{reg.label} · 账号 #{ref.priority + 1}）: {ref.id}")
             print(f"    uid={out['uid']} nickname={out['nickname']}")
             print(f"    expires_at={out['expires_at']}")
 
-            # 自动测试 Work 通道
-            print("\n[*] 测试 Work 通道 (solo_work_lite)...")
+            # 自动测试 Work 通道（按 region 选网关/模型）
+            print(f"\n[*] 测试 Work 通道 (solo_work_lite, {reg.label})...")
             try:
                 raw = test_work_chat(out)
                 print("=== Work chat 响应 ===")
