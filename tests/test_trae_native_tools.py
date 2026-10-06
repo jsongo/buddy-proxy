@@ -140,8 +140,11 @@ def native_env(monkeypatch):
     legacy_calls: list[dict] = []
 
     def fake_native(native_msgs, model, stream, tools):
+        idx = len(native_calls)
         native_calls.append({"messages": native_msgs, "model": model,
                              "stream": stream, "tools": tools})
+        if getattr(state, "_native_fail_first", 0) > idx:
+            return SSE_NATIVE_REJECTED
         if stream and getattr(state, "_native_reject_stream", False):
             return SSE_NATIVE_REJECTED
         if getattr(state, "_native_sse", None) is not None:
@@ -300,9 +303,9 @@ def test_native_4001_falls_back_to_legacy(client, native_env):
     # 文本协议路径解析出同样的调用
     assert ch["finish_reason"] == "tool_calls"
     assert ch["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
-    assert len(native_calls) == 1 and len(legacy_calls) == 1
-    # collect 的文本兜底同样先退避
-    assert state._sleeps == [2.0]
+    # 非流式先安静重试一次，两次都拒才落文本协议
+    assert len(native_calls) == 2 and len(legacy_calls) == 1
+    assert state._sleeps == [4.0, 4.0]
 
 
 def test_native_4001_stream_retries_native_nonstream(client, native_env):
@@ -320,8 +323,8 @@ def test_native_4001_stream_retries_native_nonstream(client, native_env):
     # 两次 native 调用：流式被拒 → 非流式成功；文本协议未动用
     assert [c["stream"] for c in native_calls] == [True, False]
     assert legacy_calls == []
-    # 重试前有退避（上游对刚失败的账号有亚秒级快速重试惩罚）
-    assert state._sleeps == [2.0]
+    # 重试前有退避（上游对刚失败的账号有快速重试惩罚）
+    assert state._sleeps == [4.0]
 
 
 def test_native_4001_stream_skip_ttl_second_request(client, native_env):
@@ -361,10 +364,27 @@ def test_native_4001_stream_full_fallback_to_legacy(client, native_env):
     finish = [d.get("choices", [{}])[0].get("finish_reason")
               for ev, d in events if isinstance(d, dict) and d.get("choices")]
     assert "tool_calls" in finish
-    assert [c["stream"] for c in native_calls] == [True, False]
+    assert [c["stream"] for c in native_calls] == [True, False, False]
     assert len(legacy_calls) == 1 and legacy_calls[0]["stream"] is False
-    # 两级兜底各退避一次
-    assert state._sleeps == [2.0, 2.0]
+    # 三级兜底各退避一次：流式→非流式→安静重试→文本
+    assert state._sleeps == [4.0, 4.0, 4.0]
+
+
+def test_native_4001_nonstream_quiet_retry_recovers(client, native_env):
+    """惩罚窗内的非流式拒绝：安静退避后原路重试成功，不落文本协议。"""
+    state, native_calls, legacy_calls = native_env
+    state._native_reject_stream = True   # 流式恒拒（上游门控）
+    state._native_fail_first = 2         # 前两次 native（含首次非流式）落在惩罚窗内
+    r = client.post("/v1/chat/completions", json=_chat_body(stream=True))
+    assert r.status_code == 200
+    events = _parse_sse_events(r.text)
+    finish = [d.get("choices", [{}])[0].get("finish_reason")
+              for ev, d in events if isinstance(d, dict) and d.get("choices")]
+    assert "tool_calls" in finish
+    # 流式被拒 → 非流式(窗内被拒) → 安静重试成功；文本协议未动用
+    assert [c["stream"] for c in native_calls] == [True, False, False]
+    assert legacy_calls == []
+    assert state._sleeps == [4.0, 4.0]
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +489,8 @@ def test_native_pure_chat_4001_falls_back_with_guard(client, native_env):
     r = client.post("/v1/chat/completions", json=_chat_body(stream=False, tools=False))
     assert r.status_code == 200
     assert "你好" in r.json()["choices"][0]["message"]["content"]
-    assert len(native_calls) == 1 and len(legacy_calls) == 1
+    # 非流式先安静重试一次，两次都拒才落文本协议
+    assert len(native_calls) == 2 and len(legacy_calls) == 1
     # 回落路径注入 guard 压制指令（solo_work_lite 服务端预设会漏 Command 语法）
     assert any("Command" in json.dumps(msg, ensure_ascii=False)
                for msg in legacy_calls[0]["messages"])
