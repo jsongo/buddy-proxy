@@ -145,14 +145,17 @@ async function acctRenameSubmit(pid, id) {
       const a = (arr || []).find(x => x.id === id);
       if (a) a.alias = newAlias;
     }
-    // trae 签到明细行没有 alias 字段、名字是后端 name 链渲染的——照 rename
-    // 响应（accounts_status 的显示名键是 nickname）就地改 name，免得要等下轮
-    // benefits 轮询才看到新名字
-    if (pid === 'trae' && typeof BENEFITS !== 'undefined' && BENEFITS.providers) {
+    // Trae/Qoder 签到明细行的名字来自后端，不在明细里复制 alias——照 rename
+    // 响应就地改 name，免得要等下轮 benefits 轮询才看到新名字。
+    if ((pid === 'trae' || pid === 'qoder') &&
+        typeof BENEFITS !== 'undefined' && BENEFITS.providers) {
       const st = (r.accounts || []).find(x => x.id === id) || {};
+      const displayName = pid === 'trae'
+        ? st.nickname
+        : (st.alias || st.name || st.email || st.id);
       for (const p of BENEFITS.providers) {
         const row = (p.checkin && p.checkin.accounts || []).find(x => x.id === id);
-        if (row && st.nickname != null) row.name = st.nickname;
+        if (row && displayName != null) row.name = displayName;
       }
     }
     if (typeof renderAntigravityPanel === 'function') renderAntigravityPanel();

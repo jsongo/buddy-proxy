@@ -814,7 +814,7 @@ uv run python -m buddy_proxy --desensitize --mimo
 | 聊天面 | `/algo/api/v2/service/pro/sse/agent_chat_generation`（官方 IDE 同一个端点，也是**唯一**提供 Qwen3.8 的入口） |
 | 签名 | **COSY 签名纯 Python 复刻**（无额外依赖、不打包官方 wasm）：`Authorization: Bearer COSY.<payload>.<sig>` + 必需的 `Cosy-User` 头，body 走 Qoder 私有字母表编码。国际版与国内版**都要签名**，区域只影响**取 token 的方式** |
 | 凭据 | `buddy login qoder`（设备码流程 PKCE S256，可选区域）；也支持 `QODER_TOKEN` 等环境变量 |
-| 额度 | 管理页额度面板：订阅额度 + 加油包 + 专属资源包（活动赠送，如「Qwen 专属积分」；各自带到期时间）（含套餐等级） |
+| 额度 | 管理页额度面板：订阅额度 + 加油包 + 专属资源包（活动赠送，如「Qwen 专属积分」；各自带到期时间）（含套餐等级）；同步网络查询在线程池等待，不阻塞管理 API |
 | **Anthropic（`/v1/messages`）** | 上游无 Anthropic 原生端点，故**响应反向转换**为 Anthropic 事件（`message_start`/`content_block_delta`/`message_stop`，推理内容转 `thinking` 块），供 Claude Code 使用 |
 
 **三条上游怪癖**在 `_build_upstream` 里逐条消息归一化（不这么干整个请求会被拒；三条都是
@@ -866,6 +866,11 @@ response`）；`_describe_upstream_error` 会把它挖出来，并且失败按 A
 （悬浮显示支持账号），qoder 账号卡也列出该账号调不了的模型。改 JSON 需重启（只加载
 一次，刻意保持静态）。
 
+**Qoder 海外版（`qoderintl`）**：启动 Buddy 时已启用 `--qoder` 且存在 Global 区账号，
+就会注册独立通道，管理页有单独的额度卡和签到行；额度与每日活动签到复用 Qoder provider
+实现。海外额度卡是只读的，不会误调仅服务 CN 账号的重排/删除接口。若 Buddy 已运行后才
+登录 Global 账号，需重启 Buddy 才会注册 `qoderintl`。
+
 ```bash
 uv run python -m buddy_proxy --desensitize --qoder
 ```
@@ -903,7 +908,10 @@ Qoder 有个**「每日领 100 Credits」活动**（桌面端一启动就弹的�
 | `POST` | `/sash/api/v1/me/campaigns/{id}/claim` | **领取** |
 
 Qoder 通道声明了 `supports_checkin`，因此会和 CodeBuddy 一起出现在管理页
-**「打卡 & 额度」**面板里，并纳入自动打卡。
+**「打卡 & 额度」**面板里，并纳入自动打卡。多账号时逐个检查各自活动并显示账号明细，
+避免首账号只有 `VIEW_DETAILS` 时把后续账号的签到奖励漏掉；手动领取会按顺位领取第一个可领账号。
+若上游只返回 `VIEW_DETAILS` 等不可领取活动，界面会明确显示「有活动，暂无可领签到奖励」，
+不会误报「今日无签到活动」或对其发送 claim。
 
 三个值得知道的行为（均为 2026-09 真实账号实测）：
 

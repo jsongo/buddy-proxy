@@ -213,7 +213,7 @@ class QoderProvider(BaseProvider):
         不拖垮整体。``force`` 形参保留兼容旧调用（内部恒强拉）。
         """
         del force  # 逐账号并集语义下恒强拉（见 docstring）
-        accounts = failover.available_accounts(self._region.key) or failover.available_accounts()
+        accounts = failover.available_accounts(self._region.key)
         union: dict[str, dict[str, Any]] = {}
         for acct in accounts:
             try:
@@ -309,70 +309,50 @@ class QoderProvider(BaseProvider):
 
     # -- 每日活动权益（打卡） ------------------------------------------------
 
-    async def _campaigns(self) -> CampaignClient:
-        """构造活动面客户端（复用第一个可用账号的凭据）。
+    async def _campaigns(self, account: AccountRef | None = None) -> CampaignClient:
+        """构造指定区域账号的活动面客户端。
 
-        打卡/额度默认只用首个可用账号（= 额度大、正常打卡的那个）；不跨账号
-        failover——打卡是「每天每账号一次」的语义，叠加没有意义。
+        Qoder 签到按账号独立发放；多账号状态需要逐号查询，领取时也不能只看
+        顺位第一号，否则第一号没有活动会掩盖后续账号的可领活动。
         """
-        accounts = failover.available_accounts(self._region.key) or failover.available_accounts()
-        if not accounts:
-            raise AuthError("qoder 没有可用账号（未登录或全部冷却中）")
-        _, cred_dict = await asyncio.to_thread(ensure_account_token, accounts[0].id)
+        accounts = failover.available_accounts(self._region.key)
+        if account is None:
+            if not accounts:
+                raise AuthError("qoder 没有可用账号（未登录或全部冷却中）")
+            account = accounts[0]
+        elif account.region != self._region.key:
+            raise AuthError(f"qoder 活动账号区域不匹配: {account.region}")
+        _, cred_dict = await asyncio.to_thread(ensure_account_token, account.id)
         cred = cred_to_credential(cred_dict)
         reg = with_cached_endpoints(resolve_region(cred.region))
         return CampaignClient(reg, cred)
 
-    async def checkin_status(self) -> dict[str, Any] | None:
-        """查今日「活动权益」领取状态（``/sash/api/v1/me/campaigns``）。
-
-        判据是**逐条**看 ``CLAIM_BENEFIT`` + ``CLAIMABLE``，不看顶层
-        ``claimable``（它把「仅查看详情」的活动也算进来了，会把"无奖励"报成
-        "可领"，导致自动打卡对着一条领不出东西的活动反复打）。
-
-        每天是可领活动的**新 campaignId**（10:00 UTC+8 轮换），故这里永远
-        重新拉列表、不跨天缓存。返回 ``None`` 以外的结构见
-        ``BaseProvider.checkin_status``。
-        """
-        try:
-            client = await self._campaigns()
-            campaigns = await client.list()
-        except Exception as exc:  # noqa: BLE001 - 状态查询失败不该让整页 500
-            log.warning("qoder 活动状态查询失败: %s", exc)
-            return {"checked_in": False, "claimable": False, "message": str(exc)[:200]}
-
+    async def _campaign_status(self, campaigns: list[Any]) -> dict[str, Any]:
+        """把一个账号的活动列表映射为签到状态。"""
         claimable = [c for c in campaigns if c.is_claimable]
         claimed = [c for c in campaigns if c.action_type == CLAIM_ACTION and c.is_claimed]
         today = claimable[0] if claimable else (claimed[0] if claimed else None)
-
         status: dict[str, Any] = {
             "checked_in": bool(claimed) and not claimable,
             "claimable": bool(claimable),
-            "inactive": not claimable and not claimed,
+            "inactive": not campaigns,
+            "unavailable": bool(campaigns) and not claimable and not claimed,
             "streak_days": 0,
             "message": "",
         }
         if today is not None:
-            status.update(
-                {
-                    "daily_credit": today.amount,
-                    "benefit_kind": today.kind,
-                    "activity_key": today.key,
-                    "activity_name": today.key,
-                    "campaign_id": today.id,
-                    "ends_at": today.end_at or None,
-                }
-            )
-            # 「下次」= 当前状态翻转的时刻，两种状态翻转点不同：
-            # - 已领取：下一轮开始。窗口实测是 ``10:00:00 → 次日 09:59:00``，
-            #   故 ``endAt + 60`` 正是下一轮的 10:00（上游不给未来那条，只能推）。
-            # - 还没领：本轮**截止**。此刻用户该去点「立即打卡」而不是等，显示
-            #   截止时间才有意义（错过就没了）；显示下一轮开始反而误导。
-            if claimable:
-                if today.end_at > 0:
-                    status["next_ts"] = int(today.end_at)
-                    status["next_ts_source"] = SOURCE_UPSTREAM
-            else:
+            status.update({
+                "daily_credit": today.amount,
+                "benefit_kind": today.kind,
+                "activity_key": today.key,
+                "activity_name": today.key,
+                "campaign_id": today.id,
+                "ends_at": today.end_at or None,
+            })
+            if claimable and today.end_at > 0:
+                status["next_ts"] = int(today.end_at)
+                status["next_ts_source"] = SOURCE_UPSTREAM
+            elif not claimable:
                 window_next = next_from_window(today.start_at, today.end_at)
                 if window_next is not None:
                     status["next_ts"] = window_next
@@ -381,21 +361,106 @@ class QoderProvider(BaseProvider):
             status["message"] = f"今日可领 {claimable[0].amount or ''} Credits".strip()
         elif claimed:
             status["message"] = "今日已领取"
+        elif campaigns:
+            # VIEW_DETAILS 等条目证明活动存在，但不代表有可领取的签到奖励。
+            status["message"] = "有活动，但当前没有可领取的签到奖励"
         return status
 
-    async def checkin_claim(self) -> dict[str, Any] | None:
-        """领取今日活动 Credits（``POST .../{campaignId}/claim``）。
+    async def checkin_status(self) -> dict[str, Any] | None:
+        """查同区域所有账号的活动权益领取状态。每天重新拉列表，不跨天缓存。
 
-        **领取是幂等的**：对已领过的活动再 POST 返回 ``replayed: true``（且
-        ``claimedAt`` 是过去那次的时间）——那是补记，不是新领取。返回值里用
-        ``replayed`` 区分，``message`` 据实说明，避免把重放报成「刚领到 100」。
+        只把逐条 ``CLAIM_BENEFIT`` + ``CLAIMABLE`` 当成可领，不采信顶层
+        ``claimable``；账号的活动权益彼此独立，逐号查询并聚合，避免顺位首号
+        没有签到奖励时掩盖后续账号的活动。
         """
-        client = await self._campaigns()
-        campaigns = await client.list()
-        target = next((c for c in campaigns if c.is_claimable), None)
-        if target is None:
-            # 没有可领的：区分「今天已领过」与「今天本来就没有活动」。
-            claimed = [c for c in campaigns if c.action_type == CLAIM_ACTION and c.is_claimed]
+        accounts = failover.available_accounts(self._region.key)
+        if not accounts:
+            if list_accounts():
+                return {"checked_in": False, "claimable": False, "error":
+                        "qoder 没有可用账号（未登录或全部冷却中）"}
+            try:
+                client = await self._campaigns()
+                return await self._campaign_status(await client.list())
+            except Exception as exc:  # noqa: BLE001 - 状态查询失败不该让整页 500
+                log.warning("qoder 活动状态查询失败: %s", exc)
+                return {"checked_in": False, "claimable": False,
+                        "error": str(exc)[:200], "message": str(exc)[:200]}
+
+        didx = {a.id: a.priority + 1 for a in list_accounts()}
+
+        async def _status_one(acct: AccountRef) -> tuple[AccountRef, dict[str, Any]]:
+            try:
+                client = await self._campaigns(acct)
+                status = await self._campaign_status(await client.list())
+                return acct, status
+            except Exception as exc:  # noqa: BLE001 - 单账号失败不阻断其他账号
+                log.warning("qoder 活动状态查询失败（%s）: %s", acct.id, exc)
+                return acct, {"error": str(exc)[:120]}
+
+        # 多账号查询并发，避免每个账号的上游超时串行累加成几十秒的管理页等待。
+        results = await asyncio.gather(*(_status_one(acct) for acct in accounts))
+
+        if len(results) == 1:
+            return results[0][1]
+
+        details = []
+        valid = [status for _, status in results if not status.get("error")]
+        claimable = [s for s in valid if s.get("claimable")]
+        claimed = [s for s in valid if s.get("checked_in")]
+        any_activity = any(not s.get("inactive") for s in valid)
+        for acct, status in results:
+            i = didx.get(acct.id, acct.priority + 1)
+            row = {"id": acct.id, "index": i,
+                   "name": acct.alias or acct.name or acct.email or acct.id}
+            if status.get("error"):
+                row["error"] = status["error"]
+            else:
+                row.update({k: status.get(k) for k in
+                            ("checked_in", "claimable", "inactive", "unavailable", "message")})
+            details.append(row)
+        failures = [s["error"] for _, s in results if s.get("error")]
+        return {
+            "checked_in": bool(claimed) and not claimable,
+            "claimable": bool(claimable),
+            "inactive": not any_activity and not failures,
+            "unavailable": any(s.get("unavailable") for s in valid) and not claimable and not claimed,
+            "error": ("；".join(failures)[:200]
+                      if failures and not claimable and not claimed else ""),
+            "accounts": details,
+            "message": ("有账号可领取签到奖励" if claimable else
+                        "今日已领取" if claimed else
+                        "有活动，但当前没有可领取的签到奖励" if any_activity else ""),
+        }
+
+    async def checkin_claim(self) -> dict[str, Any] | None:
+        """领取首个有可领签到奖励的同区域账号（``POST .../{campaignId}/claim``）。
+
+        账号各自有独立活动列表。按优先级扫描，跳过没有可领取签到奖励的账号，
+        但每次点击仍只领取一个账号的奖励；对已领过的活动再 POST 会重放，故
+        ``replayed`` 仍用于区分是否真的新发 Credits。
+        """
+        accounts = failover.available_accounts(self._region.key)
+        if not accounts:
+            accounts = [None]
+        found_claimable = None
+        claimed = []
+        has_activity = False
+        errors = []
+        for acct in accounts:
+            try:
+                client = await (self._campaigns() if acct is None else self._campaigns(acct))
+                campaigns = await client.list()
+            except Exception as exc:  # noqa: BLE001 - 继续查后续账号
+                errors.append(str(exc)[:120])
+                continue
+            has_activity = has_activity or bool(campaigns)
+            target = next((c for c in campaigns if c.is_claimable), None)
+            if target is not None:
+                found_claimable = (client, target)
+                break
+            claimed.extend(c for c in campaigns
+                           if c.action_type == CLAIM_ACTION and c.is_claimed)
+        if found_claimable is None:
             if claimed:
                 return {
                     "checked_in": True,
@@ -403,13 +468,18 @@ class QoderProvider(BaseProvider):
                     "message": "今日已领取（无需重复领取）",
                     "activity_key": claimed[0].key,
                 }
+            if errors and not has_activity:
+                raise RuntimeError("；".join(errors))
             return {
                 "checked_in": False,
                 "claimable": False,
-                "inactive": True,
-                "message": "当前没有可领取的活动",
+                "inactive": not has_activity,
+                "unavailable": has_activity,
+                "message": ("有活动，但当前没有可领取的签到奖励" if has_activity
+                            else "当前没有可领取的活动"),
             }
 
+        client, target = found_claimable
         result = await client.claim(target.id)
         if not result.ok:
             raise RuntimeError(
@@ -441,7 +511,7 @@ class QoderProvider(BaseProvider):
         各账号条目带 ``Qoder #N · `` 前缀供前端分组；个别账号失败插
         ``query_failed`` 说明条（benefits 层认这个标记走短缓存）。
         """
-        accounts = failover.available_accounts(self._region.key) or failover.available_accounts()
+        accounts = failover.available_accounts(self._region.key)
         if not accounts:
             return None
         multi = len(accounts) > 1
@@ -456,7 +526,9 @@ class QoderProvider(BaseProvider):
             for acct, fut in zip(accounts, futures):  # 按 failover 顺位收集，UI 顺序稳定
                 name = f"#{acct.priority + 1}"
                 try:
-                    its, ok = fut.result(timeout=max(deadline - time.monotonic(), 0.05))
+                    wrapped = asyncio.wrap_future(fut)
+                    its, ok = await asyncio.wait_for(
+                        wrapped, timeout=max(deadline - time.monotonic(), 0.05))
                 except Exception:  # noqa: BLE001 - 超时/异常账号都算失败
                     its, ok = [], False
                 if not ok:
@@ -473,7 +545,7 @@ class QoderProvider(BaseProvider):
                     "query_failed": True,
                 })
         else:
-            its, ok = self._quota_one(accounts[0], 1, multi=False)
+            its, ok = await asyncio.to_thread(self._quota_one, accounts[0], 1, multi=False)
             items = its if ok else []
 
         # level / account 取首个可用账号的（标题行展示用）。

@@ -810,7 +810,10 @@ class TraeProvider(BaseProvider):
             # 传）此刻抛出可安全换号（还没向客户端吐过内容，防重复计费）。见到
             # 语义事件即 committed，绝不重放。anthropic 包装在闸门之后（包住
             # 「缓冲 + 续跑」的拼接流）。
-            gated = _gate_first_event(raw_gen)
+            # 闸门会同步调用 next(_stream)，而 _stream 首事件前可能等上游很久。
+            # 不能在唯一的 asyncio loop 上预驱动，否则一次 Trae 慢响应就拖住
+            # 管理页和其它通道的所有请求。
+            gated = await _gate_first_event_async(raw_gen)
             if isinstance(gated, BaseException):
                 raise gated
             replay = _replay_prefixed(gated.buffered, gated.gen)
@@ -1244,20 +1247,31 @@ class _GatedStream:
         self.gen = gen
 
 
+def _next_or_end(it: Any) -> tuple[bool, Any]:
+    """在线程里驱动同步生成器；用标记返回值避免 StopIteration 穿过 Future。"""
+    try:
+        return True, next(it)
+    except StopIteration:
+        return False, None
+
+
 async def _sync_to_async_iter(it: Any) -> Any:
     """把同步 iterator 包装成 async iterator（喂 StreamingResponse）。
 
-    starlette 的 StreamingResponse 只认 async iterator；本通道的 ``_stream``
-    及 ``_wrap_anthropic_stream`` 都是同步生成器（读线程 + queue 轮询），
-    改造前后都靠这层同步→异步适配喂给 StreamingResponse（由事件循环对
-    ``next()`` 做线程池调度，不在主线程跑同步阻塞代码）。
+    ``_stream`` / ``_wrap_anthropic_stream`` 在拿上游事件时会阻塞等待 queue；
+    每次 ``next()`` 都移出事件循环，否则首帧之后的慢事件仍会卡住全站。
     """
     it = iter(it)
     while True:
-        try:
-            yield next(it)
-        except StopIteration:
+        has_item, item = await asyncio.to_thread(_next_or_end, it)
+        if not has_item:
             return
+        yield item
+
+
+async def _gate_first_event_async(gen: Any) -> "_GatedStream | BaseException":
+    """在线程池预驱动首事件闸门；上游尚未产出语义帧时不占事件循环。"""
+    return await asyncio.to_thread(_gate_first_event, gen)
 
 
 def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":

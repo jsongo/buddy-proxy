@@ -236,6 +236,30 @@ console.log(JSON.stringify({calls: CALLS,
     assert data["closed"] >= 1, "弹窗关闭"
 
 
+def test_qoder_checkin_rename_updates_detail_name():
+    out = _run_js("""
+QODER_ACCTS = [{id: 'u1', name: 'Old name', alias: '旧'}];
+BENEFITS.providers = [{id: 'qoder', checkin: {accounts: [
+  {id: 'u1', name: '旧'}]}}];
+let CALLS = [];
+globalThis.api = async (path, opts) => {
+  CALLS.push(path);
+  return {accounts: [{id: 'u1', name: '新名字', alias: '新名字', email: 'a@x'}]};
+};
+globalThis.toast = () => {};
+const INPUT = {value: '新名字'};
+const origGet = document.getElementById.bind(document);
+document.getElementById = id => id === 'acct-rename-input' ? INPUT : origGet(id);
+await acctRenameSubmit('qoder', 'u1');
+console.log(JSON.stringify({name: BENEFITS.providers[0].checkin.accounts[0].name,
+  alias: QODER_ACCTS[0].alias, calls: CALLS}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["name"] == "新名字"
+    assert data["alias"] == "新名字"
+    assert data["calls"] == ["/ui/api/qoder/accounts/rename"]
+
+
 def test_move_delete_row_buttons_markup():
     """▲▼ 带 id 内联 + 首尾禁用；✕ 带 pid+id + 通道 hint；↻ 无条件排在按钮组最前。"""
     out = _run_js("""

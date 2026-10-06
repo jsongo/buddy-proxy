@@ -9,10 +9,10 @@ failover），``QoderProvider`` 全部按 ``self._region`` 取址；本类只把
 模型目录无需静态表：``Catalog.fetch`` 按 region 动态拉取（海外目录与 CN
 不同，上游说了算）。
 
-签到（每日活动权益）**保留** ``supports_checkin=True``：海外是否有活动
-由上游 ``/sash/.../campaigns`` 实测决定——有活动就正常签，没有则
-``checkin_status`` 返回 ``inactive``，自动签到调度自动跳过（``benefits._tick``
-的 ``claimable is False`` 分支），不硬编码假设。
+签到（每日活动权益）**保留** ``supports_checkin=True``：海外活动由上游
+``/sash/.../campaigns`` 决定。没有任何活动时返回 ``inactive``；若有
+``VIEW_DETAILS`` 等活动但无可领签到奖励，则状态标为 ``unavailable``，UI 显示
+「有活动，暂无可领签到奖励」，自动打卡不会对非奖励活动发送 claim。
 
 ``forward()`` 继承父类的同区严格语义：海外通道只轮转 ``region=global`` 的
 账号，一个都没有时报 401「无该区域可用账号」，**不**兜底捞 CN 账号。

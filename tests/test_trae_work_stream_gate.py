@@ -7,12 +7,17 @@
 """
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 from fastapi import HTTPException
 
 from buddy_proxy.trae.provider import (
     _account_error_from_frame,
     _gate_first_event,
+    _gate_first_event_async,
+    _sync_to_async_iter,
 )
 
 
@@ -77,6 +82,39 @@ def test_gate_exception_before_first_event_propagates():
     out = _gate_first_event(_raising())
     assert isinstance(out, HTTPException)
     assert out.status_code == 401
+
+
+def test_async_gate_keeps_event_loop_responsive_while_waiting():
+    def _slow():
+        time.sleep(0.2)
+        yield 'data: {"x":1}\n\n'
+
+    async def run():
+        task = asyncio.create_task(_gate_first_event_async(_slow()))
+        started = time.monotonic()
+        await asyncio.sleep(0.01)
+        assert time.monotonic() - started < 0.12
+        result = await task
+        assert result.buffered == ['data: {"x":1}\n\n']
+
+    asyncio.run(run())
+
+
+def test_sync_to_async_iter_keeps_event_loop_responsive_while_waiting():
+    def _slow():
+        time.sleep(0.2)
+        yield "first"
+
+    async def run():
+        iterator = _sync_to_async_iter(_slow())
+        task = asyncio.create_task(iterator.__anext__())
+        started = time.monotonic()
+        await asyncio.sleep(0.01)
+        assert time.monotonic() - started < 0.12
+        assert await task == "first"
+        await iterator.aclose()
+
+    asyncio.run(run())
 
 
 # -- _account_error_from_frame 边界 ------------------------------------------

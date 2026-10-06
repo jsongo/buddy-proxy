@@ -583,6 +583,43 @@ async function loadQoderAccounts() {
 }
 
 
+// ---- QODER INTL 面板（只读额度；不复用 CN 账号管理 API）----
+function renderQoderIntlPanel() {
+  const panel = document.getElementById('qoderintl-panel');
+  if (!panel) return;
+  const provider = (BENEFITS.providers || []).find(p => p.id === 'qoderintl' && !p.disabled);
+  if (!provider) { panel.innerHTML = ''; return; }
+
+  const groups = new Map();
+  const notices = [];
+  for (const it of (provider.quota && provider.quota.supported ? provider.quota.items : []) || []) {
+    if (it.query_failed || (it.percent == null && it.used == null)) { notices.push(it); continue; }
+    const idx = it.label.indexOf(' · ');
+    const raw = idx >= 0 ? it.label.slice(0, idx) : 'Global';
+    const grp = raw.startsWith('Qoder #') ? raw.replace('Qoder #', 'Global #') : raw;
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => {
+    const headSum = quotaHeadSum({items: its, sum_items: true});
+    return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>` +
+      `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
+      `${quotaItemsHtml(its, 'qoderintl:' + grp)}</div>`;
+  }).join('');
+  const noticeHtml = notices.map(quotaItemHtml).join('');
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head"><span class="name">Qoder 海外版</span>
+        <span class="tag">Global · 额度与签到</span><span class="grow"></span>
+        <button class="ghost" title="刷新本通道额度（绕过缓存重查）" onclick="refreshProviderQuota('qoderintl', this)">↻</button>
+      </div>
+      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
+      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（登录后重启 Buddy 注册通道）</div>'}
+    </div>`;
+}
+
 // ---- TRAE WORK 面板（qoder 同款布局：每账号一块，标题=账号名、副标题=区域/冷却，
 //      ▲▼ 顺位 / ✕ 删除 / ✎ 改名 / ↻ 刷新）----
 // 数据两路：额度走 /ui/api/benefits 里 trae 条目（label 带「Trae #N · 」前缀），

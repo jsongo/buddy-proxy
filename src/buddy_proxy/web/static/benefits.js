@@ -198,6 +198,7 @@ function renderBenefits() {
     // 签到态做成带状态点的徽标；「连续 N 天 / 每日 +X」降级成旁边的小 chip，
     // 别和状态挤在同一个 tag 里（那行本来就长，挤一起更难扫）
     const st = c.error ? `<span class="br-state bad" title="${esc(c.error)}">状态未知</span>`
+      : c.unavailable ? `<span class="br-state" title="${esc(c.message || '')}">有活动，暂无可领签到奖励</span>`
       : c.inactive ? '<span class="br-state">今日无签到活动</span>'
       : c.done_today ? '<span class="br-state ok">已签到</span>'
       : '<span class="br-state pending">未签到</span>';
@@ -206,18 +207,18 @@ function renderBenefits() {
     if (c.streak_days >= 2) chips.push(`连续 ${c.streak_days} 天`);
     if (c.activity_name) chips.push(c.activity_name);
     const meta = chips.map(t => `<span class="br-chip">${esc(t)}</span>`).join('');
-    // 多账号通道的 per-account 明细（trae checkin_status/checkin_claim 下发的
-    // accounts 列表）：一行一账号，徽标 + 失败原因。整体聚合态说不清「哪个
-    // 号没签上」，用户反馈过这个盲点。
+    // 多账号通道的 per-account 明细（Trae/Qoder 下发的 accounts 列表）：一行一账号，
+    // 徽标 + 失败原因。整体聚合态说不清「哪个号没签上」，用户反馈过这个盲点。
     const acctsHtml = (c.accounts || []).map(a => {
       const s = a.error ? `<span class="br-state bad" title="${esc(a.error)}">查询失败</span>`
+        : a.unavailable ? `<span class="br-state" title="${esc(a.message || '')}">暂无可领奖励</span>`
         : a.inactive ? '<span class="br-state">无活动</span>'
         : a.ok === false ? '<span class="br-state bad">失败</span>'
         : (a.claimable ? '<span class="br-state pending">可领</span>'
           : '<span class="br-state ok">已签到</span>');
       const extra = a.message ? `<span class="muted" style="font-size:11px">${esc(a.message)}</span>` : '';
       return `<div class="ck-acct">${s}<span class="ck-acct-name">${esc(a.name || ('#' + a.index))}</span>` +
-        `${a.id ? acctRenameButton('trae', a) : ''}${extra}</div>`;
+        `${a.id && p.id !== 'qoderintl' ? acctRenameButton(p.id, a) : ''}${extra}</div>`;
     }).join('');
     // 照 antigravity 面板的卡中卡（pat-pkg）包一层：两列平摊时裸行 + 底线
     // 会把左右两列糊成一片，子卡（亮底 + 描边 + 圆角）分隔一眼能看出来
@@ -229,7 +230,7 @@ function renderBenefits() {
         </div>
         <div class="br-meta">${st}${meta}${nextTimeHtml(c)}</div>
         <div class="br-act">
-          <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)">立即打卡</button>
+          <button class="primary" ${(c.done_today || c.inactive || c.unavailable) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)">立即打卡</button>
         </div>
       </div>
       ${acctsHtml ? `<div class="ck-accts">${acctsHtml}</div>` : ''}
@@ -239,9 +240,9 @@ function renderBenefits() {
   syncNextTimeAuto();
 
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
-  // traepat/antigravity/kimi/qoder/trae/codebuddy/dumate 的额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
+  // traepat/antigravity/kimi/qoder/qoderintl/trae/codebuddy/dumate 的额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
   // 停用的通道整卡不展示（模型页 provider 开关，用户 2026-10-06 需求）
-  const qps = (BENEFITS.providers || []).filter(p => !p.disabled && p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'trae' && p.id !== 'codebuddy' && p.id !== 'dumate');
+  const qps = (BENEFITS.providers || []).filter(p => !p.disabled && p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'qoderintl' && p.id !== 'trae' && p.id !== 'codebuddy' && p.id !== 'dumate');
   // zcode / zcode-start 是同一家产品的两档套餐，卡片排一起好对照——providers
   // 默认按通道注册顺序排，zcode-start 落在队尾、和 zcode 中间隔着 glm/mimo 的卡
   const zcIdx = qps.findIndex(p => p.id === 'zcode');
@@ -266,6 +267,7 @@ function renderBenefits() {
   renderAntigravityPanel();
   renderKimiPanel();
   renderQoderPanel();
+  renderQoderIntlPanel();
   renderTraePanel();
   renderCodebuddyPanel();
   syncQuotaFold();  // 样式与布局就位后按实际高度校准（各面板都已重建完）

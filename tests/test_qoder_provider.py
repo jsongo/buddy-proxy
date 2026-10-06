@@ -946,6 +946,63 @@ def test_models_does_not_list_openai_style_ids():
         assert internal not in ids
 
 
+@pytest.mark.parametrize("account_count", [1, 2])
+def test_quota_wait_does_not_block_event_loop(monkeypatch, account_count):
+    """单/多账号的慢同步额度请求都必须在线程中等待。"""
+    import asyncio
+    import time
+    from types import SimpleNamespace
+
+    import buddy_proxy.qoder.provider as qoder_provider
+
+    provider = _provider()
+    accounts = [SimpleNamespace(id=f"acct-{i}", priority=i) for i in range(account_count)]
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: accounts)
+    monkeypatch.setattr(qoder_provider, "ensure_account_token", lambda _id: ("token", {}))
+    monkeypatch.setattr(qoder_provider, "cred_to_credential",
+                        lambda _cred: SimpleNamespace(plan="test"))
+
+    def slow_quota(_acct, _index, *, multi):
+        time.sleep(0.2)
+        return ([{"label": "quota"}], True)
+
+    monkeypatch.setattr(provider, "_quota_one", slow_quota)
+
+    async def run():
+        task = asyncio.create_task(provider.quota())
+        started = time.monotonic()
+        await asyncio.sleep(0.01)
+        assert time.monotonic() - started < 0.12
+        result = await task
+        assert result["items"]
+
+    asyncio.run(run())
+
+
+def test_qoderintl_quota_and_checkin_never_fall_back_to_cn_accounts(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from buddy_proxy.qoder import failover
+    from buddy_proxy.qoder.credentials import AuthError
+    from buddy_proxy.qoder.intl_provider import QoderIntlProvider
+
+    calls = []
+    cn_accounts = [SimpleNamespace(id="cn-account", priority=0)]
+
+    def available(region=None):
+        calls.append(region)
+        return [] if region == "global" else cn_accounts
+
+    monkeypatch.setattr(failover, "available_accounts", available)
+    provider = QoderIntlProvider()
+
+    assert asyncio.run(provider.quota()) is None
+    with pytest.raises(AuthError, match="没有可用账号"):
+        asyncio.run(provider._campaigns())
+    assert calls == ["global", "global"]
+
+
 def test_quota_prefers_addon_when_user_quota_empty():
     """个人版 ``userQuota`` 恒为 0，真实额度在 ``addOnQuota``。"""
     from buddy_proxy.qoder.provider import QoderProvider
