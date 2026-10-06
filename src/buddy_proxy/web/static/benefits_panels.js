@@ -683,12 +683,16 @@ function renderTraePanel() {
   // - head_only 条（「总额度」= 各权益包合计）不进明细列表，但**要**用作
   //   合计行数字——quotaItemsHtml 跳过它、quotaHeadSum 非 sum_items 分支取
   //   「第一条有数的」正好是它（items[0]，后端按总额度在前排列）。
-  // - 未登录说明条（remaining 是文案、无 percent/used）进 notices 横贯全宽，
-  //   与 qoder 的 groupAccountsByPrefix 同判据。
+  // - 无数字条目分两种：带组前缀的（如「免费」包，只有到期日没有额度数字）
+  //   归进各账号子卡片当一行明细（横贯全宽反而像独立告警——用户 2026-10-06
+  //   反馈）；连前缀都没有的孤条（未登录说明等）才进 notices 横贯全宽。
   const groups = new Map();
   const notices = [];
   for (const it of (trae.quota && trae.quota.supported ? trae.quota.items : []) || []) {
-    if (it.query_failed || (it.percent == null && it.used == null)) { notices.push(it); continue; }
+    if (it.query_failed ||
+        (it.percent == null && it.used == null && it.label.indexOf(' · ') < 0)) {
+      notices.push(it); continue;
+    }
     if (it.head_only) {
       // head_only 条挂到「它前缀对应的组」的合计位；组还没出现就先攒着，
       // 循环结束后按 grp 补进去（后端顺序保证它在该组条目最前）

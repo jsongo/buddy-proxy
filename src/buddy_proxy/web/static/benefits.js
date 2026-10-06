@@ -131,7 +131,9 @@ function renderExpiryBanner() {
     const amt = isCredit
       ? `剩 ${fmtNum(p.remaining)} credits`
       : (p.percent_left != null ? `剩 ${fmtNum(p.percent_left)}%` : '余额不足');
-    const lbl = !isCredit && p.label ? ` · ${esc(p.label)}` : '';
+    // label 一律拼上（后端已剥掉通道名前缀，形如「#1 · 总额度」）：多账号下
+    // 只有「Trae · 余额告急」看不出告的是哪个号（用户 2026-10-06 反馈）
+    const lbl = p.label ? ` · ${esc(p.label)}` : '';
     return `<span class="eb-prov">${esc(p.provider_name || p.provider)}</span>` +
       `<span class="eb-label">余额告急${lbl} · ${amt}</span>` +
       `<span class="eb-date">—</span>` +

@@ -108,7 +108,10 @@ def _first_num(obj: dict[str, Any], keys: Sequence[str]) -> float | None:
 
 class TraeProvider(BaseProvider):
     id = "trae"
-    name = "Trae (本地解密直连)"
+    # 显示名保持干净的「Trae」：它会进告警横幅（「Trae · 余额告急 · …」）、
+    # 卡片标题等用户可见处——早先的「(本地解密直连)」实现备注（用户 2026-10-06
+    # 反馈）放在显示名里只有山寨感，实现细节看代码注释就够了。
+    name = "Trae"
     # 打卡/积分 API 只有 Trae 上游提供（/ui 自动打卡据此识别）。
     # 海外版上游没有签到端点，TraeIntlProvider 会把它覆写成 False。
     supports_checkin = True

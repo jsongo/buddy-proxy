@@ -441,6 +441,21 @@ def test_quota_low_without_sum_items_takes_first_item_only():
     assert out[0]["remaining"] == 200.0, "不能把明细包加进来双算"
 
 
+def test_quota_low_strips_provider_prefix_from_label():
+    """带通道名前缀的 label（「Trae #1 · 总额度」）在出口剥掉前缀：横幅拼的是
+    「{provider_name} · 余额告急 · {label}」，不剥就出「Trae · … · Trae #1」
+    两遍（用户 2026-10-06 反馈：多账号告警看不出是哪个号，补 label 时暴露）。
+    顺带锚 credit 通道也带 label——早先只有占比通道拼。"""
+    entry = _entry("trae", [
+        _item("Trae #1 · 总额度", expire_days=None, remaining=200, unit="credit")
+        | {"total": 1000},
+    ], name="Trae")
+    out = _quota_low([entry])
+    assert len(out) == 1
+    assert out[0]["label"] == "#1 · 总额度"
+    assert out[0]["provider_name"] == "Trae"
+
+
 def test_quota_low_non_credit_uses_percent():
     """非 credits 渠道按占比判定（它们没有 credits 概念）：antigravity 千分制
     剩 3.05%、ZCode 窗口剩 5% 都该报；MiMo 剩 15% 不报。"""
