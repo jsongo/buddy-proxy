@@ -220,3 +220,31 @@ def test_claim_rate_limited_exhausted_keeps_upstream_message(monkeypatch):
     assert n["u2"] == len(provider._CHECKIN_RETRY_DELAYS) + 1, "按退避表打满重试次数"
     # #1 成功不受影响（单账号失败不阻塞其它账号的原语义）
     assert st["accounts"][0]["ok"] is True
+
+
+def test_claim_device_rejected_translates_message(monkeypatch):
+    """指纹池尽（device_rejected）：不再退避重试，message 翻译成真实原因——
+    上游原话「当前参与用户太多」是烟幕（2026-10-06 实锤=设备指纹黑名单），
+    照搬会把排查带去查限流；用户要知道的是指纹被拒、稍后自动重试。"""
+    _seed("u1", "u2")
+    monkeypatch.setattr(failover, "_cooldowns", {})
+    monkeypatch.setattr("buddy_proxy.trae.provider.time.sleep", lambda s: None)
+    n = {"u2": 0}
+
+    def _claim(token="", account_id="", region=""):
+        if account_id == "u2":
+            n["u2"] += 1
+            return {"code": 9074, "message": "当前参与用户太多，请稍后再试",
+                    "device_rejected": True}
+        return {"code": 0, "credits_granted": 30, "message": "OK"}
+
+    monkeypatch.setattr("buddy_proxy.trae.provider.claim_checkin_credits", _claim)
+    st = TraeProvider().checkin_claim()
+
+    a2 = st["accounts"][1]
+    assert a2["ok"] is False
+    assert n["u2"] == 1, "池尽不再按限流退避重试（同样的 4 台设备重试也救不回）"
+    assert "设备指纹" in a2["message"] and "参与用户太多" not in a2["message"], \
+        "要翻译成真实原因，不能照搬上游烟幕文案"
+    assert "参与用户太多" not in st["message"], "聚合 message 同样不带烟幕文案"
+    assert st["accounts"][0]["ok"] is True

@@ -389,6 +389,7 @@ class TraeProvider(BaseProvider):
             ok = False
             granted: float | None = None
             last_rl = False
+            device_rejected = False  # 本账号最终是不是指纹池尽（见失败分支）
             for attempt in range(len(_CHECKIN_RETRY_DELAYS) + 1):
                 last_rl = False
                 try:
@@ -413,7 +414,8 @@ class TraeProvider(BaseProvider):
                 msg = str(data.get("message"))[:60]
                 # 9074 池尽（device_rejected）= 指纹黑名单，换机都没救回来，
                 # 5/10s 退避后再来也是同样的 4 台设备——按最终失败处理
-                last_rl = (not data.get("device_rejected")) and _claim_rate_limited(data)
+                device_rejected = bool(data.get("device_rejected"))
+                last_rl = (not device_rejected) and _claim_rate_limited(data)
                 if last_rl and attempt < len(_CHECKIN_RETRY_DELAYS):
                     log.info("trae 签到限流（%s），%.0fs 后重试 %d/%d",
                              acct.id, _CHECKIN_RETRY_DELAYS[attempt],
@@ -433,7 +435,15 @@ class TraeProvider(BaseProvider):
                 })
             else:
                 # 重试耗尽仍限流：说明「稍后再试」——别写死「失败」，
-                # message 保持上游原话，用户稍后手动再点一次即可补上
+                # message 保持上游原话，用户稍后手动再点一次即可补上。
+                # 指纹池尽（device_rejected）则必须翻译：上游原话是「当前参与
+                # 用户太多」的烟幕，照搬会把人带去查限流——2026-10-06 实锤真因
+                # 是设备指纹黑名单（换满 4 台备选机都救不回来），告诉用户真实
+                # 原因和自愈方式（稍后自动重试/查 devices.json）才对。
+                if device_rejected:
+                    msg = ("设备指纹被上游拒（已自动换 4 台设备仍失败），"
+                           "稍后自动重试；持续失败删除 ~/.buddy-proxy/trae/"
+                           "devices.json 对应条目重派")
                 messages.append(f"{tag} 失败：{msg}")
                 acct_details.append({"index": i, "id": acct.id, "name": name,
                                      "ok": False, "message": msg})
