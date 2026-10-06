@@ -58,9 +58,27 @@ def proxy_state(monkeypatch):
     拆分后 get_state() 在 state 模块内读取模块级 proxy_state 变量，
     故直接替换 st.proxy_state 即可让所有模块（routes/codebuddy_provider
     等）拿到假 state。
+
+    多账号改造后 forward 不再走 state.client 认证，而是读多账号 store
+    （failover.available_accounts + creds.ensure_account_token）——测试环境
+    CODEBUDDY_STATE_DIR 已被 conftest 隔离成空目录，直接 429「所有账号均在
+    冷却中」。这里塞一个假账号（token 也 mock 掉，不碰真实凭据文件），并把
+    冷却表清空——前一个测试触发的 429 冷却（模块级 tracker 跨测试存活）不能
+    泄漏到下一个测试里。
     """
     state = _make_state()
     monkeypatch.setattr(st, "proxy_state", state)
+    acct = cbp.creds.AccountRef(id="uid-test", uid="uid-test", nickname="tester",
+                                priority=0, added_at=1)
+    monkeypatch.setattr(cbp.failover, "list_accounts", lambda: [acct])
+    cbp.failover._cooldowns.clear()
+    monkeypatch.setattr(
+        cbp.creds, "ensure_account_token",
+        lambda aid, **kw: ("test-token", {
+            "account_id": aid, "token": "test-token", "refresh_token": "rt",
+            "uid": "uid-test", "nickname": "tester", "machine_id": "machine-test",
+            "expires_at_ms": int((time.time() + 3600) * 1000), "source": "state",
+        }))
     return state
 
 

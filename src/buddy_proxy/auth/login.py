@@ -132,10 +132,25 @@ def _login_codebuddy(open_browser: bool = True) -> int:
     if not auth.get("accessToken"):
         print("[!] 登录流程结束但 session 中没有 accessToken", file=sys.stderr)
         return 1
+    # 同步进多账号 store（幂等 upsert：同 uid 重登只更新凭据、顺位不变；
+    # 新账号追加到 failover 末位）。session 文件本身保留——它是 CodeBuddyClient
+    # 的历史落盘位置，也是迁移源，删了会破坏「老 session 首次触达自动迁移」。
+    try:
+        from buddy_proxy.codebuddy_provider import credentials as cb_creds
+
+        cred = cb_creds.session_to_cred(session)
+        ref = cb_creds.save_account_cred(cred)
+        accounts = cb_creds.list_accounts()
+        pos = next((i + 1 for i, a in enumerate(accounts) if a.id == ref.id), "?")
+    except Exception as exc:  # noqa: BLE001 — store 写失败不该掩盖登录成功
+        print(f"[!] 登录成功但写入多账号 store 失败: {exc}", file=sys.stderr)
+        pos = None
     print()
     print(f"[OK] CodeBuddy 登录成功（{endpoint}）")
     if account.get("nickname") or account.get("uid"):
         print(f"    账号: {account.get('nickname') or ''} uid={account.get('uid')}")
+    if pos is not None:
+        print(f"    failover 顺位: #{pos}（共 {len(accounts)} 个账号）")
     print(f"    会话已写入 {client.session_file}")
     return 0
 
