@@ -316,3 +316,80 @@ def test_forward_4008_account_fails_over_to_funded_account():
     assert kind == "quota" and _left > 0
     # 用尽的号进 quota 冷却后，后续请求直接从 funded 开始，不再先撞 4008
     assert failover.available_accounts()[0].id == accounts[1].id
+
+
+# -- metrics 账号归属 ----------------------------------------------------------
+
+def test_forward_reports_used_account_to_metrics():
+    """work 循环选定账号后写 ACCOUNT_META（/ui 请求日志「通道」列的账号后缀）。
+
+    qoder/kimi/antigravity 同款：选号即写 ``meta["account"]``，failover 后被
+    覆盖为最终账号。值用 alias > nickname 链（用户认得的名字，不是 UUID）。
+    """
+    from buddy_proxy.core.metrics import ACCOUNT_META
+
+    accounts = _seed_accounts("u1", "u2")
+    p = TraeProvider()
+
+    async def fake_forward_once(body, protocol, original, requested_model,
+                                prompt, messages, tools, native, stream, agent_mode):
+        return _ok_response()
+
+    meta: dict = {}
+    holder = ACCOUNT_META.set(meta)
+    try:
+        async def run():
+            with mock.patch.object(TraeProvider, "_forward_once",
+                                   side_effect=fake_forward_once):
+                return await _forward(p)
+        resp = asyncio.run(run())
+    finally:
+        ACCOUNT_META.reset(holder)
+
+    assert resp.status_code == 200
+    assert meta["account"] == "U1"  # nickname（_seed_accounts 用 u1.title()）
+
+
+def test_failover_reports_final_account_to_metrics():
+    """首个账号 401 换号后，meta 里是**最终服务成功**的那个账号。"""
+    from buddy_proxy.core.metrics import ACCOUNT_META
+
+    accounts = _seed_accounts("u1", "u2")
+    p = TraeProvider()
+
+    async def fake_forward_once(body, protocol, original, requested_model,
+                                prompt, messages, tools, native, stream, agent_mode):
+        acct = _CURRENT_WORK_ACCOUNT.get()
+        if acct == accounts[0].id:
+            raise HTTPException(status_code=401, detail="auth expired")
+        return _ok_response()
+
+    meta: dict = {}
+    holder = ACCOUNT_META.set(meta)
+    try:
+        async def run():
+            with mock.patch.object(TraeProvider, "_forward_once",
+                                   side_effect=fake_forward_once):
+                return await _forward(p)
+        resp = asyncio.run(run())
+    finally:
+        ACCOUNT_META.reset(holder)
+
+    assert resp.status_code == 200
+    assert meta["account"] == "U2"
+
+
+def test_forward_without_account_meta_holder_still_works():
+    """离线/单测等未经 _instrument 的场景 holder 为 None，不能炸。"""
+    _seed_accounts("u1")
+    p = TraeProvider()
+
+    async def fake_forward_once(body, protocol, original, requested_model,
+                                prompt, messages, tools, native, stream, agent_mode):
+        return _ok_response()
+
+    async def run():
+        with mock.patch.object(TraeProvider, "_forward_once",
+                               side_effect=fake_forward_once):
+            return await _forward(p)
+    assert asyncio.run(run()).status_code == 200

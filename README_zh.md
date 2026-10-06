@@ -24,12 +24,16 @@
 
 ## 安装与启动
 
-代理是 `src/` 下的一个普通 Python 包，用 [uv](https://docs.astral.sh/uv/) 从源码运行：
+代理是 `src/` 下的普通 Python 包，用 [uv](https://docs.astral.sh/uv/) 安装依赖后，日常通过 `buddy` 脚本管理：
 
 ```bash
 uv sync
-uv run python -m buddy_proxy --desensitize
+./buddy install            # 一次性安装 buddy 命令到 PATH
+buddy start                # 启动代理并打开管理页
 ```
+
+尚未安装脚本时，在仓库目录内使用 `./buddy start`。登录上游用 `buddy login <provider>`；
+`buddy` 是仓库提供的 shell 脚本，不是 `uv sync` 自动安装的 Python 命令。
 
 首次运行会自动创建状态目录 `~/.buddy-proxy/`（权限 `0700`，可用
 `BUDDY_PROXY_STATE_DIR` 整体覆盖）。机器本地的东西都在这里：`settings.json`
@@ -37,10 +41,11 @@ uv run python -m buddy_proxy --desensitize
 缓存 `trae_pat_token.json`、客户端名映射 `buddy_client_names.json`。目录内含凭证，
 注意别被备份或版本控制带走。启动时会以 `[State] ...` 打印实际路径。
 
-首次使用需要登录（会打开浏览器）：
+首次使用：按上文说明先安装 `buddy` 包装命令，然后启动代理并按需登录：
 
 ```bash
-uv run python -m buddy_proxy --login --desensitize
+buddy start
+buddy login codebuddy
 ```
 
 默认监听 `http://127.0.0.1:8787`，管理界面在 **http://127.0.0.1:8787/ui**。
@@ -50,22 +55,22 @@ uv run python -m buddy_proxy --login --desensitize
 `buddy` 是日常使用的入口：一条命令启动 + 自动打开管理页，也可以把代理注册成 macOS 系统服务（launchd，登录自启 + 崩溃自动拉起）。
 
 ```bash
-./buddy start              # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
-./buddy stop / restart / status / logs
-./buddy login [provider]   # 登录/自检上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/dumate/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi）
+# 安装前在仓库目录里用 ./buddy；一次性安装到 PATH 后可在任意目录用 buddy
+./buddy install            # 安装到 /usr/local/bin（不可写时退回 ~/.local/bin）
+
+buddy start                # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
+buddy stop / restart / status / logs
+buddy login [provider]     # 登录/自检上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/dumate/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi）
                            # trae/qoder 可加 --region cn|global（两区账号不通用），其它 provider 忽略该参数；
                            # traeintl/qoderintl 是登录别名，等价 --region global；登录过海外账号会自动启用独立通道，
                            # 管理页里海外额度单独一张卡
-./buddy ui                 # 仅打开管理页（必要时先启动）
-./buddy update             # 更新到最新代码（git pull -> uv sync -> 重启）
-
-# 一次性安装：把 buddy 放进 PATH，之后任意目录敲 buddy 即可
-./buddy install            # 装到 /usr/local/bin（不可写时退回 ~/.local/bin）
+buddy ui                   # 仅打开管理页（必要时先启动）
+buddy update               # 更新到最新代码（git pull -> uv sync -> 重启）
 
 # 注册为系统服务（launchd）：登录自启、崩溃自动拉起
-./buddy service install    # 之后 start/stop/restart 自动走 launchctl
-./buddy service status
-./buddy service uninstall
+buddy service install      # 之后 start/stop/restart 自动走 launchctl
+buddy service status
+buddy service uninstall
 ```
 
 - 有系统服务时 `buddy start/stop/restart` 自动转 `launchctl`，否则走 `proxy.sh` 的 pid 管理
@@ -114,7 +119,7 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 
 ```bash
 # 启用豆包 provider（需要本机已安装并登录豆包工作 App）
-uv run python -m buddy_proxy --desensitize --doubao
+buddy start
 ```
 
 - **原理**：复用豆包工作 App 的登录态与内置 Chromium（CDP 直连），在页面 JS 环境 fetch
@@ -160,7 +165,7 @@ uv run python -m buddy_proxy --desensitize --doubao
 
 ```bash
 # 启用 DuMate provider（需要本机已安装并登录 DuMate.app 且在运行）
-uv run python -m buddy_proxy --desensitize --dumate
+buddy start
 ```
 
 - **原理**：复用 DuMate.app 内置的本地代理（`dumate-main-server`，监听
@@ -191,14 +196,15 @@ uv run python -m buddy_proxy --desensitize --dumate
 除 CodeBuddy 和豆包外，内置 Trae provider（解密 Trae IDE 登录态，直连底层模型）：
 
 ```bash
-# 启用 Trae provider（需要本机已安装并登录 Trae IDE）
-uv run python -m buddy_proxy --desensitize --trae
+# buddy start 默认已启用 Trae（需本机已安装并登录 Trae IDE）
+buddy start
 ```
 
 - **原理**：自动解密 Trae IDE 本地存储的 tc 加密登录态（AES-128-CBC + SHA-512），
   或从 `.env` 读 `TRAE_TOKEN` / `TRAE_USER_ID`，直连 `trae-api-cn.mchost.guru`
-- **模型**：T1-T5 分级（glm-5.2 / qwen-3.7-plus / kimi-k2.6 / DeepSeek-V4-Pro 等），
-  支持外部名别名（如 `claude-sonnet-4-5` → `glm-5.2`）
+- **模型**：目录列出已验证可用的模型名及其别名（如 `deepseek-v4-pro` → `DeepSeek-V4-Pro`，
+  对外统一小写、转发时还原上游大小写敏感名；step-5-preview 这类上游只认全小写的则原样透传），
+  顺序沿用上游客户端的展示顺序。
 - **原生通道（2026-09 起）**：全部请求（含纯聊天）默认走 `chat_v3` 直通——
   带 `tools` 时为原生 function calling（结构化 `tool_calls` + `role:"tool"` 历史回放），
   纯聊天无服务端 agent 预设、不再注入压制指令与泄漏清洗；原生请求遇 `4001` 会回落文本协议。
@@ -214,30 +220,32 @@ uv run python -m buddy_proxy --desensitize --trae
   错误会以友好中文文案透传
 - **海外版（`traeintl`，2026-10 起）**：`buddy login trae --region global` 登录海外账号后
   自动启用独立通道（`traeintl/<model>` 寻址、额度卡单独一张、无签到——海外上游没有签到端点）。
-  模型池与 CN 是**两套**（2026-10-06 probe 实测收录 10 个）：T1 `gpt-6-sol` / `gpt-6-luna` /
-  `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `kimi-k3`，T2 `gpt-5.4` / `gpt-5.2` /
-  `glm-5.2`，T3 `minimax-m3`。协议与 CN 两处不同：`messages[].content` 必须是内容块数组
+  模型池与 CN 是**两套**（2026-10-06 probe 实测收录 10 个）：`gpt-6-sol`、`gpt-6-luna`、
+  `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`kimi-k3`、`gpt-5.4`、`gpt-5.2`、
+  `glm-5.2`、`minimax-m3`。协议与 CN 两处不同：`messages[].content` 必须是内容块数组
   （纯字符串上游 400 反序列化错）；function 绑定按区分表——gpt-5.6 系 / `glm-5.2` /
   `minimax-m3` 在默认 `solo_work_lite` 下 4001，自动改走 `chat_v3`。IDE 下拉里有但实测
   agent 通道全 4001 的（`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`）
   不收录。额度是**次数制 + 美元混量纲**（Pro 包）：「Premium 快速请求」600 次/月
   （上游不给已用次数，显示「—」）+「Basic 用量」$ 美元真实已用；`is_hide` 的垃圾包自动过滤
 
-#### Trae 账号工具（`trae-cli`）
+#### Trae 账号工具（可选：`trae-cli`）
 
-安装后（`uv sync` / `pip install .`）自带 `trae-cli` 命令，可查询/领取签到积分、查看权益、测试对话：
+`trae-cli` **不是登录必需工具**。Trae Work 登录请用 `buddy login trae`：它会打开授权 URL，
+在浏览器完成授权后由本地回调自动接收结果。`trae-cli` 是独立的可选工具，仅用于查询/领取签到积分、
+查看权益和测试对话。在仓库目录中通过项目环境运行：
 
 ```bash
-uv run trae-cli status            # 签到/积分状态（剩余积分、今日是否已签到）
-uv run trae-cli claim             # 领取今日签到积分
-uv run trae-cli usage             # 权益/用量（总额、已用比例、权益包列表）
-uv run trae-cli chat -m glm-5.3 -q "你好"    # 发一条对话测试
+trae-cli status            # 签到/积分状态（剩余积分、今日是否已签到）
+trae-cli claim             # 领取今日签到积分
+trae-cli usage             # 权益/用量（总额、已用比例、权益包列表）
+trae-cli chat -m glm-5.3 -q "你好"    # 发一条对话测试
 ```
 
+`uv sync` 会把该命令安装到项目虚拟环境；若单独安装 Python 包，命令则位于对应 Python 环境中。
 认证自动加载：优先 Work 多账号状态目录 `~/.buddy-proxy/trae/`（`index.json` + 每账号
-一份 0600 cred；由 `python -m buddy_proxy.auth.trae_work_login` 或 `buddy login trae`
-生成/追加，按 uid/refresh_token upsert——重登同号更新、新号追加）。历史单账号
-`~/.buddy-proxy/trae_work.json`（及遗留 `~/.ethan/trae_work.json`）会在首次读取时自动
+一份 0600 cred；由 `buddy login trae` 生成/追加，按 uid/refresh_token upsert——重登同号更新、新号追加）。
+历史单账号 `~/.buddy-proxy/trae_work.json`（及遗留 `~/.ethan/trae_work.json`）会在首次读取时自动
 迁移为账号 #1。其次解密本机 Trae IDE `storage.json`，无需手动配置 token。
 
 国内版 Trae Work 模型目录使用小写 ID，方便与其他 provider 的 `model_order` 统一配置；例如 `doubao-seed-evolving`、`deepseek-v4-pro`。转发时会自动转换成上游要求的大小写敏感名称（如 `Doubao-Seed-Evolving`），客户端和顺序配置无需写大写。旧模型 `kimi-k2.7-code`、`glm-5.2`、`deepseek-v4-flash`、`glm-5`、`glm-5-turbo`、`qwen-3.7-plus` 已从目录移除。
@@ -275,8 +283,8 @@ device 变化），早期写死的「ASUS TUF + windows」指纹（trae2api 方�
 小米 **MiMo**（platform.xiaomimimo.com），以 `mimo/<id>` 寻址（`mimo-auto`、`mimo-pro`）：
 
 ```bash
-uv run python -m buddy_proxy --desensitize --mimo
-uv run buddy login mimo     # 打印当前生效的认证模式，或配置指引
+buddy start
+buddy login mimo     # 打印当前生效的认证模式，或配置指引
 ```
 
 认证两种，按序尝试：
@@ -297,7 +305,7 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
 
 ## 模型列表
 
-模型目录由 `src/buddy_proxy/web/models_config.json` 维护（启动时与 `/v1/models` 都从这里读取，离线可靠）。当前内置 **46 个模型**，分属两个通道；`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
+`src/buddy_proxy/web/models_config.json` 中的静态目录包含 **CodeBuddy 和 Trae PAT 共 46 个条目**，无需访问上游即可读取；Trae Work 等其他通道由 provider 自己提供目录。下方列出 CodeBuddy 和 Trae Work 模型，国内 Trae Work 目录定义在 `src/buddy_proxy/trae/config.py`。`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
 
 **CodeBuddy 通道**（19 个）——直接用模型名，无前缀：
 
@@ -329,25 +337,27 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
 > ——这一个请显式写 `codebuddy/glm-5.3-flashx`。官方 **`glm/`** 渠道（下文）与
 > zcode 同上游同模型表，想走官方套餐的 key 时显式写 `glm/<模型>` 前缀。
 
-**Trae PAT 通道**（27 个）——以 `traepat/<id>` 寻址。若某个 id 被多个通道声明，裸名会落到**注册顺序里第一个声明它的通道**（通常是个人 `trae` 通道，如果启用了），**不是** CodeBuddy——CodeBuddy 的 `models()` 返回空列表，只能经「未命中兜底」或显式 `codebuddy/` 前缀抵达。所以要用本通道时请始终带 `traepat/` 前缀。此处的 credits 是该通道自己的量表：
+**Trae Work 通道**（15 个国内模型，ID 统一小写）。倍率是当前目录值；`—` 表示没有公开倍率：
 
-| id | name | credits |
-|---|---|---|
-| `gpt-6-astra-max` | GPT-6-Astra Max | — |
-| `gpt-5.6-sol-max` / `gpt-5.6-sol` | GPT-5.6-Sol Max / GPT-5.6-Sol | — |
-| `gpt-5.6-luna-max` / `gpt-5.6-terra-max` | GPT-5.6-Luna / Terra Max | — |
-| `gpt-5.5-max` / `gpt-5.4` / `gpt-5.2` | GPT-5.5 Max / 5.4 / 5.2 | — |
-| `gemini-3.1-pro` / `gemini-3-flash` | Gemini-3.1-Pro / Gemini-3-Flash | — |
-| `openrouter-3o-max` / `-2o-max` / `-1o` / `-1` | OpenRouter-3o Max / 2o Max / 1o / 1 | — |
-| `glm-5.3` / `glm-5.3-flash` | glm-5.3 / glm-5.3-flash | x0.40 / x0.06 |
-| `glm-5.2` | glm-5.2 | x0.40 |
-| `qwen3.8-max` / `qwen-3.7-plus` | Qwen3.8-Max / Qwen-3.7-Plus | x1.50 / x0.25 |
-| `kimi-k3` / `kimi-k2.7-code` / `kimi-k2.6` | kimi-k3 / Kimi-K2.7-Code / Kimi-K2.6 | x1.83 / x0.83 / — |
-| `deepseek-v4-pro` / `deepseek-v4-flash` | DeepSeek-V4-Pro / -Flash | x0.72 / x0.08 |
-| `minimax-m3` | MiniMax-M3 | x0.26 |
-| `Doubao-Seed-2.1-Pro` / `Doubao-Seed-Code` | Seed-2.1-Pro / Seed-Code | x0.77 / x0.03 |
+| 模型 ID | 倍率 |
+|---|---|
+| `glm-5.3` | x0.40 |
+| `glm-5.3-flash` | x0.06 |
+| `glm-5.3-flashx` | x0.31 |
+| `deepseek-v4.1-flash` | x0.08 |
+| `doubao-seed-evolving` | x0.08 |
+| `kimi-k3` | x1.83 |
+| `doubao-seed-2.1-pro` | x0.08 |
+| `deepseek-v4-pro` | x0.72 |
+| `qwen3.8-max` | x1.50 |
+| `doubao-seed-2.1-turbo` | x0.20 |
+| `minimax-m3` | x0.26 |
+| `kimi-k2.6` | — |
+| `glm-5.1` | — |
+| `step-5-preview` | x0.48 |
+| `doubao-seed-code` | x0.06 |
 
-要新增 / 调整模型，直接编辑 `src/buddy_proxy/web/models_config.json` 后重启即生效。
+目录顺序沿用上游客户端的展示顺序。PAT 通道仍可通过 `traepat/<模型>` 使用，但这里不再列出 PAT 模型表。要新增 / 调整 CodeBuddy 或 Trae PAT 静态模型，编辑 `src/buddy_proxy/web/models_config.json` 后重启生效。
 
 ## 管理界面（/ui）
 
@@ -489,6 +499,8 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
   输入量大不代表扣得多。
 - **统计图表** — 按 provider/模型维度聚合请求数、错误数、平均耗时、token 用量：
   近 14 天按通道堆叠的柱状图、模型请求 Top 榜、最近 50 条请求明细。
+  多账号通道（qoder / kimi / antigravity / trae / traepat）的明细会在通道名后
+  用括号标注实际服务的账号（failover 后是最终成功的那个）。
   每次请求完成追加一行到 `logs/metrics.jsonl`，重启后自动回读恢复历史（保留 30 天）
 - **通道健康** — 各 provider 的登录/配置状态一目了然（CodeBuddy 是否登录、zcode key 是否配置等）
 
@@ -720,7 +732,7 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 | 权益 | `benefits_api.fetch_ent_usage()` | 查询积分总额 / 已用量 / 权益包 |
 | 双区域 | `config.TRAE_REGIONS` / `model_tables(region)` / `work_function_override(region)` | CN/global 两套取址（chat 网关 / UG 域 / 额度版本 v2 vs v1）、两套模型目录与按区分表的 function 绑定（海外 `messages[].content` 需内容块数组，见 `transport._intl_content_blocks`） |
 | 海外额度 | `provider._quota_items` dollar 分支 | 次数制 + 美元混量纲分行展示：Premium 快速请求（已用次数上游不给 → 「—」）与 Basic 用量（`usage.basic_usage_amount` 真实已用）各一行；`is_hide` 的 UI 不展示包过滤 |
-| 模型 | `config._map_model()` | T1-T5 分级 + 外部名别名 |
+| 模型 | `config._map_model()` | 模型目录与外部名别名 |
 | 错误 | `sse._trae_error_text()` | 14+ 个官方错误码 → 中文文案（4011 今日额度 / 1005 plan 权益不足等） |
 | 账号工具 | `cli`（`trae-cli status` / `claim` / `usage` / `chat`） | 命令行查询/领取签到、看权益、发测试对话 |
 
@@ -777,7 +789,7 @@ coding-plan，然后 `buddy restart`。
 打开浏览器登录小米账号即可，**不用回终端做任何事**，也不用手工复制 cookie：
 
 ```bash
-uv run buddy login mimo       # 打开浏览器 → 登录 → 命令行自动继续
+buddy login mimo       # 打开浏览器 → 登录 → 命令行自动继续
 ```
 
 流程与 `buddy login qoder` 同构（device flow 那套）：生成登录链接 → 打开浏览器 →
@@ -810,7 +822,7 @@ MiMo 桌面也能用**，装了桌面的老机器行为不变。API key 仍然�
 上游 `percent` 字段是**剩余**百分比，面板已换算成「已用」。
 
 ```bash
-uv run python -m buddy_proxy --desensitize --mimo
+buddy start
 ```
 
 ### 6. Qoder Provider（`qoder/` 子包）
@@ -853,10 +865,9 @@ response`）；`_describe_upstream_error` 会把它挖出来，并且失败按 A
 | `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
 | `qoder/kimi-k3` | `kmodel_latest` | |
 | `qoder/deepseek-v4-pro` | `dmodel` | |
-| `qoder/minimax-m2.7` | `mmodel` | 上游显示名即 MiniMax-M2.7 |
 | `qoder/auto` | `auto` | 平台路由档位——上游实际**只有这一个档位**；当前也被上游关了（目录 `enable=false`） |
 
-旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K2.8-Preview、Cantus、Sonus、DeepSeek-Flash）
+旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K2.8-Preview、MiniMax-M2.7、Cantus、Sonus、DeepSeek-Flash）
 **不列在列表里但仍可点名调用**——列表少一点，反而好找要用的。三种写法都接受：
 对外 id、官方显示名（`Qwen3.8-Flash`）、上游内部 key（`qfmodel`）；内部 key 会在
 `/v1/models` 里以 `upstream_key` 回显，便于排障对照。
@@ -881,7 +892,7 @@ response`）；`_describe_upstream_error` 会把它挖出来，并且失败按 A
 Buddy 才会注册 `qoderintl`。
 
 ```bash
-uv run python -m buddy_proxy --desensitize --qoder
+buddy start
 ```
 
 #### 单次积分消耗
@@ -949,8 +960,8 @@ Qoder 通道声明了 `supports_checkin`，因此会和 CodeBuddy 一起出现�
 Google **Gemini CLI** 的免费额度（Code Assist individuals），挂 `gemini/` 前缀：
 
 ```bash
-uv run buddy login gemini   # Google OAuth（PKCE + 本地回调）
-uv run python -m buddy_proxy --desensitize --gemini
+buddy login gemini   # Google OAuth（PKCE + 本地回调）
+buddy start
 ```
 
 网关走的是与真实 gemini CLI 相同的 `v1internal:generateContent` 端点，请求指纹
@@ -996,8 +1007,8 @@ Google AI Pro 订阅层都走这里），挂 `antigravity/` 前缀。一次 OAut
 （Gemini 组 / Claude+GPT 组），组内各模型共享 weekly + 5h 双池：
 
 ```bash
-uv run buddy login antigravity   # Google OAuth（PKCE + 本地回调）；检测到本机 agy 登录态可直接导入
-uv run python -m buddy_proxy --desensitize --antigravity
+buddy login antigravity   # Google OAuth（PKCE + 本地回调）；检测到本机 agy 登录态可直接导入
+buddy start
 ```
 
 **登录支持从本机 `agy`（官方 Antigravity CLI）导入**——agy 把 OAuth token 存

@@ -1,7 +1,7 @@
 """trae 通道 deepseek-v4.1-flash 接入回归测试（离线，不访问上游）。
 
 背景（2026-09-30 实测）：``deepseek-v4.1-flash`` 在 trae 通道可用（native
-chat_v3 直通：聊天 / 读图 / 原生工具调用全通），但 ``MODEL_TIERS`` 原先只收了
+chat_v3 直通：聊天 / 读图 / 原生工具调用全通），但 ``MODEL_IDS`` 原先只收了
 上一代 ``DeepSeek-V4-Flash`` / ``DeepSeek-V4-Pro``——与 glm-5.3-flashx 同一批
 「上游已放行、目录漏收」的隐状态。
 
@@ -31,9 +31,9 @@ from __future__ import annotations
 from buddy_proxy.core.credit_estimate import estimate_credit
 from buddy_proxy.trae.config import (
     MODEL_CREDITS,
+    MODEL_IDS,
     MODEL_MAP,
     MODEL_SUPPORTS_IMAGES,
-    MODEL_TIERS,
     _map_model,
     _WORK_FUNCTION_OVERRIDE,
 )
@@ -59,17 +59,15 @@ def test_work_catalog_ids_are_lowercase_and_map_upstream_names():
     assert map_model_for("cn", "doubao-seed-evolving") == "Doubao-Seed-Evolving"
     assert map_model_for("cn", "doubao-seed-2.1-pro") == "Doubao-Seed-2.1-Pro"
     assert map_model_for("cn", "deepseek-v4-pro") == "DeepSeek-V4-Pro"
-    assert map_model_for("cn", "step-5-preview") == "Step-5-Preview"
+    # step-5-preview 上游只认全小写（2026-10-07 实测），原样透传不进映射表
+    assert map_model_for("cn", "step-5-preview") == "step-5-preview"
     assert not {"glm-5.2", "kimi-k2.7-code", "deepseek-v4-flash",
                 "glm-5", "glm-5-turbo", "qwen-3.7-plus", "qwen-3.8-max"} & ids
 
 
-def test_v41_flash_is_t1():
-    """归 T1：新一代旗舰系（读图 + 1M ctx），上一代 V4-Pro 是 T2。"""
-    assert "deepseek-v4.1-flash" in MODEL_TIERS["T1"]
-    tier = next(m["tier"] for m in TraeProvider().models()
-                if m["id"] == "deepseek-v4.1-flash")
-    assert tier == "T1"
+def test_v41_flash_precedes_legacy_v4_pro():
+    """目录顺序沿用上游展示序：新一代 v4.1-flash 排在上一代 V4-Pro 之前。"""
+    assert MODEL_IDS.index("deepseek-v4.1-flash") < MODEL_IDS.index("deepseek-v4-pro")
 
 
 def test_v41_flash_is_passed_through_verbatim():
