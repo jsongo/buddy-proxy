@@ -742,6 +742,8 @@ coding-plan，然后 `buddy restart`。
 5 小时档在前；若改回按 `nextResetTime` 排，没有时间戳的 5 小时档会被甩到末位，标题行（取
 第一条）就显示了月档而不是更紧迫的那档。另外这两档是**各自独立的额度**，要分开看，不能相加。
 
+**ZCode Start Plan 错误响应**——`zcode-start/glm-5.3-flash` 的成功响应必须是 Anthropic Message（流式首个有效事件为 `message_start`）。上游即使返回 HTTP 200，若实际是额度/错误 JSON 或没有有效首事件，也不再向 Claude Code 伪报 200：额度错误（含 `1308`）转成 HTTP 429，其他无效响应转成 HTTP 502。若配置了模型顺序，未提交的失败可继续换档。
+
 **GLM 官方渠道（`providers/glm.py`，可选）**——`GlmProvider` 是 `ZcodeProvider` 的子类，
 上游/直通转发/模型表/额度端点全部继承，唯一差异是凭据链：只认 `GLM_API_KEY` /
 `~/.buddy-proxy/glm_api_key`，**绝不读** `~/.zcode`（两条 key 是独立购买的两个套餐，

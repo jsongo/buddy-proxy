@@ -332,21 +332,106 @@ def _auth_headers(api_key: str, extra: dict[str, str] | None = None) -> dict[str
 
 
 # ---------------------------------------------------------------------------
-# 上游响应处理（直通模式：SSE 原样回传，非流式 JSON 原样回传）
+# 上游响应处理（在提交 200 前校验成功响应，避免错误体伪装成功）
 # ---------------------------------------------------------------------------
 
 
-async def _pass_through_stream(
-    client: httpx.AsyncClient,
-    response: httpx.Response,
-) -> AsyncIterator[bytes]:
-    """把上游 SSE/字节流原样泵给客户端；结束后确保连接释放。"""
+_FIRST_EVENT_LIMIT = 64 * 1024
+
+
+def _is_message(payload: Any) -> bool:
+    return (isinstance(payload, dict) and payload.get("type") == "message"
+            and payload.get("role") == "assistant"
+            and isinstance(payload.get("content"), list))
+
+
+def _invalid_success(payload: Any) -> JSONResponse:
+    """HTTP 200 错误体不能让客户端误认为 Anthropic Message。"""
+    node = payload.get("error") if isinstance(payload, dict) else None
+    error = node if isinstance(node, dict) else payload if isinstance(payload, dict) else {}
+    code = error.get("code")
+    message = error.get("message") or error.get("msg") or "zcode-start upstream returned invalid message"
+    message = str(message)[:500]
+    # Start Plan 的额度错误可能以 HTTP 200 返回；让模型顺序在响应提交前换档。
+    quota = str(code) in {"1308", "429"} or any(word in message.lower() for word in (
+        "quota", "rate limit", "usage limit", "额度", "限额", "余额不足",
+    ))
+    status = 429 if quota else 502
+    return JSONResponse(status_code=status, content={
+        "type": "error",
+        "error": {"type": "rate_limit_error" if quota else "upstream_error",
+                  "message": message, **({"code": code} if code is not None else {})},
+    })
+
+
+async def _checked_stream(response: httpx.Response) -> StreamingResponse | JSONResponse:
+    """读取首个有效 SSE message_start 后才提交流；错误帧先变成 HTTP 错误。"""
+    iterator = response.aiter_bytes()
+    prefix = bytearray()
     try:
-        async for chunk in response.aiter_bytes():
-            if chunk:
-                yield chunk
+        # JSON 响应（即使 HTTP 200）不应标成 text/event-stream。
+        if "text/event-stream" not in response.headers.get("content-type", "").lower():
+            async for chunk in iterator:
+                prefix.extend(chunk)
+                if len(prefix) > _FIRST_EVENT_LIMIT:
+                    return _invalid_success(None)
+            try:
+                return _invalid_success(json.loads(prefix))
+            except (ValueError, TypeError):
+                return _invalid_success(None)
+
+        frame_start = 0
+        handed_off = False
+        original_prefix: list[bytes] = []
+        async for chunk in iterator:
+            original_prefix.append(chunk)
+            prefix.extend(chunk)
+            # SSE 的事件以空行分隔，兼容 LF 和 CRLF；保留原字节给客户端。
+            normalized = bytes(prefix).replace(b"\r\n", b"\n")
+            while True:
+                end = normalized.find(b"\n\n", frame_start)
+                if end < 0:
+                    if len(normalized) - frame_start > _FIRST_EVENT_LIMIT:
+                        return _invalid_success(None)
+                    break
+                frame = normalized[frame_start:end]
+                frame_start = end + 2
+                lines = [line[5:].strip() for line in frame.split(b"\n") if line.startswith(b"data:")]
+                if not lines:
+                    continue  # SSE keepalive/comment
+                try:
+                    event = json.loads(b"\n".join(lines))
+                except ValueError:
+                    return _invalid_success(None)
+                if not isinstance(event, dict):
+                    return _invalid_success(None)
+                if event.get("type") == "error":
+                    return _invalid_success(event)
+                if event.get("type") == "message_start" and _is_message(event.get("message")):
+                    async def _rest() -> AsyncIterator[bytes]:
+                        try:
+                            for buffered in original_prefix:
+                                yield buffered
+                            async for remaining in iterator:
+                                if remaining:
+                                    yield remaining
+                        finally:
+                            await response.aclose()
+                    handed_off = True
+                    return StreamingResponse(
+                        _rest(), media_type="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "Connection": "close"},
+                    )
+                return _invalid_success(None)
+            # 丢掉已解析的 keepalive；成功事件的前缀会在上面的 return 中原样回传。
+            if frame_start:
+                prefix = bytearray(normalized[frame_start:])
+                frame_start = 0
+        return _invalid_success(None)
     finally:
-        await response.aclose()
+        # 成功时连接所有权交给 _rest；失败时尚未创建响应，必须直接释放。
+        if not locals().get("handed_off", False):
+            await response.aclose()
 
 
 def _upstream_error_response(resp: httpx.Response) -> JSONResponse:
@@ -706,32 +791,47 @@ class ZCodeStartPlanProvider(BaseProvider):
         # openai 协议：上游只有 anthropic 出参，需转回 chat.completion 形态。
         if protocol == "anthropic":
             if stream:
-                return StreamingResponse(
-                    _pass_through_stream(client, resp),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "Connection": "close"},
-                )
+                return await _checked_stream(resp)
             try:
                 payload = resp.json()
-            except Exception as exc:
+                if not _is_message(payload):
+                    return _invalid_success(payload)
+                return JSONResponse(content=payload)
+            except (ValueError, TypeError) as exc:
                 raise HTTPException(status_code=502, detail={
                     "error": {"message": "zcode-start upstream returned non-JSON", "type": "bad_gateway"}}
                 ) from exc
-            return JSONResponse(content=payload)
+            finally:
+                await resp.aclose()
 
         if stream:
+            # OpenAI 输出转换也必须先在提交 200 前验上游首帧；复用闸门，
+            # 已读取的前缀从迭代器返回，再交给转换器解析。
+            checked = await _checked_stream(resp)
+            if isinstance(checked, JSONResponse):
+                return checked
+            class _CheckedResponse:
+                async def aiter_bytes(self):
+                    async for chunk in checked.body_iterator:
+                        yield chunk
+                async def aclose(self):
+                    await resp.aclose()
             return StreamingResponse(
-                _anthropic_sse_to_openai_stream(resp, requested_model),
+                _anthropic_sse_to_openai_stream(_CheckedResponse(), requested_model),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "close"},
             )
         try:
             payload = resp.json()
-        except Exception as exc:
+            if not _is_message(payload):
+                return _invalid_success(payload)
+            return JSONResponse(content=_anthropic_message_to_chat(payload, requested_model))
+        except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=502, detail={
                 "error": {"message": "zcode-start upstream returned non-JSON", "type": "bad_gateway"}}
             ) from exc
-        return JSONResponse(content=_anthropic_message_to_chat(payload, requested_model))
+        finally:
+            await resp.aclose()
 
     # ---- 内部 ----
 

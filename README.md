@@ -279,6 +279,10 @@ When writing the key file, use `>` (overwrite) rather than `>>` (append): only t
 
 The quota panel reads `/api/monitor/usage/quota/limit`. Its `limits[]` entries share one `type` (`CREDIT_LIMIT`) and distinguish windows by `unit` + `number`, not by the reset time: `unit=3`/`number=5` is the 5-hour window and `unit=6`/`number=1` is the monthly one. Name the windows from `unit`/`number` — deriving the name from "how far away is `nextResetTime`" gets both wrong, since the monthly window resets only a few days out (so it reads as "weekly") and the 5-hour window *has no* `nextResetTime` at all (so it degrades to a bare `CREDIT_LIMIT`). Rows are ordered smallest window first, so the 5-hour entry leads the card; ordering by `nextResetTime` instead drops the missing-timestamp 5-hour entry to the end and headlines the monthly bucket. Note the two windows are separate allowances to be read independently — they are not added together.
 
+### ZCode Start Plan response errors
+
+For `zcode-start/glm-5.3-flash`, a successful upstream reply must be an Anthropic Message (or a stream starting with `message_start`). An upstream HTTP 200 containing a quota/error JSON object or a stream with no valid start event now returns HTTP 429 for quota errors (including code `1308`) or HTTP 502 for malformed replies, rather than passing a misleading HTTP 200 to Claude Code. When model-order routing is configured, these pre-commit failures can fail over to the next candidate.
+
 ### GLM provider (official, optional)
 
 The same GLM Coding Plan upstream as ZCode, but driven by **your own console-issued API key** instead of the ZCode CLI's credentials:
