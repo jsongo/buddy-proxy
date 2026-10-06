@@ -132,8 +132,8 @@ def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
     判定优先级：整通道停用（disabled_providers）> 永久停用（disabled_models）
     > 限时窗口（model_schedules）。三者都未命中才放行。
     """
-    if not isinstance(model_id, str):
-        return
+    # 整通道检查放在 isinstance guard 之前：通道停了就该拦，与请求带没带
+    # 合法 model 名无关（review 2026-10-06）。
     if _provider_disabled(state, provider_id):
         diagnostic("provider_disabled_reject", provider=provider_id, model=str(model_id))
         raise HTTPException(
@@ -146,6 +146,8 @@ def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
                 }
             },
         )
+    if not isinstance(model_id, str):
+        return
     # 键必须与配置加载/UI 保存同口径（settings.model_key）：legacy 的
     # workbuddy/* 归一成 codebuddy/*，否则 workbuddy 进来的请求查不到已保存
     # 的停用/时段配置，窗口外照样放行。

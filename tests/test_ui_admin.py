@@ -403,6 +403,44 @@ def test_disabled_provider_skipped_in_order_candidates(env):
     assert r.status_code == 200, "停用通道应被跳过、请求落到下一档"
 
 
+def test_disabled_provider_rejects_even_without_valid_model(env):
+    """整通道检查排在 isinstance guard **之前**：通道停用后 model 非 str 也拦。
+
+    review 2026-10-06：检查原本放在 guard 之后，请求没带合法 model 名时
+    停用通道会被静默放过去。
+    """
+    from buddy_proxy.codebuddy_provider.forward import _reject_if_disabled
+
+    env.state.disabled_providers = {"fakeprov"}
+    with pytest.raises(HTTPException) as caught:
+        _reject_if_disabled(env.state, "fakeprov", None)
+    assert caught.value.status_code == 403
+    # 未停用通道 + model 非 str：照旧静默放行（交给后续链路判定）
+    env.state.disabled_providers = set()
+    _reject_if_disabled(env.state, "fakeprov", None)
+
+
+def test_benefits_refresh_keeps_disabled_marker(env, tmp_path):
+    """refresh 端点的快照也要带 disabled 标记并过滤告警。
+
+    review 2026-10-06：ui_benefits 带了 disabled_providers 但 refresh 还是
+    无参调用，额度卡「↻」一刷，停用通道的卡片就又回来了。
+    """
+    env.state.providers["fakeprov"].quota = lambda: {
+        "items": [{"label": "总额度", "used": 30, "total": 100,
+                   "remaining": 70, "percent": 30, "reset_ts": None}],
+        "level": "pro"}
+    env.state.benefits = BenefitsManager(tmp_path / "c.jsonl", env.state)
+    env.client.post("/ui/api/provider-toggle",
+                    json={"provider": "fakeprov", "disabled": True})
+    snap = env.client.post("/ui/api/benefits/refresh",
+                           json={"provider": "fakeprov"}).json()
+    fp = next(e for e in snap["providers"] if e["id"] == "fakeprov")
+    assert fp["disabled"] is True
+    # 告警（余额告急/到期）不收停用通道
+    assert all(e["id"] != "fakeprov" for e in snap["low_quota"])
+
+
 # ---------------------------------------------------------------------------
 # 限时可用时段
 # ---------------------------------------------------------------------------

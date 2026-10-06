@@ -596,7 +596,8 @@ def test_refresh_api_invalidates_and_returns_snapshot(monkeypatch):
             calls.append(pid)
             return 1
 
-        async def snapshot(self):
+        async def snapshot(self, disabled_providers=None):
+            calls.append(f"disabled={sorted(disabled_providers or set())}")
             return {"providers": [], "refreshed": True}
 
     monkeypatch.setattr(st, "proxy_state", SimpleNamespace(benefits=FakeManager()))
@@ -604,7 +605,7 @@ def test_refresh_api_invalidates_and_returns_snapshot(monkeypatch):
     r = TestClient(m.app).post("/ui/api/benefits/refresh", json={"provider": "antigravity"})
     assert r.status_code == 200
     assert r.json()["refreshed"] is True
-    assert calls == ["antigravity"]
+    assert calls == ["antigravity", "disabled=[]"]
 
 
 def test_refresh_api_requires_provider(monkeypatch):
