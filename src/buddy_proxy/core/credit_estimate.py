@@ -121,7 +121,9 @@ def estimate_credit(
     ``MODEL_CREDITS`` 即可自动跟价，不必重跑对账。返回值统一 round 到 2 位
     （与 Trae 网页使用记录的展示粒度一致）。
     """
-    if provider == "zcode":
+    if provider in ("zcode", "glm"):
+        # glm 是 zcode 的子类通道（同上游同套餐计价），官方系数原样复用；
+        # 漏掉它 glm 请求的 Credit 列会掉进倍率粗估并因无倍率表返回 None。
         return _estimate_zcode(model, prompt_tokens, completion_tokens, cached_tokens)
     rates = _load_trae_measured_rates().get(model) if provider == "trae" else None
     if rates is not None:

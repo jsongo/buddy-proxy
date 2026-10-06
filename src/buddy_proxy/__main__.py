@@ -218,6 +218,10 @@ def main():
     parser.add_argument("--zcode", action="store_true", default=os.getenv("ZCODE_ENABLED", "") == "1",
                         help="启用 Zcode provider（智谱 GLM，Anthropic 端点直通；"
                              "凭据取 ZCODE_API_KEY / secrets / ~/.zcode/v2/config.json）")
+    parser.add_argument("--glm", action="store_true", default=os.getenv("GLM_ENABLED", "") == "1",
+                        help="启用 GLM 官方 provider（智谱 BigModel Coding Plan 官方 key，"
+                             "Anthropic 端点直通，与 zcode 同上游但凭据独立；"
+                             "凭据取 GLM_API_KEY / ~/.buddy-proxy/glm_api_key）")
     parser.add_argument("--mimo", action="store_true", default=os.getenv("MIMO_ENABLED", "") == "1",
                         help="启用 MiMo provider（小米 MiMo 桌面端；"
                              "凭据取 MIMO_API_KEY 或复用桌面端小米账号登录态）")
@@ -276,6 +280,22 @@ def main():
         print("[Zcode] Enabled (BigModel GLM)")
     else:
         print("[Zcode] Disabled (pass --zcode or ZCODE_ENABLED=1 to enable)")
+
+    # glm 与 zcode 同上游同模型表：注册在 zcode 之后，裸 glm-* 自动匹配仍
+    # 先落 zcode（两条通道都能接），显式 glm/<模型> 前缀才定向到官方 key。
+    if args.glm:
+        from buddy_proxy.providers.glm import GlmProvider
+
+        glm = GlmProvider()
+        try:
+            glm.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("glm provider 认证未就绪: %s", exc.detail)
+        providers[glm.id] = glm
+        logger.info("Glm provider enabled (%s)", glm.health().get("base_url"))
+        print("[GLM] Enabled (BigModel Coding Plan 官方 key)")
+    else:
+        print("[GLM] Disabled (pass --glm or GLM_ENABLED=1 to enable)")
 
     if args.mimo:
         from buddy_proxy.mimo.provider import MimoProvider

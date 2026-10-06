@@ -165,7 +165,7 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 #: ``traeintl`` / ``qoderintl`` 与 ``traepat`` 同理：没有独立开关，只在有海外区
 #: 账号时挂到 ``--trae`` / ``--qoder`` 分支下注册。
 KNOWN_PROVIDER_IDS = frozenset(
-    {"codebuddy", "zcode", "mimo", "qoder", "qoderintl", "doubao", "dumate",
+    {"codebuddy", "zcode", "glm", "mimo", "qoder", "qoderintl", "doubao", "dumate",
      "trae", "traepat", "traeintl", "kimi"}
 )
 
@@ -178,6 +178,7 @@ KNOWN_PROVIDER_IDS = frozenset(
 #: 参数，照着敲只会落到 usage。以后再加通道时，这张表逼着把真实开关写清楚。
 PROVIDER_ENABLE_HINTS: dict[str, str] = {
     "zcode": "加 --zcode（或设 ZCODE_ENABLED=1）",
+    "glm": "加 --glm（或设 GLM_ENABLED=1）",
     "mimo": "加 --mimo（或设 MIMO_ENABLED=1）",
     "qoder": "加 --qoder（或设 QODER_ENABLED=1）",
     "doubao": "加 --doubao（或设 DOUBAO_ENABLED=1）",
