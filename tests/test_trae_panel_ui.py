@@ -40,7 +40,8 @@ let PANEL = {innerHTML: ''};        // #trae-panel
 globalThis.esc = s => String(s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) + '</div>';
+globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) +
+  (it.expire_ts ? ' · 到期' : '') + '</div>';   // 与真实现同款：带 expire_ts 拼到期
 globalThis.quotaItemsHtml = (items, key) => {
   const shown = (items || []).filter(it => !it.head_only);   // 与 benefits.js 真实现同款
   return '<div class="qbody" data-qfold="' + esc(key) + '">' +
@@ -105,7 +106,7 @@ def test_trae_render_smoke_head_only_summary_and_buttons():
     ✎ 在按钮组最前；✕ 带 id；明细条目照铺。"""
     out = _run_js("""
 BENEFITS.providers = [{
-  id: 'trae', name: 'Trae (本地解密直连)', quota: {supported: true, items: [
+  id: 'trae', name: 'Trae', quota: {supported: true, items: [
     {label: 'Trae #1 · 总额度', remaining: 87.17, total: 5300, percent: 98,
      used: 5212.83, head_only: true},
     {label: 'Trae #1 · 会员包', remaining: 1000, total: 4000, percent: 75,
@@ -149,6 +150,37 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
     assert m, "缺 .ag-move 按钮组"
     assert m.group(1).startswith('<button class="ghost" title="重命名'), "✎ 不在按钮组最前"
     assert "traeDeleteAccount('u1')" in html
+
+
+def test_trae_free_pack_into_account_card_not_notice():
+    """无数字但有组前缀的包（如「免费」包，只有到期日）归进各账号子卡片；
+    连前缀都没有的孤条（未登录说明）才横贯全宽（用户 2026-10-06 反馈：
+    「Trae #1 · 免费 · 10/31 到期」单独挂在外面像条独立告警）。"""
+    out = _run_js("""
+BENEFITS.providers = [{
+  id: 'trae', name: 'Trae', quota: {supported: true, items: [
+    {label: 'Trae #1 · 总额度', remaining: 87.17, total: 5300, percent: 98,
+     used: 5212.83, head_only: true},
+    {label: 'Trae #1 · 免费', expire_ts: 1791302400},
+    {label: '请先登录 trae', remaining: '跑 buddy login trae'},
+  ]},
+}];
+TRAE_ACCTS = [
+  {index: 1, id: 'u1', nickname: 'ethan', alias: '主力号', region: 'cn', cooling: []},
+];
+globalThis.__ACCTS = TRAE_ACCTS;
+renderTraePanel();
+console.log(JSON.stringify({html: PANEL.innerHTML}));
+""")
+    html = json.loads(out.strip().splitlines()[-1])["html"]
+    grid_at = html.find('data-qfold="trae:Trae #1"')
+    assert grid_at > 0, "组卡没渲染出来"
+    head, card = html[:grid_at], html[grid_at:]
+
+    assert "免费" not in head, "「免费」包不该横贯全宽（应归进账号子卡片）"
+    assert "免费" in card, "「免费」包应作为明细行出现在子卡片里"
+    assert "到期" in card, "到期日跟着包名一起进子卡片"
+    assert "请先登录" in head, "无前缀孤条仍进全宽说明区"
 
 
 def test_trae_panel_hidden_when_provider_missing():

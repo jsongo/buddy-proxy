@@ -205,6 +205,13 @@ def _quota_low(provider_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             # 未声明可合计：第一条就是语义上的「总额度」，后面的不掺和
             rem_sum, tot_sum, unit, label = rows[0]
+            # label 形如「Trae #1 · 总额度」，横幅上 provider_name 已经摆了
+            # 「Trae」，再原样拼就是「Trae · 余额告急 · Trae #1 · …」两遍——
+            # 剥掉通道名前缀，只留「#1 · 总额度」（多账号归属正是横幅要补的
+            # 信息，用户 2026-10-06 反馈看不出告的是哪个号）。
+            name = str(entry.get("name") or entry.get("id") or "")
+            if label and name and label.startswith(name):
+                label = label[len(name):].lstrip(" ·")
         percent_left = round(rem_sum / tot_sum * 100, 1) if tot_sum > 0 else None
         if unit == "credit":
             if rem_sum >= QUOTA_LOW_MIN_CREDITS:
