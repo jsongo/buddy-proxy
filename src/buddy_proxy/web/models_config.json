@@ -615,7 +615,7 @@
       "config_name": "Doubao-Seed-2.1-Pro",
       "reasoning": true,
       "tool_call": true,
-      "credits": "x0.77"
+      "credits": "x0.08"
     },
     {
       "id": "Doubao-Seed-Code",
@@ -627,7 +627,7 @@
       "config_name": "Doubao-Seed-Code",
       "reasoning": true,
       "tool_call": true,
-      "credits": "x0.03"
+      "credits": "x0.06"
     },
     {
       "id": "glm-5.3",
