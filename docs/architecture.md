@@ -130,6 +130,25 @@ empty candidate list fails fast with 404 instead of paying a slow read
 timeout per restricted account. The JSON loads once at import; editing it
 requires a restart.
 
+`qoderintl` is a separate Global-region subclass of `QoderProvider`, registered
+at startup only when `--qoder` is active, the primary Qoder provider is not
+already Global, and a Global account exists. Its quota panel is deliberately
+read-only: account management routes such as `/ui/api/qoder/accounts/order`
+operate on CN accounts and must not be reused. Check-in uses the inherited
+campaign provider capability and the generic `/ui/api/checkin` route; the UI
+renders a separate provider row because check-in rows are provider-driven.
+Adding a Global login while the server is already running still requires a
+restart for registration.
+
+The ASGI event loop is shared by model streaming and management routes, so
+blocking operations must stay off-loop even when wrapped by an `async` method.
+Trae's first-event gate and sync iterator both call `next()` on a blocking
+upstream generator; each is driven with `asyncio.to_thread`. Qoder quota HTTP
+calls run in the quota executor, but waiting for those futures must also be
+asynchronous (`asyncio.wrap_future` / `wait_for`); the single-account call uses
+`to_thread` as well. Otherwise a slow quota/stream request stalls health,
+benefits, and unrelated model routes in the same process.
+
 ## Models and settings
 
 - `web/models_config.json` is the source for static CodeBuddy/PAT catalog
@@ -276,8 +295,18 @@ silent:
   failed, so `checkin_status` (multi-account) and `checkin_claim` attach an
   `accounts` list (`index`/`name`/state, or `error: 查询失败` for a failed
   probe) and the check-in card renders one line per account; the claim toast
-  reports each account's outcome too. Single-account responses omit the list
-  — the badge *is* the account's state, and a one-row breakdown is noise.
+  reports each account's outcome too. Qoder also queries each same-region
+  account because their campaign lists are independent; it aggregates whether
+  any account can claim and exposes the per-account state. Manual Qoder claims
+  still claim only the first claimable account in priority order. Single-account
+  responses omit the list — the badge *is* the account's state, and a one-row
+  breakdown is noise.
+- **Activity presence is not the same as a claimable check-in.** Qoder's
+  campaign list may contain `VIEW_DETAILS` entries alongside, or instead of,
+  `CLAIM_BENEFIT`. Only the latter with `CLAIMABLE` is sent to the claim API.
+  A non-claimable campaign is reported as “有活动，暂无可领签到奖励” rather than
+  “今日无签到活动”, and its claim button stays disabled; this preserves the
+  action-type safety check without claiming that the whole activity list is empty.
 - **A cached status snapshot expires at its own rotation, not just its TTL.**
   The UI counts down to `next_ts`, so the refresh right after that moment must
   actually show the new state — but the 300 s snapshot cache would otherwise

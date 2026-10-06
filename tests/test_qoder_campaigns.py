@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from buddy_proxy.qoder.campaigns import (
     CLAIM_ACTION,
     Campaign,
@@ -207,6 +209,48 @@ def _provider_with(fake, listing) -> QoderProvider:
     return p
 
 
+def test_status_distinguishes_non_claimable_campaign_from_no_activity():
+    listing = {
+        "campaigns": [{
+            "campaignId": "view-1", "campaignKey": "act-view",
+            "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED",
+            "startAt": 1, "endAt": 9999999999,
+        }]
+    }
+    p = _provider_with(_FakeClient(listing), listing)
+    st = asyncio.run(p.checkin_status())
+    assert st["inactive"] is False
+    assert st["unavailable"] is True
+    assert st["claimable"] is False
+    assert "有活动" in st["message"]
+
+
+def test_status_checks_later_account_when_first_has_no_checkin_campaign(monkeypatch):
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    first = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    second = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [first, second])
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [first, second])
+    empty_benefit = {"campaigns": [{
+        "campaignId": "view-1", "campaignKey": "act-view",
+        "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED",
+    }]}
+    has_benefit = json.loads(json.dumps(LIVE_LISTING))
+    clients = {"a1": _FakeClient(empty_benefit), "a2": _FakeClient(LIVE_LISTING)}
+
+    async def client_for(self, account=None):
+        return clients[account.id]
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    st = asyncio.run(QoderProvider().checkin_status())
+    assert st["claimable"] is True
+    assert st["accounts"][0]["unavailable"] is True
+    assert st["accounts"][1]["claimable"] is True
+    assert st["accounts"][1]["name"] == "Second"
+
+
 def test_status_claimable_today():
     """领取前：claimable=true，带每日金额与结束时间。"""
     fake = _FakeClient(LIVE_LISTING)
@@ -247,6 +291,53 @@ def test_top_level_claimable_is_not_used():
     assert st["checked_in"] is True
 
 
+def test_status_reports_claimed_checkin_on_later_account(monkeypatch):
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    first = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    second = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [first, second])
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [first, second])
+    no_checkin = {"campaigns": [{
+        "campaignId": "view-1", "campaignKey": "act-view",
+        "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED",
+    }]}
+    clients = {"a1": _FakeClient(no_checkin), "a2": _FakeClient(LIVE_LISTING_AFTER)}
+
+    async def client_for(self, account=None):
+        return clients[account.id]
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    st = asyncio.run(QoderProvider().checkin_status())
+    assert st["checked_in"] is True and st["claimable"] is False
+    assert st["accounts"][0]["unavailable"] is True
+    assert st["accounts"][1]["checked_in"] is True
+
+
+def test_claim_scans_later_account_for_claimable_campaign(monkeypatch):
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    first = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    second = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [first, second])
+    no_checkin = {"campaigns": [{
+        "campaignId": "view-1", "campaignKey": "act-view",
+        "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED",
+    }]}
+    clients = {"a1": _FakeClient(no_checkin), "a2": _FakeClient(LIVE_LISTING)}
+
+    async def client_for(self, account=None):
+        return clients[account.id]
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    out = asyncio.run(QoderProvider().checkin_claim())
+    assert clients["a1"].claimed == []
+    assert clients["a2"].claimed == ["01a0cd42-bdc3-7416-809b-56b06c4382f3"]
+    assert out["extra_credits"] == 100
+
+
 def test_claim_posts_todays_campaign():
     """可领时：对**当天那条**发 POST，返回积分。"""
     fake = _FakeClient(LIVE_LISTING)
@@ -270,6 +361,37 @@ def test_claim_when_nothing_claimable_does_not_post():
     assert "已领取" in out["message"]
 
 
+def test_status_reports_error_if_every_campaign_probe_fails(monkeypatch):
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    account = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [account])
+
+    async def fail(self, account=None):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", fail)
+    st = asyncio.run(QoderProvider().checkin_status())
+    assert st["error"] == "network unavailable"
+    assert "inactive" not in st
+
+
+def test_claim_does_not_post_view_details_campaign():
+    listing = {
+        "campaigns": [{
+            "campaignId": "view-1", "campaignKey": "act-view",
+            "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED",
+        }]
+    }
+    fake = _FakeClient(listing)
+    p = _provider_with(fake, listing)
+    out = asyncio.run(p.checkin_claim())
+    assert fake.claimed == []
+    assert out["unavailable"] is True
+    assert "有活动" in out["message"]
+
+
 def test_claim_replay_reports_no_credits():
     """重放响应不得报成「刚领到 100」——不给积分数字，消息据实说明。"""
     fake = _FakeClient(LIVE_LISTING, claim_body=LIVE_REPLAY)
@@ -279,6 +401,47 @@ def test_claim_replay_reports_no_credits():
     assert out["extra_credits"] is None
     assert out["replayed"] is True
     assert "重放" in out["message"]
+
+
+def test_status_keeps_partial_failure_from_reporting_fully_checked_in(monkeypatch):
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    failed = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    claimed = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [failed, claimed])
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [failed, claimed])
+
+    async def client_for(self, account=None):
+        if account.id == "a1":
+            raise RuntimeError("first account unavailable")
+        return _FakeClient(LIVE_LISTING_AFTER)
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    status = asyncio.run(QoderProvider().checkin_status())
+
+    assert status["checked_in"] is False
+    assert status["error"] == "first account unavailable"
+    assert status["accounts"][0]["error"] == "first account unavailable"
+    assert status["accounts"][1]["checked_in"] is True
+
+
+def test_claim_reports_partial_failure_instead_of_false_success(monkeypatch):
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    failed = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    claimed = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [failed, claimed])
+
+    async def client_for(self, account=None):
+        if account.id == "a1":
+            raise RuntimeError("first account unavailable")
+        return _FakeClient(LIVE_LISTING_AFTER)
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    with pytest.raises(RuntimeError, match="first account unavailable"):
+        asyncio.run(QoderProvider().checkin_claim())
 
 
 def test_provider_declares_checkin_support():

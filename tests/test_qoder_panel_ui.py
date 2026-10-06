@@ -38,6 +38,7 @@ pytestmark = pytest.mark.skipif(
 
 _STUB = """
 let PANEL = {innerHTML: ''};        // #qoder-panel
+let INTL_PANEL = {innerHTML: ''};   // #qoderintl-panel
 globalThis.esc = s => String(s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -62,6 +63,7 @@ globalThis.document = {
   querySelectorAll: sel => (sel === '#modal-foot button' ? [] : []),
   getElementById: id => {
     if (id === 'qoder-panel') return PANEL;
+    if (id === 'qoderintl-panel') return INTL_PANEL;
     if (id === 'modal-title' || id === 'modal-body' || id === 'overlay') {
       if (!MODAL[id]) MODAL[id] = {textContent: '', innerHTML: '', className: '',
         classList: {_s: new Set(),
@@ -139,6 +141,23 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
 
     # 「token 剩 Xh」已删
     assert "token 剩" not in html
+
+
+def test_qoderintl_panel_renders_global_quota_without_cn_management_api():
+    out = _run_js("""
+BENEFITS.providers = [{id: 'qoderintl', name: 'Qoder 海外版', quota: {supported: true, items: [
+  {label: 'Qoder #1 · Subscription', remaining: 75, total: 100, percent: 25, used: 25},
+  {label: 'Qoder #2 · Add-on', remaining: 30, total: 50, percent: 40, used: 20},
+]}}];
+renderQoderIntlPanel();
+console.log(JSON.stringify({html: INTL_PANEL.innerHTML}));
+""")
+    html = json.loads(out.strip().splitlines()[-1])["html"]
+    assert "Qoder 海外版" in html
+    assert "Global #1" in html and "Global #2" in html
+    assert "Subscription" in html and "Add-on" in html
+    assert "refreshProviderQuota('qoderintl'" in html
+    assert "/ui/api/qoder/accounts" not in html
 
 
 def test_qoder_head_sum_hidden_without_usable_items():

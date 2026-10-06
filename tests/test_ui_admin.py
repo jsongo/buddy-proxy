@@ -1852,6 +1852,25 @@ def test_ui_checkin_endpoint(env, tmp_path):
     assert r["ok"] is False  # 未声明 supports_checkin
 
 
+def test_qoderintl_inherits_checkin_ui_route(env, tmp_path, monkeypatch):
+    """Qoder Intl 注册后进入通用签到 provider 列表并可经 UI 端点领取。"""
+    from buddy_proxy.qoder.intl_provider import QoderIntlProvider
+
+    provider = QoderIntlProvider()
+
+    async def checkin_claim():
+        return {"message": "intl claimed", "extra_credits": 12}
+
+    monkeypatch.setattr(provider, "checkin_claim", checkin_claim)
+    env.state.providers["qoderintl"] = provider
+    env.state.benefits = BenefitsManager(tmp_path / "c.jsonl", env.state)
+
+    assert "qoderintl" in env.state.benefits.checkin_providers()
+    result = env.client.post("/ui/api/checkin", json={"provider": "qoderintl"}).json()
+    assert result["ok"] is True
+    assert result["message"] == "intl claimed"
+
+
 def test_settings_auto_checkin_validation(env):
     r = env.client.post("/ui/api/settings",
                         json={"auto_checkin": False, "checkin_time": "08:05"})
