@@ -1305,13 +1305,16 @@ _ACCOUNT_ERROR_CODES = (401, 429)
 
 
 def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":
-    """从单个 SSE 帧里识别账号级错误（``{"error": {"code": 401|429, ...}}``）。
+    """从单个 SSE 帧里识别账号级错误，还原成 HTTPException（None = 放行）。
 
     ``_stream`` 的 ``except HTTPException`` 会把账号级错误 yield 成
     ``error_chunk``（payload 是 ``{"error": {"message", "type", "code"}}``）
-    再 ``return``——那是假成功。本函数在闸门里把这类帧还原成 HTTPException，
-    让 forward 的 failover 循环冷却换号。非账号级错误帧返回 None（放行，由
-    下游/包装层按原样处理）。
+    再 ``return``——那是假成功。code 有两种形态：HTTP 形态（``_stream``
+    抛出的 HTTPException 的 ``status_code``，401/429）与上游 SSE 码形态
+    （``event:error`` 帧原样透传的 4008/4011 等，经 ``_sse_error_status``
+    映射）。本函数在闸门里把这类帧还原成 HTTPException，让 forward 的
+    failover 循环冷却换号；非账号级错误帧返回 None（放行，由下游/包装层
+    按原样处理）。
     """
     if not stripped_frame.startswith("data:"):
         return None
