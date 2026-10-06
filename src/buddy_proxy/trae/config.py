@@ -245,7 +245,7 @@ MODEL_TIERS: dict[str, list[str]] = {
     "T2": ["glm-5.2", "Doubao-Seed-2.1-Pro", "DeepSeek-V4-Pro",
            "kimi-k2.7-code", "qwen3.8-max"],
     "T3": ["Doubao-Seed-2.1-Turbo", "DeepSeek-V4-Flash", "minimax-m3",
-           "kimi-k2.6", "glm-5.1"],
+           "kimi-k2.6", "glm-5.1", "Step-5-Preview"],
     "T4": ["Doubao-Seed-Code", "glm-5", "glm-5-turbo", "qwen-3.7-plus"],
 }
 
@@ -259,14 +259,22 @@ MODEL_TIERS: dict[str, list[str]] = {
 # 注意同图部分旧模型与本表有小差（glm-5.3 / glm-5.2 显示 0.39、DeepSeek-V4-Flash
 # 显示 0.10，均带「会员5折」徽章；V4-Pro 带「闲时折扣」徽章）——疑似促销期浮动，
 # 本表维持知识库原值未动；若要跟价需定期截图更新，静态表追不动动态折扣。
-# 图中另有 Step-5-Preview(0.48) / Kimi-K2.8-Preview(0.98) / Qwen3.8-Flash(0.08)
-# 未接入 trae 目录——可用性未实测，**勿只凭价目表收录**（deepseek-v4.1-pro 就
-# 是反例：价目之外的「名字被上游接受」才是收录依据）。
+# 2026-10-06 用户从客户端「模型倍率」面板截图全量跟价：Seed 系四档大动
+# （Evolving / 2.1-Pro 0.77→0.08 带「限时 1 折」徽章；2.1-Turbo 0.10→0.20、
+# Seed-Code 0.03→0.06 带「专属补贴」徽章）——促销/补贴价，回原价时以最新
+# 截图为准再跟。面板里 Seed-2.1-Pro 显示为「Seed-2.1-Pro-0915」（带日期
+# 后缀的版本名）；转发 config_name 维持实测通过的 Doubao-Seed-2.1-Pro，
+# 若哪天上游只认带后缀的新名（4001）再实测补映射，**勿凭截图改名**。
+# Step-5-Preview(x0.48)：用户确认上游新上架，同批收录进 T3（倍率同图）。
+# 图中另有 Kimi-K2.8-Preview(0.98) / Qwen3.8-Flash(0.08) 未接入 trae 目录——
+# 可用性未实测，**勿只凭价目表收录**（deepseek-v4.1-pro 就是反例：价目之外
+# 的「名字被上游接受」才是收录依据）。
 MODEL_CREDITS: dict[str, str] = {
-    "Doubao-Seed-Evolving": "x0.77",
-    "Doubao-Seed-2.1-Pro": "x0.77",
-    "Doubao-Seed-2.1-Turbo": "x0.10",
-    "Doubao-Seed-Code": "x0.03",
+    "Doubao-Seed-Evolving": "x0.08",
+    "Doubao-Seed-2.1-Pro": "x0.08",
+    "Doubao-Seed-2.1-Turbo": "x0.20",
+    "Doubao-Seed-Code": "x0.06",
+    "Step-5-Preview": "x0.48",
     "glm-5.3-flash": "x0.06",
     "glm-5.3-flashx": "x0.31",
     "glm-5.3": "x0.40",
