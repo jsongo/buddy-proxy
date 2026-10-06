@@ -170,6 +170,16 @@ uv run python -m buddy_proxy --desensitize --trae
 - **依赖**：纯 Python 标准库（含零依赖 AES 兜底实现），不需要 Node.js
 - **注意**：免费账号有日/周调用额度，耗尽时报 `4011`（今日用量已达上限），
   错误会以友好中文文案透传
+- **海外版（`traeintl`，2026-10 起）**：`buddy login trae --region global` 登录海外账号后
+  自动启用独立通道（`traeintl/<model>` 寻址、额度卡单独一张、无签到——海外上游没有签到端点）。
+  模型池与 CN 是**两套**（2026-10-06 probe 实测收录 10 个）：T1 `gpt-6-sol` / `gpt-6-luna` /
+  `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `kimi-k3`，T2 `gpt-5.4` / `gpt-5.2` /
+  `glm-5.2`，T3 `minimax-m3`。协议与 CN 两处不同：`messages[].content` 必须是内容块数组
+  （纯字符串上游 400 反序列化错）；function 绑定按区分表——gpt-5.6 系 / `glm-5.2` /
+  `minimax-m3` 在默认 `solo_work_lite` 下 4001，自动改走 `chat_v3`。IDE 下拉里有但实测
+  agent 通道全 4001 的（`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`）
+  不收录。额度是**次数制 + 美元混量纲**（Pro 包）：「Premium 快速请求」600 次/月
+  （上游不给已用次数，显示「—」）+「Basic 用量」$ 美元真实已用；`is_hide` 的垃圾包自动过滤
 
 #### Trae 账号工具（`trae-cli`）
 
@@ -682,6 +692,8 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 | PAT 通道 | `pat_provider` + `pat/`（`cooldown`/`store`/`config`/`models`/`keeper`） | `traepat/<模型>` 底层模型通道：多账号 failover、撞码分级冷却（首次 5 分钟换号，反复撞才升级到次日）、4031 通道级快速失败（`429`，5 分钟后自动重探）、standard 池用量被动采集 |
 | 签到 | `benefits_api.fetch_checkin_status()` / `claim_checkin_credits()` | 查询/领取签到积分（`/trae/api/v2/ug/checkin_credits/*`） |
 | 权益 | `benefits_api.fetch_ent_usage()` | 查询积分总额 / 已用量 / 权益包 |
+| 双区域 | `config.TRAE_REGIONS` / `model_tables(region)` / `work_function_override(region)` | CN/global 两套取址（chat 网关 / UG 域 / 额度版本 v2 vs v1）、两套模型目录与按区分表的 function 绑定（海外 `messages[].content` 需内容块数组，见 `transport._intl_content_blocks`） |
+| 海外额度 | `provider._quota_items` dollar 分支 | 次数制 + 美元混量纲分行展示：Premium 快速请求（已用次数上游不给 → 「—」）与 Basic 用量（`usage.basic_usage_amount` 真实已用）各一行；`is_hide` 的 UI 不展示包过滤 |
 | 模型 | `config._map_model()` | T1-T5 分级 + 外部名别名 |
 | 错误 | `sse._trae_error_text()` | 14+ 个官方错误码 → 中文文案（4011 今日额度 / 1005 plan 权益不足等） |
 | 账号工具 | `cli`（`trae-cli status` / `claim` / `usage` / `chat`） | 命令行查询/领取签到、看权益、发测试对话 |

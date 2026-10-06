@@ -353,6 +353,27 @@ _WORK_FUNCTION_OVERRIDE: dict[str, str] = {
     "glm-5.3-flash": "chat_v3",
 }
 
+# 海外（global）的同款表。实测（2026-10-06）：GPT-5.6 系 / GLM / Kimi-K2.x /
+# MiniMax 在 solo_work_lite 下 4001「param is invalid」、chat_v3 正常出流；
+# GPT-6 系（sol/luna）/ GPT-5.x / kimi-k3 走 CN 同款默认 solo_work_lite 即可，
+# 不进此表。两区的 function 绑定**互不通用**（CN 的 glm-5.3-flash 在
+# solo_work_lite 4001，海外同名不存在；海外 glm-5.2 需要 chat_v3 而 CN 同名
+# 不需要），所以按区域分表，取用走 work_function_override()。
+_WORK_FUNCTION_OVERRIDE_INTL: dict[str, str] = {
+    "gpt-5.6-sol": "chat_v3",
+    "gpt-5.6-terra": "chat_v3",
+    "gpt-5.6-luna": "chat_v3",
+    "glm-5.2": "chat_v3",
+    "minimax-m3": "chat_v3",
+}
+
+
+def work_function_override(region_key: str) -> dict[str, str]:
+    """该区域的 Work function 覆盖表（未收录的模型走 solo_work_lite 默认）。"""
+    if (region_key or "cn").strip().lower() == "global":
+        return _WORK_FUNCTION_OVERRIDE_INTL
+    return _WORK_FUNCTION_OVERRIDE
+
 # ───────────────── 海外版（global）模型目录 ─────────────────
 #
 # 海外版是**另一套模型池**（Claude / GPT / Gemini 系为主），与上面 CN 表里的
@@ -360,17 +381,52 @@ _WORK_FUNCTION_OVERRIDE: dict[str, str] = {
 # 分级、倍率、图片能力全是 CN 侧实测值，套到海外会两头出错（把海外没有的模型
 # 报成可用 → 客户端请求后上游 4001；把海外模型漏报 → /v1/models 里看不见）。
 #
-# **留空是刻意的**，不是没写完：
 # 这三张表只能由「拿海外账号真发请求」的结果填，不能照 CN 表推、也不能照
 # 官网价目表抄——`deepseek-v4.1-pro` 就是反例（价目表上有、上游精确匹配拒绝）。
 # 收录判据与 CN 侧一致：**上游认这个名字并回真实 usage**，必要时再补能力指纹。
-# 空表时模型名原样透传，上游不认就诚实地 4001 冒出来，比猜一个名字糊弄过去好。
+# 表缺某个名字时模型名原样透传，上游不认就诚实地 4001 冒出来，
+# 比猜一个名字糊弄过去好。
 #
 # 待办：用海外账号跑 probe 枚举可用 config_name（同 CN 当初的收录流程），
 # 再填 MODEL_TIERS_INTL / MODEL_CREDITS_INTL / MODEL_SUPPORTS_IMAGES_INTL。
+#
+# 【2026-10-06 已填，probe 实录见下】
+#
+# 海外 config_name 全部为 2026-10-06 实测通过值（Work 凭证 + global 账号 +
+# llm_utils_chat 端点，上游精确匹配 + 真实 reasoning/usage 才收录）。
+# 两点与 CN 侧不同：
+#
+# 1. **海外端点要求 messages[].content 是内容块数组**（`[{"type": "text",
+#    "text": ...}]`，Go 侧 `[]*idecopilot.LLMRawMessageContent`），纯字符串
+#    直接 400 反序列化错——CN 两种都收。见 transport._intl_content_blocks。
+# 2. **function 绑定与 CN 不同**：GPT-5.6 系 / GLM / Kimi-K2.x / MiniMax 在
+#    CN 默认的 solo_work_lite 下 4001「param is invalid」，必须走 chat_v3
+#    （与 CN 的 glm-5.1 同款现象）——见 _WORK_FUNCTION_OVERRIDE_INTL。
+#    GPT-6 系（sol/luna）/ GPT-5.x / kimi-k3 则 solo_work_lite 直接可用。
+#
+# 反例记录（同日实测，三种 function 全 4001，**别再盲试**）：
+#   `gpt-6-astra`（IDE 下拉里有，但 agent 通道三种 function 全拒——疑似对
+#   work/agent 通道不开放或 config_name 带未知的版本尾巴）；
+#   `glm-5.3` / `glm-5.3-flash`（海外只有 GLM-5.2）；`deepseek-v4.1-flash` /
+#   `DeepSeek-V4-Flash`；`gemini-3.1-pro-preview` / `gemini-3-flash-preview`；
+#   `Seed-2.1-Turbo` / `Doubao-Seed-2.1-Turbo`。
+# 上游对该端点的 model 名**精确匹配**（大小写/变体全 4001），与 CN 一致。
+#
+# 实测通但**用户决定不收录**（2026-10-06：模型太老）：`kimi-k2.7-code` /
+# `kimi-k2.5` / `minimax-m2.7`（三者 chat_v3 均实测出流）。别当漏收补回来。
 MODEL_MAP_INTL: dict[str, str] = {}
-MODEL_TIERS_INTL: dict[str, list[str]] = {}
+MODEL_TIERS_INTL: dict[str, list[str]] = {
+    "T1": ["gpt-6-sol", "gpt-6-luna",
+           "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+           "kimi-k3"],
+    "T2": ["gpt-5.4", "gpt-5.2", "glm-5.2"],
+    "T3": ["minimax-m3"],
+}
+# 海外是**次数制**（Premium 快速请求 N 次/月 + Basic 美元额度），没有 CN 的
+# 积分倍率概念——留空，额度展示走 _quota_items 的海外分支（见 provider.py）。
 MODEL_CREDITS_INTL: dict[str, str] = {}
+# 图片能力未实测（probe 只发了纯文本）；空集 = 模型目录里不声明读图，
+# 请求带图会被上游诚实拒绝，好过瞎声明。
 MODEL_SUPPORTS_IMAGES_INTL: set[str] = set()
 
 def model_tables(region_key: str = "cn"):
