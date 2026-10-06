@@ -237,6 +237,10 @@ def claim_checkin_credits(token: str = "", account_id: str = "",
     reg = resolve_trae_region(region)
     if not reg.has_checkin:
         return dict(_NO_CHECKIN)
+    if not token:
+        # legacy 单账号路径（cli/老登录）：先取 token 再提 identity——否则
+        # key/换机循环全在空 token 上算，device_id 恒为空、固化表也查不到
+        token, _ = _auth()
     key = str(account_id or _checkin_identity(token, account_id))
     overrides = _load_device_overrides()
     last: dict[str, Any] = {}

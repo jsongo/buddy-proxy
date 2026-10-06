@@ -145,6 +145,30 @@ def test_claim_other_error_passthrough(monkeypatch, tmp_path):
         "code": 1005, "message": "无权限"}
 
 
+def _jwt(uid: str) -> str:
+    import base64
+
+    b64 = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
+    payload = b64(json.dumps({"data": {"id": uid}}).encode())
+    return f"{b64(b'{}')}.{payload}.sig"
+
+
+def test_claim_legacy_path_resolves_token_before_identity(monkeypatch, tmp_path):
+    """legacy 单账号（不传 token/account_id）：先 _auth() 再提 identity——
+    固化表按 uid 命中，换机循环也不再发空 device_id。"""
+    monkeypatch.setattr(benefits_api, "_devices_path", lambda: tmp_path / "devices.json")
+    fixed = {"device_id": "2" * 16, "brand": "Mac14,6", "type": "macos"}
+    _save_device_override("legacy-uid", fixed)
+    monkeypatch.setattr(benefits_api, "_auth", lambda: (_jwt("legacy-uid"), None))
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        benefits_api, "_post_ug",
+        lambda path, token="", account_id="", region=None, device=None:
+            (seen.append(device), {"code": 0, "message": "success"})[1])
+    out = claim_checkin_credits(region="cn")
+    assert out["code"] == 0 and seen == [fixed]
+
+
 def test_provider_no_backoff_after_device_rejected(monkeypatch):
     """外层对 device_rejected 不再按限流退避（同样 4 台设备重试救不回黑名单）。"""
     from buddy_proxy.trae import provider as trae_provider
