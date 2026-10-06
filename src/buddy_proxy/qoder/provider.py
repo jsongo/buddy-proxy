@@ -38,7 +38,16 @@ from buddy_proxy.providers.base import BaseProvider
 
 from . import failover
 from .campaigns import CLAIM_ACTION, CampaignClient
-from .catalog import Catalog, is_enabled, is_hidden, public_model_id, to_openai_model
+from .catalog import (
+    Catalog,
+    account_supports,
+    is_enabled,
+    is_hidden,
+    override_accounts,
+    override_missing_entries,
+    public_model_id,
+    to_openai_model,
+)
 from .config import COSY_VERSION, REGIONS, Region, resolve_region, with_cached_endpoints
 from .convert import _normalize_message, _to_anthropic_stream, _unwrap
 from .cosy import sign
@@ -144,6 +153,10 @@ class QoderProvider(BaseProvider):
         self._region = with_cached_endpoints(region or resolve_region())
         self._catalogs: dict[str, Catalog] = {}
         self._catalog_lock = threading.Lock()
+        # 跨账号目录并集（upstream key -> entry），refresh_models 时重建。
+        # 目录是账号级分桶：受限账号只剩 Qwen 两档，只看单账号会把全量账号
+        # 的三方模型从列表里抹掉；并集 = 「至少一个账号支持」。
+        self._union: dict[str, dict[str, Any]] = {}
 
     # -- catalog ------------------------------------------------------------
 
@@ -172,6 +185,12 @@ class QoderProvider(BaseProvider):
 
     # -- 模型 ---------------------------------------------------------------
 
+    def _entries(self) -> list[dict[str, Any]]:
+        """当前展示/路由用的目录条目：跨账号并集 > 主区域 catalog > 兜底表。"""
+        if self._union:
+            return list(self._union.values())
+        return self._catalog_for(self._region.key)._models or Catalog.fallback()
+
     def models(self) -> Sequence[dict[str, Any]]:
         """同步返回模型列表（用主区域兜底目录；异步刷新见 ``refresh_models``）。
 
@@ -181,25 +200,37 @@ class QoderProvider(BaseProvider):
         摆着调不通的模型只会让客户端白白选到它（2026-10-03 三方模型整批
         被收回后，/v1/models 仍虚报 7 个 403 模型的教训）。
         """
-        entries = self._catalog_for(self._region.key)._models or Catalog.fallback()
         return [to_openai_model(e, self.id)
-                for e in entries if not is_hidden(e) and is_enabled(e)]
+                for e in self._entries() if not is_hidden(e) and is_enabled(e)]
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
-        """从上游刷新主区域目录（供管理页「刷新模型」与转发前预热用）。"""
+        """逐账号刷新目录取并集（供管理页「刷新模型」与启动预热用）。
+
+        并集而不是 ``accounts[0]`` 的单份：目录是**账号级**分桶，受限账号只剩
+        Qwen 两档，拿它当唯一视角会把全量账号的三方模型从列表里抹掉（线上
+        「qoder 只剩 2 个模型」的根因）。同区账号共享 Catalog 实例、TTL 缓存
+        会把第二份吞掉，故逐账号 ``force=True`` 拉取；单账号失败只收缩并集，
+        不拖垮整体。``force`` 形参保留兼容旧调用（内部恒强拉）。
+        """
+        del force  # 逐账号并集语义下恒强拉（见 docstring）
         accounts = failover.available_accounts(self._region.key) or failover.available_accounts()
-        cred: Credential | None = None
-        if accounts:
+        union: dict[str, dict[str, Any]] = {}
+        for acct in accounts:
             try:
-                _, cred_dict = await asyncio.to_thread(ensure_account_token, accounts[0].id)
+                _, cred_dict = await asyncio.to_thread(ensure_account_token, acct.id)
                 cred = cred_to_credential(cred_dict)
-            except AuthError as exc:
-                log.warning("qoder 目录刷新跳过（凭据未就绪）: %s", exc)
-        entries: list[dict[str, Any]]
-        if cred is None:
-            entries = Catalog.fallback()
-        else:
-            entries = await self._catalog_for(cred.region).fetch(cred, force=force)
+                entries = await self._catalog_for(cred.region).fetch(cred, force=True)
+            except Exception as exc:  # noqa: BLE001 - 单账号失败不阻断整体刷新
+                log.warning("qoder 目录刷新跳过账号 %s: %s", acct.id, exc)
+                continue
+            for e in entries:
+                union.setdefault(str(e.get("key") or ""), e)
+        if union:
+            # 覆盖表登记、目录暂时缺失的模型补最小条目（保证可显示/可路由）。
+            for e in override_missing_entries(list(union.values())):
+                union.setdefault(str(e.get("key") or ""), e)
+            self._union = union
+        entries = list(self._union.values()) if self._union else Catalog.fallback()
         return [to_openai_model(e, self.id)
                 for e in entries if not is_hidden(e) and is_enabled(e)]
 
@@ -231,7 +262,7 @@ class QoderProvider(BaseProvider):
         # 名字若同时属于 CodeBuddy 静态表（如 ``auto``），**两个轮次都让开**。
         if _is_codebuddy_owned(want):
             return False
-        entries = self._catalog_for(self._region.key)._models or Catalog.fallback()
+        entries = self._entries()
         # 隐藏模型（旧模型）也放进精确集合：它们只是不出现在列表里，点名仍可调。
         exact_ids = {(public_model_id(e) or "").strip() for e in entries}
         exact_ids.discard("")
@@ -244,6 +275,37 @@ class QoderProvider(BaseProvider):
         # 才认领；否则（真正的未知模型）放行给别人。
         key = self._catalog_for(self._region.key).resolve_key(want)
         return any(str(m.get("key") or "") == key for m in entries)
+
+    def _account_supports(self, model_key: str, account_id: str) -> bool:
+        """该账号是否支持该模型（per-account 覆盖表；未登记 = 全支持）。
+
+        目录里没有的模型（未知名字透传上游裁决的形态）不做账号收窄，一律放行。
+        """
+        entry = next((e for e in self._entries()
+                      if str(e.get("key") or "") == model_key), None)
+        if entry is None:
+            return True
+        return account_supports(entry, account_id)
+
+    def model_support_map(self) -> dict[str, dict[str, Any]]:
+        """对外 id -> per-account 支持画像（UI「部分账号」标注用；纯本地不触网）。
+
+        只收窄过的模型才进表：``{"limited": True, "accounts": [支持账号的
+        显示名, ...]}``；未登记的模型不出现（= 全账号支持，前端不画 badge）。
+        """
+        names = {a["id"]: (a.get("alias") or a.get("name") or a["id"])
+                 for a in (failover.accounts_status().get("accounts") or [])}
+        out: dict[str, dict[str, Any]] = {}
+        for e in self._entries():
+            allowed = override_accounts(e)
+            if allowed is None:
+                continue
+            public = public_model_id(e) or str(e.get("key") or "")
+            out[public] = {
+                "limited": True,
+                "accounts": sorted(names.get(a, a) for a in allowed),
+            }
+        return out
 
     # -- 每日活动权益（打卡） ------------------------------------------------
 
@@ -653,6 +715,23 @@ class QoderProvider(BaseProvider):
             )
 
         meta = ACCOUNT_META.get()  # metrics 账号归属
+
+        # per-account 模型支持收窄（覆盖表白名单）：不支持该模型的账号直接
+        # 跳过——不冷却、不算失败（账号没坏，只是没这个权益）；全不支持时
+        # 快速失败，不白打上游（实测受限号调三方模型是 ReadTimeout/带内 400，
+        # 白付一次慢超时）。
+        accounts = [a for a in accounts if self._account_supports(model, a.id)]
+        if not accounts:
+            raw_name = str(body.get("model") or "").strip()
+            raise HTTPException(
+                status_code=404,
+                detail={"error": {
+                    "message": (f"qoder 没有任何可用账号支持模型 "
+                                f"{raw_name or model}（上游名 {model}）"
+                                "——per-account 模型限制，见 qoder/models.json"),
+                    "type": "invalid_request_error"}},
+            )
+
         started = time.monotonic()
         tried = 0
         last_status = 0

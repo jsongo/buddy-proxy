@@ -134,6 +134,36 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
             os.environ[key] = value
 
 
+async def _qoder_model_refresh_loop(provider) -> None:
+    """qoder 模型目录常驻刷新循环：先刷一次再按 CACHE_TTL_S 节奏重复。
+
+    失败只 log 不退出——下一轮目录刷新自会补上；循环随进程生命周期常驻。
+    """
+    import asyncio
+    import logging
+
+    from buddy_proxy.qoder.catalog import CACHE_TTL_S
+
+    log = logging.getLogger(__name__)
+    while True:
+        try:
+            models = await provider.refresh_models()
+            log.info("qoder 模型目录已刷新（%d 个模型）", len(models))
+        except Exception as exc:  # noqa: BLE001 - 目录刷新失败不影响转发
+            log.warning("qoder 模型目录刷新失败: %s", exc)
+        await asyncio.sleep(CACHE_TTL_S)
+
+
+def _install_qoder_model_warmup(provider) -> None:
+    """把目录预热挂到应用启动（fire-and-forget 常驻任务，随进程生命周期）。"""
+    import asyncio
+
+    async def _start() -> None:
+        asyncio.create_task(_qoder_model_refresh_loop(provider))  # noqa: RUF006
+
+    app.router.on_startup.append(_start)
+
+
 def main():
     import buddy_proxy.core.state as _state
 
@@ -274,6 +304,10 @@ def main():
         logger.info("Qoder provider enabled (%s / %s 个账号)",
                     _qh.get("base_url"), len(_qh.get("accounts") or []))
         print(f"[Qoder] Enabled ({qoder.region().label} / {len(_qh.get('accounts') or [])} 个账号)")
+
+        # 模型目录预热 + 周期刷新：目录是账号级分桶且纯内存（重启即丢），不预热
+        # 的话启动后列表回落到本地兜底表、首次转发前 catalog 一直是空的。
+        _install_qoder_model_warmup(qoder)
     else:
         print("[Qoder] Disabled (pass --qoder or QODER_ENABLED=1 to enable)")
 

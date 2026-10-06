@@ -23,6 +23,7 @@ import time
 from typing import Any
 
 from ..core.account_failover import CooldownTracker
+from .catalog import unsupported_models_for
 from .credentials import AccountRef, list_accounts, load_account_cred, cred_to_credential
 
 log = logging.getLogger(__name__)
@@ -97,5 +98,7 @@ def accounts_status() -> dict[str, Any]:
             "token": "ok" if cred.get("refresh_token") else "missing",
             "hours_left": max(hours_left, 0.0) if hours_left is not None else None,
             "cooling": ([{"kind": kind, "minutes_left": round(left / 60, 1)}] if left > 0 else []),
+            # per-account 模型限制（覆盖表反查）：该账号调不了的模型名，空 = 全支持
+            "models_limited": unsupported_models_for(a.id),
         })
     return {"enabled": bool(items), "accounts": items}

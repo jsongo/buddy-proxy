@@ -404,9 +404,16 @@ function _qoder_sub_html(a) {
     const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
     bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
   }
-  return bits.length
+  const sub = bits.length
     ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-qoder-sub>${esc(bits.join(' · '))}</div>`
     : '';
+  // 模型受限小字（覆盖表反查的 models_limited）：转发会自动跳过受限模型，
+  // 列出名字让人知道这个账号还能用哪些，不用等调失败才发现
+  const lim = a.models_limited || [];
+  const limHtml = lim.length
+    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px">模型受限（仅 Qwen3.8 两档可用；其余 ${lim.length} 个：${esc(lim.join('、'))}）</div>`
+    : '';
+  return sub + limHtml;
 }
 
 function _qoder_move_btns(idx, n, id) {

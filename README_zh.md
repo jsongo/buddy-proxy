@@ -790,12 +790,25 @@ response`）；`_describe_upstream_error` 会把它挖出来，并且失败按 A
 | `qoder/kimi-k3` | `kmodel_latest` | |
 | `qoder/deepseek-v4-pro` | `dmodel` | |
 | `qoder/minimax-m2.7` | `mmodel` | 上游显示名即 MiniMax-M2.7 |
-| `qoder/auto` / `ultimate` / `performance` / `efficient` | 同名 | 平台路由档位 |
+| `qoder/auto` | `auto` | 平台路由档位——上游实际**只有这一个档位**；当前也被上游关了（目录 `enable=false`） |
 
 旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K2.8-Preview、Cantus、Sonus、DeepSeek-Flash）
 **不列在列表里但仍可点名调用**——列表少一点，反而好找要用的。三种写法都接受：
 对外 id、官方显示名（`Qwen3.8-Flash`）、上游内部 key（`qfmodel`）；内部 key 会在
 `/v1/models` 里以 `upstream_key` 回显，便于排障对照。
+
+**模型目录是账号级的**——全量账号报 14 个模型，受限账号可能只剩 Qwen3.8 两档（风控；
+门是账号级的，且实测会漂移）。因此 `refresh_models` 遍历**全部**账号取并集（「至少一个
+账号支持」）；启动时后台预热、之后每 `CACHE_TTL_S` 刷新一次（目录纯内存，没有预热的话
+重启后列表会回落到打包的静态兜底表——界面曾因此只剩 2 个 qoder 模型）。个别账号缺个别
+模型时，per-model 白名单放在随包的 `qoder/models.json`：条目
+`{"id": "glm-5.3", "accounts": ["<uuid>", ...]}` 列出**支持**该模型的账号 id（UUID，
+账号卡上可见）；未列出的模型、或 `accounts: "all"`，表示所有账号都支持。转发时**跳过**
+不支持所请求模型的账号（不冷却、不算失败——账号没坏，只是没这个权益）；所有账号都不
+支持时直接 404 快速失败，不再为不支持组合白付一次慢超时/带内 400。打包的兜底目录按
+全量账号实测重建（三方模型恢复、倍率实测修正）；管理页给受限模型打「部分账号」标签
+（悬浮显示支持账号），qoder 账号卡也列出该账号调不了的模型。改 JSON 需重启（只加载
+一次，刻意保持静态）。
 
 ```bash
 uv run python -m buddy_proxy --desensitize --qoder
