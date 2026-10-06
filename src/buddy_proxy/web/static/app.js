@@ -681,7 +681,7 @@ function orderPageCard(r) {
       <span class="chev" style="transform:rotate(${open ? 0 : -90}deg)">▾</span>
       <span class="mono order-title">${esc(r.m)}</span>
       <span class="tag order-count">${orderCount(items)} 档</span>
-      ${markCount ? `<span class="tag bad" title="有目标处于冷却中，请求会跳过它">⏸ ${markCount}</span>` : ''}
+      ${markCount ? `<span class="tag bad" style="cursor:pointer" title="有目标处于冷却中，点击清除全部冷却，立即重试" onclick="clearOrderMarks('${esc(key)}','${esc(key)}')">⏸ ${markCount}</span>` : ''}
       <span class="tag bad order-dirty" title="有未保存的修改" style="${orderIsDirty(key) ? '' : 'display:none'}">未保存</span>
       <span class="order-chain mono">${esc(chain)}</span>
     </div>
@@ -1033,7 +1033,7 @@ function orderRow(item, idx, marks, scope) {
     <span class="order-flags">
       ${multTxt ? `<span class="tag mult" title="积分倍率：${esc(mult)}（估算参考，非实际扣费）">${esc(multTxt)}</span>` : ''}
       ${sup ? `<span class="tag" title="受账号限制，仅支持：${esc((sup.accounts || []).join('、'))}">部分账号</span>` : ''}
-      ${left ? `<span class="tag bad" title="冷却中，剩余 ${left}s；期间请求会跳过它">⏸ ${left}s</span>` : ''}
+      ${left ? `<span class="tag bad" style="cursor:pointer" title="冷却中，剩余 ${left}s；点击清除冷却，立即重试" onclick="clearOneMark('${esc(item.provider)}/${esc(item.model)}')">⏸ ${left}s</span>` : ''}
       ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
     </span>
     <span class="order-btns">
@@ -1115,6 +1115,17 @@ async function clearOrderMarks(provider, model) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ provider, model })});
     toast(`已清除 ${r.marks_cleared || 0} 个冷却标记`);
+    refreshAll();
+  } catch (e) { toast('清除失败: ' + e.message, true); }
+}
+
+// 清除单个目标的冷却标记（orderRow 里点⏸ 徽标触发；target 形如 "provider/model"）
+async function clearOneMark(target) {
+  try {
+    const r = await api('/ui/api/model-order/mark-clear', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ target })});
+    toast(`已清除 ${target} 的冷却`);
     refreshAll();
   } catch (e) { toast('清除失败: ' + e.message, true); }
 }

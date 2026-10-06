@@ -78,6 +78,25 @@ _LIMIT_KEYS_DOLLAR = ("dollar_limit", "usage_limit", "credits_limit", "limit")
 _AMOUNT_KEYS_DOLLAR = ("dollar_amount", "usage_amount", "credits_amount", "amount")
 
 
+# ---- 签到节流 / 限流退避 ----
+# 上游签到接口有短窗口频控：多账号背靠背连打时，第二个起的请求命中
+# 「当前参与用户太多，请稍后再试」（2026-10-06 ethan/ethan0 实测复现）。
+# 对策两段：账号间强制间隔，让每个 claim 看起来都是独立用户行为；
+# 仍命中限流时退避重试（间隔递增），活动高峰期第一发也可能被挤掉。
+_CHECKIN_THROTTLE_S = 4.0
+_CHECKIN_RETRY_DELAYS = (5.0, 10.0)
+
+#: 限流文案特征（上游 message 原样匹配，出现在 data["message"] 或 RuntimeError
+#: 文案里都算）。宁可误判（多等几秒重试）不可漏判——漏判就是白丢一天积分。
+_CHECKIN_RATE_LIMIT_MARKERS = ("参与用户太多", "稍后再试", "稍后重试")
+
+
+def _claim_rate_limited(data: dict[str, Any] | None, err: str = "") -> bool:
+    """该次 claim 响应是否命中上游频控（按文案判断——上游无独立错误码）。"""
+    text = err + str((data or {}).get("message") or "")
+    return any(m in text for m in _CHECKIN_RATE_LIMIT_MARKERS)
+
+
 def _first_num(obj: dict[str, Any], keys: Sequence[str]) -> float | None:
     """按候选名依次取第一个数值字段；全不命中/非数值返回 None。"""
     for k in keys:
@@ -304,7 +323,15 @@ class TraeProvider(BaseProvider):
     def checkin_claim(self) -> dict[str, Any] | None:
         """领取今日签到积分。多账号**每个都领**（用户决策），逐个尝试、
         各自容错：单个账号失败（网络/token/已领过）不阻塞其它账号。汇总
-        ``extra_credits`` 为各账号实领之和，``message`` 据实说明每个账号结果。"""
+        ``extra_credits`` 为各账号实领之和，``message`` 据实说明每个账号结果。
+
+        多账号**串行 + 节流**（用户 2026-10-06 要求）：实测双账号背靠背连打，
+        第二个必中「当前参与用户太多，请稍后再试」——上游把短窗口内的连续
+        claim 识别为刷量限流。账号间强制间隔 ``_CHECKIN_THROTTLE_S``，命中
+        限流文案再按 ``_CHECKIN_RETRY_DELAYS`` 退避重试。本方法经 benefits 层
+        ``asyncio.to_thread`` 跑（``_call``），``time.sleep`` 不阻塞事件循环；
+        手动点击的 HTTP 响应最坏多等约 15s（两次重试），前端 fetch 无超时，可接受。
+        """
         accounts = self._work_accounts()
         if not accounts:
             # 单账号 legacy 兜底（PAT 由 supports_checkin=False 挡住 UI 调度，
@@ -342,38 +369,69 @@ class TraeProvider(BaseProvider):
         messages: list[str] = []
         acct_details: list[dict[str, Any]] = []
         # 展示序号取 failover.display_index()（与 /ui 账号快照同源，理由同
-        # checkin_status）。不能用 enumerate 的位置：accounts 是「本区 + 未冷却」
-        # 子集，位次与快照对不上，前端会把明细行对到别的账号上（✎ 改名 / ✕ 删除
-        # 都拿它定位，而 ✕ 会 unlink 凭据文件，不可逆）。
+        # checkin_status）；**节流**用的是本轮循环位置 pos，两者必须分开：
+        # 展示序号是「这账号在管理页排第几」（跨区、含冷却账号都占位），
+        # 节流要的是「是不是本轮第一个打的」——拿展示序号判会把「快照里的
+        # 第 3 个、但本轮第 1 个」也睡一拍（无谓等待），更糟的是若某轮只领
+        # 快照第 2、3 号，`i > 1` 对两者都成立，第 1 个也白睡。
         didx = failover.display_index()
         for pos, acct in enumerate(accounts, 1):
             i = didx.get(acct.id, pos)
             # 显示名 alias 优先（同 checkin_status）；id 下发供明细行 ✎ 定位
             name = acct.alias or acct.nickname or acct.uid or acct.id
             tag = f"#{i}"
-            try:
-                token, _cred = ensure_account_token(acct.id)
-                data = claim_checkin_credits(token=token, account_id=acct.id,
-                                            region=self._region.key)
+            # 串行节流：从第 2 个账号起先等一段再打（实测零间隔必中频控——
+            # 见 _CHECKIN_THROTTLE_S 注释）。异常路径同样等：哪怕上一个账号
+            # 是网络失败，下一个也照常歇一拍，节奏一致才像「人在操作」。
+            if pos > 1:
+                time.sleep(_CHECKIN_THROTTLE_S)
+            msg = ""
+            ok = False
+            granted: float | None = None
+            last_rl = False
+            for attempt in range(len(_CHECKIN_RETRY_DELAYS) + 1):
+                last_rl = False
+                try:
+                    token, _cred = ensure_account_token(acct.id)
+                    data = claim_checkin_credits(token=token, account_id=acct.id,
+                                                region=self._region.key)
+                except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号
+                    log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
+                    msg = str(e)[:60]
+                    last_rl = _claim_rate_limited(None, msg)
+                    if last_rl and attempt < len(_CHECKIN_RETRY_DELAYS):
+                        time.sleep(_CHECKIN_RETRY_DELAYS[attempt])
+                        continue
+                    break
                 if data.get("code") in (0, None):
-                    any_claimed = True
-                    granted = data.get("credits_granted", data.get("extra_credits"))
-                    if isinstance(granted, (int, float)):
-                        total_credits += float(granted)
-                    messages.append(f"{tag} 已领 {granted or ''}".strip())
-                    acct_details.append({
-                        "index": i, "id": acct.id, "name": name, "ok": True,
-                        "credits": granted if isinstance(granted, (int, float)) else None,
-                        "message": str(data.get("message") or "")[:80],
-                    })
-                else:
-                    msg = str(data.get("message"))[:60]
-                    messages.append(f"{tag} 失败：{msg}")
-                    acct_details.append({"index": i, "id": acct.id, "name": name,
-                                         "ok": False, "message": msg})
-            except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号
-                log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
-                msg = str(e)[:60]
+                    ok = True
+                    g = data.get("credits_granted", data.get("extra_credits"))
+                    if isinstance(g, (int, float)):
+                        granted = float(g)
+                    msg = str(data.get("message") or "")[:80]
+                    break
+                msg = str(data.get("message"))[:60]
+                last_rl = _claim_rate_limited(data)
+                if last_rl and attempt < len(_CHECKIN_RETRY_DELAYS):
+                    log.info("trae 签到限流（%s），%.0fs 后重试 %d/%d",
+                             acct.id, _CHECKIN_RETRY_DELAYS[attempt],
+                             attempt + 1, len(_CHECKIN_RETRY_DELAYS))
+                    time.sleep(_CHECKIN_RETRY_DELAYS[attempt])
+                    continue
+                break
+            if ok:
+                any_claimed = True
+                if granted is not None:
+                    total_credits += granted
+                messages.append(f"{tag} 已领 {granted or ''}".strip())
+                acct_details.append({
+                    "index": i, "id": acct.id, "name": name, "ok": True,
+                    "credits": granted,
+                    "message": msg,
+                })
+            else:
+                # 重试耗尽仍限流：说明「稍后再试」——别写死「失败」，
+                # message 保持上游原话，用户稍后手动再点一次即可补上
                 messages.append(f"{tag} 失败：{msg}")
                 acct_details.append({"index": i, "id": acct.id, "name": name,
                                      "ok": False, "message": msg})

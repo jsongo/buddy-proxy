@@ -59,7 +59,11 @@ function syncPatStatusAuto() {
 }
 document.addEventListener('visibilitychange', syncPatStatusAuto);
 
-async function claimNow(pid) {
+async function claimNow(pid, btn) {
+  // 多账号通道（trae）的 claim 是串行节流的（账号间 sleep + 限流退避），
+  // 一次点击最坏 20s+ 才返回——期间必须给反馈，否则看起来像「点了没反应」。
+  if (btn) { btn.disabled = true; btn.textContent = '打卡中…'; }
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '立即打卡'; } };
   try {
     const r = await api('/ui/api/checkin', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -81,6 +85,7 @@ async function claimNow(pid) {
     }
     refreshAll();
   } catch (e) { toast('打卡失败: ' + e.message, true); }
+  finally { restore(); }
 }
 
 async function saveCheckinSettings() {

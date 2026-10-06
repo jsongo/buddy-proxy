@@ -40,7 +40,13 @@ from .provider import _default_codebuddy
 #:
 #: 刻意**不含** 400/401/403/404：那些是确定性错误（参数错、模型不存在、被停用、
 #: 凭据无效），换谁都不会成功，重试只会拖时间并掩盖真因。
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+#:
+#: 405 看着像确定性错误，实则相反：本代理只会 POST 聊天端点，上游给 405 就是
+#: WAF/风控拦截——zcode-start 的 3012「request has been blocked due to unusual
+#: activity」即以 405 透传（2026-10-06 /model 探测实测，日志 zcode-start/405
+#: 后没有下文）。那是**通道级**封禁，换通道正是解法；不给换档的话 model_order
+#: 配再多候选也只试第一个，用户看到的就是「明明还有渠道却报错」。
+_RETRYABLE_STATUS = frozenset({405, 429, 500, 502, 503, 504})
 
 #: 允许换档的**异常**类型：只认传输层故障，不认编程错误。
 #:

@@ -227,7 +227,7 @@ function renderBenefits() {
         </div>
         <div class="br-meta">${st}${meta}${nextTimeHtml(c)}</div>
         <div class="br-act">
-          <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
+          <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)">立即打卡</button>
         </div>
       </div>
       ${acctsHtml ? `<div class="ck-accts">${acctsHtml}</div>` : ''}
@@ -255,6 +255,7 @@ function renderBenefits() {
   renderAntigravityPanel();
   renderKimiPanel();
   renderQoderPanel();
+  renderTraePanel();
   syncQuotaFold();  // 样式与布局就位后按实际高度校准（各面板都已重建完）
 }
 

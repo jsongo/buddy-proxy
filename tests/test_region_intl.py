@@ -392,6 +392,29 @@ def test_checkin_status_accounts_use_snapshot_index(monkeypatch):
     assert all(r["id"] for r in rows), "明细行必须带 id 供改名/删除定位"
 
 
+def test_checkin_claim_throttle_uses_loop_position(monkeypatch):
+    """节流按**本轮位置**而不是展示序号（否则第一个也白睡一拍）。"""
+    import buddy_proxy.trae.provider as mod
+
+    save_account_cred(_trae_cred("gl1", region="global"))
+    save_account_cred(_trae_cred("cn1"))
+    save_account_cred(_trae_cred("cn2"))
+    monkeypatch.setattr(
+        "buddy_proxy.trae.provider.claim_checkin_credits",
+        lambda token="", account_id="", region="": {"code": 0, "message": "ok",
+                                                    "credits_granted": 5})
+    monkeypatch.setattr(
+        "buddy_proxy.trae.provider.ensure_account_token",
+        lambda aid: ("tok", {"uid": aid}))
+    slept: list[float] = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+
+    out = TraeProvider().checkin_claim()
+    # 本轮第一个账号不睡，第二个睡一次
+    assert len(slept) == 1, f"两个账号只该节流一次，实际 {slept}"
+    assert out["checked_in"] is True
+
+
 def test_checkin_claim_accounts_use_snapshot_index(monkeypatch):
     """打卡结果明细的 index 也要对得上快照（✎ 改名按它定位账号）。"""
     save_account_cred(_trae_cred("gl1", region="global"))

@@ -98,6 +98,17 @@ parse_common() {
 
 cmd_start() {
     parse_common "$@"
+    # launchd 服务（com.buddy.proxy）在管本端口时禁止 nohup 野起：nohup 实例和
+    # KeepAlive 会抢同一个端口，拉起即 errno 48 死循环（2026-10-06 实测 388 次
+    # spawn 全灭），最后留下「探活假成功、野实例一死就全挂」的烂摊子。统一走 buddy。
+    # 显式换端口（-p）不拦：8788 这类调试实例是合法用法。
+    if [[ "$PROXY_PORT" == "8787" ]] \
+        && [[ -f "$HOME/Library/LaunchAgents/com.buddy.proxy.plist" ]] \
+        && launchctl print "gui/$UID/com.buddy.proxy" >/dev/null 2>&1; then
+        log "ERROR: ${PROXY_PORT} 已由 launchd 服务 com.buddy.proxy 管理，请用 buddy start / buddy restart"
+        log "（proxy.sh 野起的 nohup 实例会和 KeepAlive 抢端口，见 buddy 里 evict_port_squatters 的注释）"
+        return 1
+    fi
     # 以端口实况为准：真有实例在监听才算已运行
     local port_pid
     port_pid="$(find_port_pid || true)"
@@ -114,13 +125,17 @@ cmd_start() {
     # 端口空闲但可能有「不监听的僵尸实例」或过期 pid 文件：先清理再启动
     local old
     old="$(read_pid)"
-    if [[ -n "$old" ]] && is_running "$old" && is_proxy_cmd "$old"; then
-        log "cleaning hung instance pid=$old (alive but not listening)"
-        kill -9 "$old" 2>/dev/null || true
-        sleep 1
+    if [[ -n "$old" ]]; then
+        if is_running "$old" && is_proxy_cmd "$old"; then
+            log "cleaning hung instance pid=$old (alive but not listening)"
+            kill -9 "$old" 2>/dev/null || true
+            sleep 1
+        elif ! is_running "$old"; then
+            log "removing stale pid file (pid=$old not running)"
+        fi
     fi
     pattern_kill
-    [[ -f "$PID_FILE" ]] && rm -f "$PID_FILE"
+    rm -f "$PID_FILE"
 
     log "starting buddy-proxy on $PROXY_HOST:$PROXY_PORT ..."
     # nohup + & : 立刻返回，不阻塞
@@ -247,7 +262,7 @@ cmd_login() {
     local extra=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|trae|zcode|doubao|mimo|qoder|gemini|gemini-cli|antigravity|kimi)
+            codebuddy|trae|zcode|doubao|dumate|mimo|qoder|gemini|gemini-cli|antigravity|kimi)
                 provider="$1" ;;
             workbuddy)
                 # workbuddy 是 codebuddy 的别名（登录模块内同样会归一）

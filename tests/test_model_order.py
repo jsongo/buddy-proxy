@@ -129,6 +129,12 @@ class _Provider(BaseProvider):
         if self.behavior == "json429":
             return JSONResponse(status_code=429,
                                 content={"error": {"message": "rate limited"}})
+        if self.behavior == "json405":
+            # zcode-start 风控拦截的真实形态（2026-10-06 /model 探测实测）：
+            # 上游 405 + 3012「unusual activity」原样透传
+            return JSONResponse(status_code=405,
+                                content={"code": 3012,
+                                         "msg": "request has been blocked due to unusual activity."})
         if self.behavior == "stream_then_break":
             # 生成器里抛的异常是在**响应已返回、首个 chunk 已流出**之后才发生的，
             # 路由器完全看不到——这正是「已提交即不换档」要覆盖的场景。
@@ -180,6 +186,25 @@ def test_failover_on_non_2xx_json_response(tmp_path, monkeypatch):
     assert r.status_code == 200, r.text
     assert r.json()["choices"][0]["message"]["content"] == "from-pb"
     assert len(b.calls) == 1
+
+
+def test_failover_on_405_risk_control_block(tmp_path, monkeypatch):
+    """**承重测试**：405 风控拦截必须换档，不能当成确定性错误直接回给客户端。
+
+    2026-10-06 事故：``/model glm-5.3-flash`` 撞 zcode-start 3012「unusual
+    activity」（HTTP 405），``_RETRYABLE_STATUS`` 不含 405 → 第一档的 405
+    被原样返回，model_order 里配的 zcode / codebuddy 兜底一次都没试——
+    用户看到「明明还有渠道却报错」。405 从聊天上游回来只可能是 WAF 拦截
+    （本代理只会 POST），换通道正是解法。
+    """
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="json405")
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] == "from-pb"
+    assert len(a.calls) == 1 and len(b.calls) == 1
+    # 拦截它的通道进冷却，后续请求不再白试它
+    assert cooldown_mod.is_marked("pa", "m1") is True
 
 
 def test_failover_marks_failed_target(tmp_path, monkeypatch):
