@@ -93,6 +93,11 @@ class TraeProvider(BaseProvider):
     # 打卡/积分 API 只有 Trae 上游提供（/ui 自动打卡据此识别）。
     # 海外版上游没有签到端点，TraeIntlProvider 会把它覆写成 False。
     supports_checkin = True
+    # 额度/签到分组标签的通道名（``Trae #N · ``）。TraeIntlProvider 覆写成
+    # 「Trae 海外版」：两个通道并行在线时各自额度卡的行标如果都叫 ``Trae #N``，
+    # 用户分不清哪张是 CN 积分哪张是海外美元（账号定位本身不受影响——序号
+    # 都出自 display_index 的全量位次，✕/✎ 不会错绑，这里纯是可读性）。
+    _quota_tag = "Trae"
 
     def __init__(self, base_url: str | None = None, region: str | None = None):
         # region 决定：chat 网关、模型目录、failover 选账号、额度/签到口径。
@@ -272,7 +277,7 @@ class TraeProvider(BaseProvider):
         except Exception as e:  # noqa: BLE001 — 单账号失败不该让整页 500
             log.warning("trae 签到状态查询失败（%s）: %s", acct.id, e)
             return None, str(e)[:120]
-        label = f"Trae #{index} · " if multi else ""
+        label = f"{self._quota_tag} #{index} · " if multi else ""
         return self._checkin_status_one(data, label=label, multi=multi), ""
 
     def _checkin_status_one(
@@ -451,7 +456,7 @@ class TraeProvider(BaseProvider):
         except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞整页
             log.warning("trae 额度查询失败（%s）: %s", acct.id, e)
             return [], False
-        prefix = f"Trae #{index} · " if multi else ""
+        prefix = f"{self._quota_tag} #{index} · " if multi else ""
         return self._quota_items(data, label_prefix=prefix), True
 
     def _quota_items(self, data: dict[str, Any], *, label_prefix: str) -> list[dict[str, Any]]:

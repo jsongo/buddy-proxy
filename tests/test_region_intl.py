@@ -204,6 +204,18 @@ def test_trae_intl_provider_identity():
     assert p.checkin_status() is None and p.checkin_claim() is None
 
 
+def test_intl_quota_label_tag_differs_from_cn(monkeypatch):
+    """两个通道并行在线时，额度行标不能都叫 ``Trae #N``（分不清哪张是美元）。"""
+    _seed_quota_stubs(monkeypatch)
+    save_account_cred(_trae_cred("gl1", region="global"))
+    save_account_cred(_trae_cred("gl2", region="global"))
+
+    cn_labels = _quota_labels(TraeProvider())            # CN 通道查不到本区账号
+    intl_labels = _quota_labels(TraeIntlProvider())
+    assert all(lab.startswith("Trae 海外版 #") for lab in intl_labels), intl_labels
+    assert not any(lab.startswith("Trae 海外版") for lab in cn_labels)
+
+
 def test_trae_intl_enabled_follows_index():
     assert trae_intl_enabled() is False, "没有海外账号时不注册 traeintl"
     save_account_cred(_trae_cred("cn-only", region="cn"))

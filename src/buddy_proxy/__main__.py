@@ -426,6 +426,10 @@ def main():
         from buddy_proxy.trae.intl_provider import TraeIntlProvider, intl_enabled
         if intl_enabled():
             trae_intl = TraeIntlProvider()
+            try:
+                trae_intl.ensure_auth()  # 同 qoderintl：认证未就绪只告警不拦注册
+            except HTTPException as exc:
+                logger.warning("traeintl provider 认证未就绪: %s", exc.detail)
             providers[trae_intl.id] = trae_intl
             logger.info("Trae 海外版 provider enabled")
             print("[Trae Intl] Enabled (traeintl/*)")
