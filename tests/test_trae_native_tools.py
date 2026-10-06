@@ -355,11 +355,11 @@ def test_native_4001_stream_skip_ttl_second_request(client, native_env):
     finish = [d.get("choices", [{}])[0].get("finish_reason")
               for ev, d in events if isinstance(d, dict) and d.get("choices")]
     assert "tool_calls" in finish
-    # 第二次：跳过流式尝试，仅一次非流式 native 调用；首发失败节流仍生效
-    # （上一请求刚 4001 过，非流式前安静等到窗外），无文本协议
+    # 第二次：跳过流式尝试，仅一次非流式 native 调用；r1 的非流式成功已清掉
+    # 节流时间戳（门是开的），所以不再陪等安静窗，无文本协议
     assert [c["stream"] for c in native_calls] == [False]
     assert legacy_calls == []
-    _assert_paced(native_env, 1)
+    assert state._sleeps == []
 
 
 def test_native_4001_stream_full_fallback_to_legacy(client, native_env):

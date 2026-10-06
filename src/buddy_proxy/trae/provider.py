@@ -73,6 +73,11 @@ def _pace_after_reject(model: str) -> None:
     if wait > 0:
         time.sleep(wait)
 
+
+def _note_native_ok(model: str) -> None:
+    """native 请求成功＝门开着：清掉节流时间戳，后续请求不必陪等安静窗。"""
+    _last_reject_at.pop(model, None)
+
 #: 「该模型 chat_v3 流式被上游整体拒绝」的标记 TTL。流式 4001 后短 TTL 内直接
 #: 跳过必败的流式尝试、straight to 非流式缓冲——既省一次注定失败的往返，也避免
 #: 每个流式请求都喂养一次惩罚窗口（实测惩罚窗会随连续失败拉长，02:31 时 ~1s、
@@ -1024,6 +1029,8 @@ class TraeProvider(BaseProvider):
                                 used = False
                             else:
                                 used = True
+                        if used:
+                            _note_native_ok(model)
                         _ev_q.put(("raw", (raw_text, used)))
                     else:
                         _ev_q.put(("raw", (send_trae_chat(
@@ -1260,6 +1267,8 @@ class TraeProvider(BaseProvider):
                 raw = send_trae_chat(messages, model, stream=False,
                                      base_url=self._base_url)
                 used_native = False
+            if used_native:
+                _note_native_ok(model)
         else:
             raw = send_trae_chat(messages, model, stream=False,
                                  base_url=self._base_url)
