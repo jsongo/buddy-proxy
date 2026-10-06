@@ -162,3 +162,17 @@ def test_zcode_quota_fallback_still_intact(tmp_path, monkeypatch):
 
     p = ZcodeProvider()
     assert p._api_key == "zc.ey"
+
+
+def test_credit_estimate_reuses_official_coeffs():
+    """glm 请求的 Credit 列必须复用 zcode 的官方抵扣系数。
+
+    estimate_credit 按 provider id 分派——漏掉 glm 会掉进倍率粗估并因
+    glm 无倍率表返回 None（Credit 列整列空白）。两条通道同上游同计价，
+    同一输入应给出同一个数。
+    """
+    from buddy_proxy.core.credit_estimate import estimate_credit
+
+    args = ("glm-5.3-flash", 100_000, 10_000, 0)
+    assert estimate_credit("glm", *args) == estimate_credit("zcode", *args)
+    assert estimate_credit("glm", *args) is not None

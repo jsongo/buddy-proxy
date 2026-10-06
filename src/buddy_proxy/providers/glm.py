@@ -33,7 +33,6 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from .base import BaseProvider  # noqa: F401  -- 仅为类型提示可读性
 from .zcode import BIGMODEL_ANTHROPIC_BASE, ZcodeProvider, _load_secret_file_impl
 from ..core.paths import state_file
 
