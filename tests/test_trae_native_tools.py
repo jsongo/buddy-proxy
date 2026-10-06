@@ -145,6 +145,8 @@ def native_env(monkeypatch):
 
     def fake_legacy(messages, model, stream, base_url=None):
         legacy_calls.append({"messages": messages, "model": model, "stream": stream})
+        if stream and getattr(state, "_legacy_reject_streaming", False):
+            return SSE_NATIVE_REJECTED
         return getattr(state, "_legacy_sse", None) or SSE_LEGACY_TOOL_CALL
 
     monkeypatch.setattr(tp_impl, "_send_native_chat", fake_native)
@@ -291,16 +293,19 @@ def test_native_4001_falls_back_to_legacy(client, native_env):
     assert len(native_calls) == 1 and len(legacy_calls) == 1
 
 
-def test_native_4001_stream_falls_back(client, native_env):
+def test_native_4001_stream_falls_back_nonstream_upstream(client, native_env):
     state, native_calls, legacy_calls = native_env
     state._native_sse = SSE_NATIVE_REJECTED
+    state._legacy_reject_streaming = True
     r = client.post("/v1/chat/completions", json=_chat_body(stream=True))
     assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
     events = _parse_sse_events(r.text)
     finish = [d.get("choices", [{}])[0].get("finish_reason")
               for ev, d in events if isinstance(d, dict) and d.get("choices")]
     assert "tool_calls" in finish
     assert len(native_calls) == 1 and len(legacy_calls) == 1
+    assert legacy_calls[0]["stream"] is False
 
 
 # ---------------------------------------------------------------------------

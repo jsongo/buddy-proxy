@@ -929,8 +929,10 @@ class TraeProvider(BaseProvider):
                                 "fallback to text protocol: model=%s", model)
                             _debug_dump("trae_native_fallback", model=model,
                                         phase="stream")
+                            # 文本兜底在此路径本来就会整段缓冲，再由下游 SSE 包装；
+                            # 上游流式请求遇到 4001 时，改用已验证可用的非流式文本协议。
                             raw_text = send_trae_chat(
-                                messages, model, stream=True,
+                                messages, model, stream=False,
                                 base_url=self._base_url)
                             used = False
                         _ev_q.put(("raw", (raw_text, used)))
