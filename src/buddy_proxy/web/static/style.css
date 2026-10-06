@@ -367,8 +367,7 @@
   .qitem .qhead .mono { white-space: nowrap; }
   .qbar { background: var(--bg); height: 8px; border-radius: 4px; overflow: hidden; }
   /* 额度条目区：默认只铺没消耗完的，整块超过最大高度就裁掉，按钮展开。
-     裁剪用 max-height + overflow:hidden —— 展开态由 JS 摘掉这个类，高度自然
-     撑开，不必算具体像素。
+     裁剪用 max-height + overflow:hidden —— 展开态由 JS 摘掉这个类。
      上限写进 --qfold-max 供 JS 读（syncQuotaFold 按它判断该不该露按钮）：
      这个值只此一处，改这里就够。 */
   .qbody { --qfold-max: 208px; }
@@ -376,6 +375,11 @@
                    /* 底部渐隐，暗示「下面还有」而不是让进度条被硬切一刀 */
                    mask-image: linear-gradient(180deg, #000 76%, transparent);
                    -webkit-mask-image: linear-gradient(180deg, #000 76%, transparent); }
+  /* 展开态也别无限撑高：条目多的通道（trae 一次 28 条、qoder 多账号目录
+     并集）全铺出来一整卡能把页面撑过一屏。限到收起裁剪线的两倍、超出转
+     内部滚动——「展开」从「全部铺出来」变成「固定视口内滚着看」
+     （用户 2026-10-06 反馈）。渐隐 mask 只留给收起态，滚动视口不糊边。 */
+  .qbody.open { max-height: calc(var(--qfold-max) * 2); overflow-y: auto; }
   /* 已用完的区块：默认藏在展开态后面（JS 切 hidden）。展开后沉到底部、
      与还在用的部分用一条分隔线断开，并降一档亮度——它们是历史，不是当前状态 */
   .qspent { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); opacity: .72; }
