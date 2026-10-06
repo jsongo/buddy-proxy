@@ -302,14 +302,17 @@ def secret_file_path() -> Path:
     return state_file("zcode_api_key")
 
 
-def _load_secret_file() -> str:
-    """读上面的 key 文件，支持 ``name=value`` 或裸 value。
+def _load_secret_file_impl(path: Path) -> str:
+    """读 key 文件（``path`` 由调用方给），支持 ``name=value`` 或裸 value。
 
     只取首行、且按行切分：文件若真有多行，把整块文本当 key 发给上游必然
     401（单行文件不受影响）。按行解析天然规避该问题。
+
+    拆出 path 参数版（``_load_secret_file_impl``）是给 glm 渠道复用的——
+    凭据读法相同、文件名不同。
     """
     try:
-        for raw in secret_file_path().read_text().splitlines():
+        for raw in path.read_text().splitlines():
             line = raw.strip()
             if not line:
                 continue
@@ -317,6 +320,10 @@ def _load_secret_file() -> str:
     except Exception:
         pass
     return ""
+
+
+def _load_secret_file() -> str:
+    return _load_secret_file_impl(secret_file_path())
 
 
 def _load_zcode_config_key() -> tuple[str, str]:
@@ -490,25 +497,25 @@ class ZcodeProvider(BaseProvider):
             except httpx.RemoteProtocolError as exc:
                 # 上游偶发在返回任何响应字节前断连（Server disconnected）——
                 # 请求尚未被处理，原地重发一次是安全的；仍失败才对外报 502
-                log.warning("zcode upstream disconnected before response, retrying once: %s", exc)
+                log.warning("%s upstream disconnected before response, retrying once: %s", self.id, exc)
                 try:
                     resp = await _send()
                 except httpx.HTTPError as exc2:
                     raise HTTPException(status_code=502, detail={
-                        "error": {"message": "zcode upstream error", "type": "bad_gateway"}}
+                        "error": {"message": f"{self.id} upstream error", "type": "bad_gateway"}}
                     ) from exc2
         except httpx.TimeoutException as exc:
-            log.warning("zcode upstream timeout: %s", exc)
+            log.warning("%s upstream timeout: %s", self.id, exc)
             raise HTTPException(status_code=504, detail={
-                "error": {"message": "zcode upstream timeout", "type": "timeout"}}
+                "error": {"message": f"{self.id} upstream timeout", "type": "timeout"}}
             ) from exc
         except httpx.HTTPError as exc:
             # 用 describe_exception 而非裸 %s：httpcore 会把底层异常映射成
             # httpx.ReadError() 这类**自身 str() 为空**的对象，直接打日志只剩
             # 「zcode upstream error: 」一行空话，真因在下层链里看不到。
-            log.warning("zcode upstream error: %s", describe_exception(exc))
+            log.warning("%s upstream error: %s", self.id, describe_exception(exc))
             raise HTTPException(status_code=502, detail={
-                "error": {"message": "zcode upstream error", "type": "bad_gateway"}}
+                "error": {"message": f"{self.id} upstream error", "type": "bad_gateway"}}
             ) from exc
 
         if resp.status_code >= 400:
@@ -533,7 +540,7 @@ class ZcodeProvider(BaseProvider):
             payload = resp.json()
         except Exception as exc:
             raise HTTPException(status_code=502, detail={
-                "error": {"message": "zcode upstream returned non-JSON", "type": "bad_gateway"}}
+                "error": {"message": f"{self.id} upstream returned non-JSON", "type": "bad_gateway"}}
             ) from exc
         return JSONResponse(content=payload)
 

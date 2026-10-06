@@ -45,7 +45,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity/kimi)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/glm/doubao/mimo/qoder/gemini/antigravity/kimi)
                            # trae/qoder accept --region cn|global (accounts differ per region); logging in a global
                            # account also enables the traeintl/qoderintl channels — separate quota cards in the UI
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
@@ -118,7 +118,7 @@ The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — 
 | `deepseek-v4-flash` | Deepseek-V4-Flash | x0.17 |
 | `deepseek-v4-pro` | Deepseek-V4-Pro | x0.51 |
 
-> Note on `glm-*`: the bare name resolves to whichever channel claims it first in registration order (**zcode**, which serves `glm-5.3` / `glm-5.3-flash`). For `glm-5.3-flashx` the zcode subscription reports `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限` while **CodeBuddy serves it fine** — so use the explicit `codebuddy/glm-5.3-flashx` prefix for that one.
+> Note on `glm-*`: the bare name resolves to whichever channel claims it first in registration order (**zcode**, which serves `glm-5.3` / `glm-5.3-flash`). For `glm-5.3-flashx` the zcode subscription reports `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限` while **CodeBuddy serves it fine** — so use the explicit `codebuddy/glm-5.3-flashx` prefix for that one. The official **`glm/`** channel (below) shares the same upstream and model table; use its explicit prefix to route a request over the official plan's key.
 
 **Trae PAT channel** (27) — addresses as `traepat/<id>`. A bare id that several channels declare resolves to whichever one claims it first in registration order (the personal `trae` channel, if enabled) — **not** to CodeBuddy, whose `models()` is empty and is therefore only reached by the no-match fallback or an explicit `codebuddy/` prefix. So always use the `traepat/` prefix when you mean this channel. Credit values here are the channel's own scale:
 
@@ -258,6 +258,18 @@ There is no browser login to automate: the credential is an API key issued in th
 When writing the key file, use `>` (overwrite) rather than `>>` (append): only the first non-empty line is read, so appending leaves the old key in effect and changing keys silently does nothing. Run `mkdir -p ~/.buddy-proxy` first if the directory does not exist yet.
 
 The quota panel reads `/api/monitor/usage/quota/limit`. Its `limits[]` entries share one `type` (`CREDIT_LIMIT`) and distinguish windows by `unit` + `number`, not by the reset time: `unit=3`/`number=5` is the 5-hour window and `unit=6`/`number=1` is the monthly one. Name the windows from `unit`/`number` — deriving the name from "how far away is `nextResetTime`" gets both wrong, since the monthly window resets only a few days out (so it reads as "weekly") and the 5-hour window *has no* `nextResetTime` at all (so it degrades to a bare `CREDIT_LIMIT`). Rows are ordered smallest window first, so the 5-hour entry leads the card; ordering by `nextResetTime` instead drops the missing-timestamp 5-hour entry to the end and headlines the monthly bucket. Note the two windows are separate allowances to be read independently — they are not added together.
+
+## GLM provider (official, optional)
+
+The same GLM Coding Plan upstream as ZCode, but driven by **your own console-issued API key** instead of the ZCode CLI's credentials:
+
+```bash
+uv run python -m buddy_proxy --desensitize --glm
+```
+
+`GlmProvider` subclasses `ZcodeProvider` — passthrough forwarding, SSE pumping, the model table and the quota endpoint are all inherited. The only difference is the credential chain: `GLM_API_KEY` or `~/.buddy-proxy/glm_api_key`, and **never** `~/.zcode` — the two channels' keys belong to independently purchased plans, and cross-reading them would bill one plan for the other's usage (and mix up the quota cards). Registered *after* zcode, so a bare `glm-*` request still lands on zcode when both are enabled; use the explicit `glm/<model>` prefix to pin the official key.
+
+`buddy login glm` reports state and prints the key setup steps, same style as zcode (no automatable browser login — the key is minted by hand in the Zhipu console). Plan access measured 2026-10-06 (lite): `glm-5.3` / `glm-5.3-flash` / `glm-5-turbo` work; `glm-5.3-flashx` is refused with `1311 套餐暂未开放` until the plan is upgraded — the model stays in the table as a reserve, no code change needed when it unlocks.
 
 ## MiMo provider (optional)
 
@@ -612,6 +624,8 @@ providers:
                           (codebuddy/zcode/trae/doubao/mimo, default codebuddy)
 --trae                    enable the Trae provider (decrypts the Trae IDE login)
 --zcode                   enable the ZCode provider (Zhipu GLM, Anthropic passthrough)
+--glm                     enable the GLM official provider (BigModel Coding Plan key,
+                          same upstream as zcode but independent credentials)
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
 --qoder                   enable the Qoder provider (COSY-signed, Qwen3.8/GLM/Kimi)

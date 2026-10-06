@@ -9,7 +9,7 @@
 #   ./proxy.sh logs                              # 跟踪日志
 #   ./proxy.sh ui                                # 确保在跑并打开管理页 http://127.0.0.1:8787/ui
 #   ./proxy.sh login    [provider] [--no-browser] [--region cn|global] # 登录上游账号（默认 codebuddy；
-#                                                # provider: codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity）
+#                                                # provider: codebuddy(=workbuddy)/trae/zcode/glm/doubao/mimo/qoder/gemini/antigravity）
 #                                                # --region 仅 trae/qoder 生效（两区账号不通用；交互终端不给会问一句）
 #                                                # 登录成功后若网关在运行，需 restart 生效
 #
@@ -34,7 +34,7 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # + 豆包（CDP 直连）+ MiMo（小米桌面登录态）+ Qoder（千问/GLM/Kimi 等）+
 # Antigravity（Google 免费额度，Gemini 3.x / Claude / GPT-OSS）；
 # 可用 PROXY_EXTRA_ARGS 覆盖，或命令行追加参数（如 --default-provider codebuddy）
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --zcode-start --mimo --qoder --antigravity --kimi --default-provider trae}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --zcode-start --mimo --qoder --antigravity --kimi --default-provider trae}"
 
 # 优先使用项目自带 .venv（uv 已装好依赖），否则退回系统 python
 if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
@@ -262,7 +262,7 @@ cmd_login() {
     local extra=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|trae|zcode|doubao|dumate|mimo|qoder|gemini|gemini-cli|antigravity|kimi)
+            codebuddy|trae|zcode|glm|doubao|dumate|mimo|qoder|gemini|gemini-cli|antigravity|kimi)
                 provider="$1" ;;
             workbuddy)
                 # workbuddy 是 codebuddy 的别名（登录模块内同样会归一）

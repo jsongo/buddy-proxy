@@ -18,7 +18,7 @@ src/buddy_proxy/
                          #   responses_projection, dsml_parser (解析层),
                          #   dsml_scanner (底层扫描原语)
   web/                   # routes, ui, model_list + models_config.json + static/
-  providers/             # base.py (BaseProvider), zcode.py
+  providers/             # base.py (BaseProvider), zcode.py, glm.py (官方 key 子类)
   auth/                  # login, trae_work_login, trae_work_login_server
   codebuddy_provider/    # default provider pkg; client.py = CodeBuddy HTTP client
   trae/                  # trae domain (credentials, transport, sse, pat, ...)

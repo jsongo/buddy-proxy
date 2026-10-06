@@ -343,6 +343,40 @@ def _login_zcode(**_kwargs) -> int:
     return 1
 
 
+def _login_glm(**_kwargs) -> int:
+    """glm 官方渠道无交互登录：凭据是智谱控制台签发的 coding-plan API key。
+
+    与 zcode 的差别只在凭据链：glm 不读 ``~/.zcode`` CLI 配置（两条 key 是
+    独立购买的两个套餐，串了额度就对不上），所以这里指引的落点只有 env 和
+    自有 key 文件两处。key 本身没有自动化签发/交换流程（控制台人工点），
+    没有可实现的 OAuth/device flow。
+    """
+    from buddy_proxy.providers.glm import resolve_credentials, secret_file_path
+
+    key, base = resolve_credentials()
+    if key:
+        print(f"[OK] glm 凭据已配置: {key[:6]}***{key[-4:]}  base: {base}")
+        print("     glm 用 API key 认证，无需登录；换 key 改下面任意一处即可：")
+        print("     1. 环境变量 GLM_API_KEY")
+        print(f"     2. 文件 {secret_file_path()}（首行裸 key 或 name=value）")
+        print(f"     控制台（换 key）: {ZCODE_CONSOLE_URL}")
+        return 0
+    print("[!] glm 未配置凭据。它要的是智谱 coding-plan API key，不是账号密码。")
+    print()
+    print(f"    ① 领 key：{ZCODE_CONSOLE_URL}")
+    print("       登录智谱账号 → 新建 API Key → 复制（形如 xxxxxxxx.yyyyyyyy 两段）")
+    print(f"       套餐购买/查看：{ZCODE_PLAN_URL}")
+    print("    ② 配到本机，任选一种：")
+    print("       a) 环境变量（临时）：export GLM_API_KEY=<粘贴 key>")
+    secret = secret_file_path()
+    print(f"       b) 写文件（长期）: mkdir -p {secret.parent} && "
+          f"echo '<粘贴 key>' > {secret}")
+    print("          然后 chmod 600（key 是明文凭据）")
+    print("          （`>` 是覆盖：重复配置时把旧 key 换掉，别用 `>>` 追加）")
+    print("    ③ 让网关重新读取：buddy restart")
+    return 1
+
+
 def _login_doubao(**_kwargs) -> int:
     """豆包走 CDP 直连豆包工作 App，无独立登录流程。"""
     print("豆包 provider 无独立登录：它通过 Chrome CDP 复用本机豆包工作 App 的登录态。")
@@ -697,6 +731,7 @@ _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
     "zcode": _login_zcode,
+    "glm": _login_glm,
     "doubao": _login_doubao,
     "dumate": _login_dumate,
     "mimo": _login_mimo,
@@ -713,7 +748,7 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder) / gemini / antigravity / kimi，默认 codebuddy")
+                        help="codebuddy(=workbuddy) / trae / zcode / glm / doubao / mimo / qoder(=quoder) / gemini / antigravity / kimi，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi 登录不自动打开浏览器，只打印链接")
     parser.add_argument("--region", default=None,

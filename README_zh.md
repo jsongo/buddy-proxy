@@ -17,7 +17,7 @@
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
 ---
@@ -52,7 +52,7 @@ uv run python -m buddy_proxy --login --desensitize
 ```bash
 ./buddy start              # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # 登录/自检上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/dumate/mimo/qoder/gemini/antigravity/kimi）
+./buddy login [provider]   # 登录/自检上游账号（codebuddy(=workbuddy)/trae/zcode/glm/doubao/dumate/mimo/qoder/gemini/antigravity/kimi）
                            # trae/qoder 可加 --region cn|global（两区账号不通用）；登录过海外账号会自动
                            # 启用 traeintl/qoderintl 独立通道，管理页里海外额度单独一张卡
 ./buddy ui                 # 仅打开管理页（必要时先启动）
@@ -282,7 +282,8 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 > 关于 `glm-*`：裸名会落到注册顺序里第一个声明它的通道（**zcode**，它提供
 > `glm-5.3` / `glm-5.3-flash`）。唯独 `glm-5.3-flashx` 在 zcode 上被拒为
 > `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限`，而 **CodeBuddy 能正常服务**
-> ——这一个请显式写 `codebuddy/glm-5.3-flashx`。
+> ——这一个请显式写 `codebuddy/glm-5.3-flashx`。官方 **`glm/`** 渠道（下文）与
+> zcode 同上游同模型表，想走官方套餐的 key 时显式写 `glm/<模型>` 前缀。
 
 **Trae PAT 通道**（27 个）——以 `traepat/<id>` 寻址。若某个 id 被多个通道声明，裸名会落到**注册顺序里第一个声明它的通道**（通常是个人 `trae` 通道，如果启用了），**不是** CodeBuddy——CodeBuddy 的 `models()` 返回空列表，只能经「未命中兜底」或显式 `codebuddy/` 前缀抵达。所以要用本通道时请始终带 `traepat/` 前缀。此处的 credits 是该通道自己的量表：
 
@@ -585,6 +586,8 @@ providers:
                           （codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy）
 --trae                    启用 Trae provider（解密 Trae IDE 登录态）
 --zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
+--glm                    启用 GLM 官方 provider（BigModel Coding Plan 官方 key，
+                          与 zcode 同上游、凭据独立）
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --dumate                  启用百度搭子 provider（DuMate 本地代理，需 App 在运行）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
@@ -696,6 +699,15 @@ coding-plan，然后 `buddy restart`。
 **压根不给 `nextResetTime`**（于是名字退化成裸的 `CREDIT_LIMIT`）。条目按窗口**由小到大**排，
 5 小时档在前；若改回按 `nextResetTime` 排，没有时间戳的 5 小时档会被甩到末位，标题行（取
 第一条）就显示了月档而不是更紧迫的那档。另外这两档是**各自独立的额度**，要分开看，不能相加。
+
+**GLM 官方渠道（`providers/glm.py`，可选）**——`GlmProvider` 是 `ZcodeProvider` 的子类，
+上游/直通转发/模型表/额度端点全部继承，唯一差异是凭据链：只认 `GLM_API_KEY` /
+`~/.buddy-proxy/glm_api_key`，**绝不读** `~/.zcode`（两条 key 是独立购买的两个套餐，
+串读会把 A 套餐的用量算到 B 头上、额度卡也对不上）。注册在 zcode 之后——两通道同时
+启用时裸名 `glm-*` 仍先落 zcode，显式 `glm/<模型>` 前缀才定向官方 key。`buddy login glm`
+负责打印领 key/配 key 指引（同 zcode：key 得在智谱控制台人工签发，无可自动化的登录）。
+套餐权限 2026-10-06 实测（lite 档）：`glm-5.3` / `glm-5.3-flash` / `glm-5-turbo` 可用；
+`glm-5.3-flashx` 仍 `1311 套餐暂未开放`，升级套餐后无需改代码即可用（预备接入）。
 
 
 ### 5. MiMo Provider（`mimo/` 子包）
