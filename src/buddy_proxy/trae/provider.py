@@ -43,7 +43,8 @@ from .native_tools import (
     _native_rejected,
     _send_native_chat,
 )
-from .sse import _parse_sse, _trae_error_text, _wrap_anthropic_stream
+from .sse import (_parse_sse, _trae_error_text, _wrap_anthropic_stream,
+                  _sse_error_status)
 from .text_protocol import _extract_prompt, _looks_like_agent_request
 from .text_toolcall import _StreamToolCallSplitter, _parse_tool_calls, _tool_names
 from .transport import send_trae_chat
@@ -741,13 +742,17 @@ class TraeProvider(BaseProvider):
                     )
                 except HTTPException as e:
                     last_exc = e
-                    # 账号级错误（401 凭据失效 / 429 额度）且还有下一个账号：冷却换号；
-                    # 其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
-                    if self._is_account_error(e) and i < len(accounts) - 1:
+                    # 账号级错误（401 凭据失效 / 429 额度——含上游额度码映射
+                    # 而来的 429，如 4008/4011/4021/4031）：**先冷却再决定换不
+                    # 换**。此前只在前头还有账号时才冷却，最后一个账号失败不落
+                    # 冷却——下一轮请求还会先打它、再白吃一次同样的失败才轮到
+                    # 别人。其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
+                    if self._is_account_error(e):
                         failover.mark_cooldown(
                             acct.id, quota=e.status_code == 429,
                             reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
-                        continue
+                        if i < len(accounts) - 1:
+                            continue
                     raise
                 finally:
                     set_current_work_account(None)
@@ -1145,8 +1150,13 @@ class TraeProvider(BaseProvider):
         acc = _NativeToolAccumulator() if used_native else None
         for event, data in _parse_sse(raw):
             if event == "error":
+                # 状态码按**上游码分类**（额度 4008/4011/4021/4031 → 429、
+                # 鉴权 1001/4010 → 401），不能一律 502——forward 的 failover
+                # 循环只认 401/429 为账号级错误，额度是账号级的，A 号撞 4008
+                # 时 B 号可能还有，一律 502 会让 failover 直接透传不换号
+                # （2026-10-06 实测：双账号一空一满，测试按钮直接报 4008）。
                 raise HTTPException(
-                    status_code=502,
+                    status_code=_sse_error_status((data or {}).get("code")),
                     detail=_trae_error_text(data),
                 )
             if event == "token_usage":
@@ -1295,13 +1305,16 @@ _ACCOUNT_ERROR_CODES = (401, 429)
 
 
 def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":
-    """从单个 SSE 帧里识别账号级错误（``{"error": {"code": 401|429, ...}}``）。
+    """从单个 SSE 帧里识别账号级错误，还原成 HTTPException（None = 放行）。
 
     ``_stream`` 的 ``except HTTPException`` 会把账号级错误 yield 成
     ``error_chunk``（payload 是 ``{"error": {"message", "type", "code"}}``）
-    再 ``return``——那是假成功。本函数在闸门里把这类帧还原成 HTTPException，
-    让 forward 的 failover 循环冷却换号。非账号级错误帧返回 None（放行，由
-    下游/包装层按原样处理）。
+    再 ``return``——那是假成功。code 有两种形态：HTTP 形态（``_stream``
+    抛出的 HTTPException 的 ``status_code``，401/429）与上游 SSE 码形态
+    （``event:error`` 帧原样透传的 4008/4011 等，经 ``_sse_error_status``
+    映射）。本函数在闸门里把这类帧还原成 HTTPException，让 forward 的
+    failover 循环冷却换号；非账号级错误帧返回 None（放行，由下游/包装层
+    按原样处理）。
     """
     if not stripped_frame.startswith("data:"):
         return None
@@ -1319,9 +1332,16 @@ def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":
         code = int(err.get("code"))
     except (TypeError, ValueError):
         return None
-    if code not in _ACCOUNT_ERROR_CODES:
+    # 两种 code 形态都认：HTTP 形态（``_stream`` 把自己的 HTTPException
+    # yield 成 error chunk 时传的是 e.status_code）与上游 SSE 码形态
+    # （``event:error`` 帧原样透传的 4008/4011 等）。后者此前不认——额度
+    # 错误放行成假成功，闸门形同虚设（2026-10-06 双账号实测撞上）。
+    if code in _ACCOUNT_ERROR_CODES:
+        return HTTPException(status_code=code, detail=str(err.get("message") or "trae upstream error"))
+    status = _sse_error_status(code)
+    if status == 502:
         return None
-    return HTTPException(status_code=code, detail=str(err.get("message") or "trae upstream error"))
+    return HTTPException(status_code=status, detail=str(err.get("message") or "trae upstream error"))
 
 
 def _replay_prefixed(buffered: list[str], gen: Any) -> Any:

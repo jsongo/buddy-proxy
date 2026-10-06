@@ -20,6 +20,7 @@ _TRAE_ERROR_HINTS: dict[int, str] = {
     3004: "Trae 当前模型访问量过大，请稍后重试",
     4001: "Trae 服务端错误，请稍后重试",
     4007: "Trae 请求限流，请稍后重试",
+    4008: "Trae 账号请求额度已超限",
     4010: "Trae 检测到风险账号，已自动登出，请重新登录",
     4011: "Trae AI 问答今日用量已达上限，请明日再试",
     4013: "Trae AI 服务在当前地区不可用",
@@ -31,6 +32,32 @@ _TRAE_ERROR_HINTS: dict[int, str] = {
     4050: "Trae 请求超时，模型服务资源紧张，请稍后重试",
     4051: "Trae 请求超时，模型服务资源紧张，请稍后重试",
 }
+
+# 「换一个账号可能好转」的上游 SSE 错误码（work 多账号 failover 分类用）。
+# 额度是**账号级**的（4008 quota exceeded / 4011 问答日限 / 4021 会话日限 /
+# 4031 日额度包耗尽），A 号撞了 B 号可能还有；鉴权同理（1001 token 失效 /
+# 4010 风险登出）。其余如 4001（服务端错）/ 4013（地区不支持）是通道级，
+# 换号无意义。PAT 通道另有含 PAT 专属码的表（pat/config._FAILOVER_SSE_CODES），
+# 两份各管各的账号体系。
+_ACCOUNT_QUOTA_SSE_CODES = frozenset({4008, 4011, 4021, 4031})
+_ACCOUNT_AUTH_SSE_CODES = frozenset({1001, 4010})
+
+
+def _sse_error_status(code: Any) -> int:
+    """上游 SSE 错误码 → 账号级 HTTP 状态码（failover 循环只认 401/429）。
+
+    额度类归 429（冷却带 quota 标记）、鉴权类归 401，其余 502 原样透传
+    ——502 不算账号级错误，failover 不换号。解析不出码也按 502。
+    """
+    try:
+        c = int(code)
+    except (TypeError, ValueError):
+        return 502
+    if c in _ACCOUNT_QUOTA_SSE_CODES:
+        return 429
+    if c in _ACCOUNT_AUTH_SSE_CODES:
+        return 401
+    return 502
 
 
 def _trae_error_text(data: dict[str, Any]) -> str:
