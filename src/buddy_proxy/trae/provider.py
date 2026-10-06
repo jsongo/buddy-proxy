@@ -411,7 +411,9 @@ class TraeProvider(BaseProvider):
                     msg = str(data.get("message") or "")[:80]
                     break
                 msg = str(data.get("message"))[:60]
-                last_rl = _claim_rate_limited(data)
+                # 9074 池尽（device_rejected）= 指纹黑名单，换机都没救回来，
+                # 5/10s 退避后再来也是同样的 4 台设备——按最终失败处理
+                last_rl = (not data.get("device_rejected")) and _claim_rate_limited(data)
                 if last_rl and attempt < len(_CHECKIN_RETRY_DELAYS):
                     log.info("trae 签到限流（%s），%.0fs 后重试 %d/%d",
                              acct.id, _CHECKIN_RETRY_DELAYS[attempt],
