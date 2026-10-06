@@ -132,7 +132,7 @@ console.log(JSON.stringify({
 
 def test_countdown_tail_is_not_rendered():
     """「21 小时 33 分后」的倒计时尾巴不再出现在卡上——用户反馈第一行太挤，
-    绝对时刻（明天 00:00）已够用。fmtCountdown 本身保留（存量元素更新路径）。"""
+    绝对时刻（明天 00:00）已够用。fmtCountdown 与 .cd 样式也已一并删除。"""
     out = _run_js("""
 const now = Math.floor(Date.now() / 1000);
 console.log(nextTimeHtml({next_ts: now + 3600 * 21 + 33 * 60,
@@ -163,27 +163,10 @@ console.log(nextTimeHtml({next_ts: 1, next_ts_source: 'inferred', done_today: tr
     assert 'title="上游未提供每日轮换时刻，按打卡记录推断为本地零点"' in inferred
 
 
-def test_countdown_boundaries_are_sane():
-    """倒计时在边界上不能出现「0 分钟后」或负数这种读起来像坏了的文案。"""
-    out = _run_js("""
-__freeze(1_800_000_000_000);                  // 冻住时钟，边界才可比
-const now = Math.floor(Date.now() / 1000);
-const r = {};
-for (const d of [-100, 0, 1, 59, 60, 3600, 86400]) r[d] = fmtCountdown(now + d);
-console.log(JSON.stringify(r));
-""")
-    data = json.loads(out.strip().splitlines()[-1])
-    for key, text in data.items():
-        assert not text.startswith("-"), f"{key} -> {text}（负数文案）"
-        assert "0 分钟后" not in text, f"{key} -> {text}（应进位成「秒后」）"
-        assert "0 秒后" not in text, f"{key} -> {text}（应说「即将刷新」）"
-    assert data["-100"] == "即将刷新"
-    assert data["0"] == "即将刷新"
-    assert data["1"] == "1 秒后"            # 边界是 s<=0，还剩 1 秒就照实说
-    assert data["59"] == "59 秒后"
-    assert data["60"] == "1 分钟后"
-    assert data["3600"] == "1 小时 0 分后"
-    assert data["86400"] == "1 天后"
+def test_countdown_function_is_gone():
+    """fmtCountdown 已随倒计时尾巴一起删掉：留着只会让人以为还有地方在展示。"""
+    assert "function fmtCountdown" not in _extract_section(), \
+        "fmtCountdown 应已删除（倒计时尾巴撤了，死代码不留）"
 
 
 # --- 定时器生命周期 ---------------------------------------------------------
@@ -236,21 +219,21 @@ console.log(JSON.stringify({total: INTERVALS.length, cleared: CLEARED.length}));
 
 
 def test_render_updates_text_without_touching_dataset():
-    """tick 只改文案，不改 ``data-next-ts``——否则倒计时会自己把自己算歪。"""
+    """tick 只改文案，不改 ``data-next-ts``。倒计时撤了，只剩时钟要刷。"""
     out = _run_js("""
 const ts = Math.floor(Date.now()/1000) + 3600;
-const cd = {textContent: ''}, clock = {textContent: ''};
+const clock = {textContent: ''};
+let asked = [];
 ELS.push({dataset: {nextTs: String(ts)},
-          querySelector: sel => sel === '[data-next-cd]' ? cd : clock});
+          querySelector: sel => { asked.push(sel); return clock; }});
 renderNextTimes();
-console.log(JSON.stringify({tsAfter: ELS[0].dataset.nextTs, cd: cd.textContent,
-                            clock: clock.textContent, orig: String(ts)}));
+console.log(JSON.stringify({tsAfter: ELS[0].dataset.nextTs, clock: clock.textContent,
+                            orig: String(ts), asked}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["tsAfter"] == data["orig"], "不该改写 data-next-ts"
-    # 倒计时文案里不再手写 ' · ' 前缀（分隔交给 CSS 的 gap），只写内容本身
-    assert data["cd"].endswith("后") or data["cd"] == "即将刷新", f"倒计时文案不对: {data['cd']}"
     assert data["clock"], "时钟文案要被刷新"
+    assert data["asked"] == ["[data-next-clock]"], "不该再找倒计时元素"
 
 
 # --- 布局（静态断言，无需浏览器）--------------------------------------------

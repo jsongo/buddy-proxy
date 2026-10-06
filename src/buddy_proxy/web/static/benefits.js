@@ -11,16 +11,6 @@ function fmtNextClock(ts) {
   if (d.toDateString() === tmr.toDateString()) return `明天 ${hhmm}`;
   return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${hhmm}`;
 }
-function fmtCountdown(ts) {
-  let s = Math.floor(ts - Date.now() / 1000);
-  if (s <= 0) return '即将刷新';
-  if (s < 60) return `${s} 秒后`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} 分钟后`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} 小时 ${m % 60} 分后`;
-  return `${Math.floor(h / 24)} 天后`;
-}
 function nextTimeHtml(c) {
   if (!c || c.next_ts == null) return '';
   const inferred = c.next_ts_source === 'inferred';
@@ -33,12 +23,12 @@ function nextTimeHtml(c) {
   // 推断值用虚线框 + 斜体表示「不确定」，替掉原先贴在「分后」后面的「≈」：
   // 那个位置读着像错字，而且它只区分了来源，没说清「哪里不确定」。
   // 倒计时尾巴（「21 小时 33 分后」）按用户反馈撤了——第一行太挤，绝对时刻
-  // 已够用；fmtCountdown 保留给 renderNextTimes 的存量元素更新路径。
+  // 已够用；连带的 fmtCountdown / .cd 样式 / cd 更新分支一并清掉。
   return `<span class="br-next${inferred ? ' inferred' : ''}" title="${esc(tip)}" data-next-ts="${c.next_ts}">` +
     `<span class="lbl">${verb}</span>` +
     `<b class="at" data-next-clock>${esc(fmtNextClock(c.next_ts))}</b></span>`;
 }
-// 倒计时每秒走一格（纯本地计算，不打上游）；只在打卡页可见且真有元素时跑。
+// 时钟每秒对一次表（纯本地计算，不打上游）；只在打卡页可见且真有元素时跑。
 let NEXT_TIME_TIMER = null;
 function nextTimeWanted() {
   const page = document.getElementById('page-benefits');
@@ -48,13 +38,9 @@ function nextTimeWanted() {
 }
 function renderNextTimes() {
   document.querySelectorAll('[data-next-ts]').forEach(el => {
-    const ts = Number(el.dataset.nextTs);
-    const cd = el.querySelector('[data-next-cd]');
-    // 分隔符由 CSS 的 gap 承担，这里只写文案（原先手写 ' · ' 是给平铺 tag 用的）
-    if (cd) cd.textContent = fmtCountdown(ts);
     const clock = el.querySelector('[data-next-clock]');
     // 过点后本地时钟文案也要跟上（数据要等下一轮刷新才换）
-    if (clock) clock.textContent = fmtNextClock(ts);
+    if (clock) clock.textContent = fmtNextClock(Number(el.dataset.nextTs));
   });
 }
 function syncNextTimeAuto() {

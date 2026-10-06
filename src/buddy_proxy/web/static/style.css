@@ -317,14 +317,13 @@
   .br-chip { font-size: 11px; padding: 2px 9px; border-radius: 999px;
              background: rgba(255,255,255,.035); color: var(--muted);
              border: 1px solid var(--line); white-space: nowrap; }
-  /* 「下次时间」：招牌信息，给它一块独立的底，倒计时比时刻淡一点 */
+  /* 「下次时间」：招牌信息，给它一块独立的底 */
   .br-next { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
              padding: 3px 11px; border-radius: 999px; white-space: nowrap;
              background: var(--card2); border: 1px solid var(--line); color: var(--text); }
   .br-next .lbl { color: var(--muted); font-size: 11px; }
   .br-next .at { font-weight: 600; font-variant-numeric: tabular-nums;
                  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .br-next .cd { color: var(--muted); font-variant-numeric: tabular-nums; }
   /* 推断值：整块换成虚边框，替掉原先贴在「分后」后面的那个「≈」——
      贴尾巴上读着像错字，虚线框能同时表达「不确定」且不打扰阅读 */
   .br-next.inferred { border-style: dashed; }
