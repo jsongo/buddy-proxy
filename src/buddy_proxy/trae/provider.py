@@ -59,6 +59,15 @@ _QUOTA_WORKERS = 4
 _quota_pool: "concurrent.futures.ThreadPoolExecutor | None" = None
 _quota_pool_lock = threading.Lock()
 
+#: 流式生成器可能长时间阻塞，不能和额度/管理请求共享 asyncio 默认线程池。
+#: 首帧闸门与已提交后的迭代分池，避免慢闸门挤占正在传输的流。
+_STREAM_GATE_WORKERS = 16
+_STREAM_ITER_WORKERS = 32
+_stream_gate_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_STREAM_GATE_WORKERS, thread_name_prefix="trae-stream-gate")
+_stream_iter_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_STREAM_ITER_WORKERS, thread_name_prefix="trae-stream-iter")
+
 
 def _quota_executor() -> "concurrent.futures.ThreadPoolExecutor":
     global _quota_pool
@@ -1262,16 +1271,19 @@ async def _sync_to_async_iter(it: Any) -> Any:
     每次 ``next()`` 都移出事件循环，否则首帧之后的慢事件仍会卡住全站。
     """
     it = iter(it)
+    loop = asyncio.get_running_loop()
     while True:
-        has_item, item = await asyncio.to_thread(_next_or_end, it)
+        has_item, item = await loop.run_in_executor(
+            _stream_iter_pool, _next_or_end, it)
         if not has_item:
             return
         yield item
 
 
 async def _gate_first_event_async(gen: Any) -> "_GatedStream | BaseException":
-    """在线程池预驱动首事件闸门；上游尚未产出语义帧时不占事件循环。"""
-    return await asyncio.to_thread(_gate_first_event, gen)
+    """用专属线程池预驱动首事件，避免慢闸门耗尽 asyncio 默认线程池。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_stream_gate_pool, _gate_first_event, gen)
 
 
 def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":

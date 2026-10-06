@@ -420,14 +420,15 @@ class QoderProvider(BaseProvider):
             details.append(row)
         failures = [s["error"] for _, s in results if s.get("error")]
         return {
-            "checked_in": bool(claimed) and not claimable,
+            "checked_in": bool(claimed) and not claimable and not failures,
             "claimable": bool(claimable),
             "inactive": not any_activity and not failures,
             "unavailable": any(s.get("unavailable") for s in valid) and not claimable and not claimed,
             "error": ("；".join(failures)[:200]
-                      if failures and not claimable and not claimed else ""),
+                      if failures and not claimable else ""),
             "accounts": details,
             "message": ("有账号可领取签到奖励" if claimable else
+                        "部分账号查询失败，签到状态不完整" if failures else
                         "今日已领取" if claimed else
                         "有活动，但当前没有可领取的签到奖励" if any_activity else ""),
         }
@@ -461,6 +462,8 @@ class QoderProvider(BaseProvider):
             claimed.extend(c for c in campaigns
                            if c.action_type == CLAIM_ACTION and c.is_claimed)
         if found_claimable is None:
+            if errors:
+                raise RuntimeError("；".join(errors))
             if claimed:
                 return {
                     "checked_in": True,
@@ -468,8 +471,6 @@ class QoderProvider(BaseProvider):
                     "message": "今日已领取（无需重复领取）",
                     "activity_key": claimed[0].key,
                 }
-            if errors and not has_activity:
-                raise RuntimeError("；".join(errors))
             return {
                 "checked_in": False,
                 "claimable": False,

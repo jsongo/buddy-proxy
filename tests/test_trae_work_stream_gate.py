@@ -117,6 +117,45 @@ def test_sync_to_async_iter_keeps_event_loop_responsive_while_waiting():
     asyncio.run(run())
 
 
+def test_slow_gates_do_not_starve_default_executor(monkeypatch):
+    import threading
+
+    from buddy_proxy.trae import provider
+
+    release = threading.Event()
+    entered = threading.Event()
+    started = 0
+    lock = threading.Lock()
+    original_gate = provider._gate_first_event
+
+    def slow_gate(_gen):
+        nonlocal started
+        with lock:
+            started += 1
+            if started >= provider._STREAM_GATE_WORKERS:
+                entered.set()
+        release.wait(timeout=2)
+        return original_gate(_sync_gen(['data: {"x":1}\n\n']))
+
+    monkeypatch.setattr(provider, "_gate_first_event", slow_gate)
+
+    async def run():
+        tasks = [
+            asyncio.create_task(_gate_first_event_async(_sync_gen([])))
+            for _ in range(provider._STREAM_GATE_WORKERS * 4)
+        ]
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            # Even with every gate worker occupied, unrelated to_thread work uses
+            # the default executor and should not queue behind these slow streams.
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "ok"), 0.2) == "ok"
+        finally:
+            release.set()
+            await asyncio.gather(*tasks)
+
+    asyncio.run(run())
+
+
 # -- _account_error_from_frame 边界 ------------------------------------------
 
 

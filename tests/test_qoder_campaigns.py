@@ -401,6 +401,47 @@ def test_claim_replay_reports_no_credits():
     assert "重放" in out["message"]
 
 
+def test_status_keeps_partial_failure_from_reporting_fully_checked_in(monkeypatch):
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    failed = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    claimed = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [failed, claimed])
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [failed, claimed])
+
+    async def client_for(self, account=None):
+        if account.id == "a1":
+            raise RuntimeError("first account unavailable")
+        return _FakeClient(LIVE_LISTING_AFTER)
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    status = asyncio.run(QoderProvider().checkin_status())
+
+    assert status["checked_in"] is False
+    assert status["error"] == "first account unavailable"
+    assert status["accounts"][0]["error"] == "first account unavailable"
+    assert status["accounts"][1]["checked_in"] is True
+
+
+def test_claim_reports_partial_failure_instead_of_false_success(monkeypatch):
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    failed = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    claimed = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [failed, claimed])
+
+    async def client_for(self, account=None):
+        if account.id == "a1":
+            raise RuntimeError("first account unavailable")
+        return _FakeClient(LIVE_LISTING_AFTER)
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    with pytest.raises(RuntimeError, match="first account unavailable"):
+        asyncio.run(QoderProvider().checkin_claim())
+
+
 def test_provider_declares_checkin_support():
     """provider 必须声明支持打卡，否则不进 /ui 打卡列表与自动循环。"""
     assert QoderProvider.supports_checkin is True
