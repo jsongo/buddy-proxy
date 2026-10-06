@@ -1442,12 +1442,13 @@ def test_trae_models_carry_credits():
     models = {m["id"]: m for m in TraeProvider().models()}
     assert models["glm-5.3"]["credits"] == "x0.40"
     assert models["glm-5.3-flash"]["credits"] == "x0.06"
-    assert models["DeepSeek-V4-Flash"]["credits"] == "x0.08"
+    assert models["deepseek-v4-pro"]["credits"] == "x0.72"
+    assert models["doubao-seed-evolving"]["credits"] == "x0.08"
     assert models["kimi-k3"]["credits"] == "x1.83"
-    # 别名跟随内部模型的倍率
-    assert models["deepseek-v4-flash"]["credits"] == "x0.08"
-    # 官方价目已下架的模型不硬造倍率
-    assert models["glm-5"]["credits"] is None
+    # 用户可见模型 ID 统一小写，旧模型不再出现在目录里。
+    assert all(model_id == model_id.lower() for model_id in models)
+    assert not {"deepseek-v4-flash", "glm-5", "glm-5-turbo", "glm-5.2",
+                "kimi-k2.7-code", "qwen-3.7-plus"} & models.keys()
 
 
 def test_metrics_daily_series_zero_filled(tmp_path):
