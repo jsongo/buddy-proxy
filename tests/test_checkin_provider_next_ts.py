@@ -18,7 +18,6 @@ import asyncio
 import time
 from datetime import datetime
 from types import SimpleNamespace
-from unittest import mock
 
 from buddy_proxy import codebuddy_provider as cbp
 from buddy_proxy.core.checkin import SOURCE_INFERRED, SOURCE_UPSTREAM
@@ -36,10 +35,14 @@ def _local_str(ts: int) -> str:
 
 
 def _cb_status(monkeypatch, data: dict) -> dict:
-    client = mock.MagicMock()
-    client.api_post.return_value = {"code": 0, "msg": "OK", "data": data}
-    monkeypatch.setattr(cbp, "get_state", lambda: SimpleNamespace(
-        client=client, ensure_auth=lambda: None))
+    # checkin_status 现走多账号 store（failover.available_accounts +
+    # creds.api_post_as），mock 两个入口即可，不碰真实凭据目录
+    envelope = {"code": 0, "msg": "OK", "data": data}
+    acct = cbp.creds.AccountRef(id="uid-1", uid="uid-1", nickname="tester",
+                                priority=0, added_at=1000)
+    monkeypatch.setattr(cbp.failover, "list_accounts", lambda: [acct])
+    monkeypatch.setattr(cbp.creds, "api_post_as",
+                        lambda aid, path, body=None, **kw: dict(envelope))
     return cbp.CodeBuddyProvider().checkin_status()
 
 

@@ -96,6 +96,7 @@ function acctRenamePrompt(pid, id, current) {
       (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : []) || [],
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : []) || [],
       (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : []) || [],
+      (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : []) || [],
       (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : []) || [],
       // 签到明细行（各通道 checkin.accounts[].name，后端按 alias 链下发）兜底——
       // 快照数组未到位（首屏）时从这里也能拿到显示名
@@ -137,6 +138,7 @@ async function acctRenameSubmit(pid, id) {
       (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : null),
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : null),
       (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : null),
+      (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : null),
       (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : null),
     ];
     for (const arr of snaps) {
@@ -157,6 +159,7 @@ async function acctRenameSubmit(pid, id) {
     if (typeof renderKimiPanel === 'function') renderKimiPanel();
     if (typeof renderQoderPanel === 'function') renderQoderPanel();
     if (typeof renderTraePanel === 'function') renderTraePanel();
+    if (typeof renderCodebuddyPanel === 'function') renderCodebuddyPanel();
     if (typeof renderBenefits === 'function') renderBenefits();
     closeModal();
     toast(alias ? `已重命名为「${alias}」` : '已恢复默认名');
@@ -266,12 +269,12 @@ function acctFor(state, idx) {
 // 新增多账号通道时在这里登记即可。
 function acctMove(pid, idx, delta, id) {
   if (pid === 'dumate') return dumateMove(idx, delta, id);
-  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder', trae: 'trae'})[pid] + 'MoveAccount'];
+  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy'})[pid] + 'MoveAccount'];
   if (fn) fn(idx, delta, id);
 }
 function acctDelete(pid, id) {
   if (pid === 'dumate') return dumateDelete(id);
-  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder', trae: 'trae'})[pid] + 'DeleteAccount'];
+  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy'})[pid] + 'DeleteAccount'];
   if (fn) fn(id);
 }
 

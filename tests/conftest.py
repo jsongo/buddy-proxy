@@ -14,6 +14,9 @@
 - kimi 多账号状态（`KIMI_STATE_DIR`）同理：登录/导入/quota 测试都会落盘。
 - qoder 多账号状态（`QODER_STATE_DIR`，index.json + 每账号 cred 文件）与
   历史单账号迁移源（`QODER_AUTH_FILE`）同理：登录/quota/迁移测试都会落盘。
+- codebuddy 多账号状态（`CODEBUDDY_STATE_DIR`，index.json + 每账号 cred 文件）
+  与历史单账号迁移源（`CODEBUDDY_LEGACY_SESSION`，即旧 ~/.codebuddy-session.json）
+  同理：登录/quota/签到/迁移测试都会落盘或读盘，必须隔离防串真实账号。
 
 个别测试想自定路径时在测试体内再 setenv 覆盖即可（autouse fixture 先跑，
 测试体里的 monkeypatch.setenv 后生效）。
@@ -38,3 +41,7 @@ def _isolate_gemini_state_paths(tmp_path, monkeypatch):
     # 同理：迁移/签到/额度/转发测试都会落盘或读盘，必须隔离防串真实账号。
     monkeypatch.setenv("TRAE_WORK_STATE_DIR", str(tmp_path / "trae"))
     monkeypatch.setenv("TRAE_WORK_CRED_PATH", str(tmp_path / "trae_work.json"))
+    # codebuddy 多账号状态与历史单账号迁移源（见模块 docstring）
+    monkeypatch.setenv("CODEBUDDY_STATE_DIR", str(tmp_path / "codebuddy"))
+    monkeypatch.setenv("CODEBUDDY_LEGACY_SESSION",
+                       str(tmp_path / "codebuddy_legacy_session.json"))
