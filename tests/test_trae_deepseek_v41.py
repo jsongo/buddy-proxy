@@ -44,8 +44,24 @@ def test_v41_flash_listed_by_trae_catalog():
     """目录里要有 v4.1-flash（/v1/models 与前端模型选择器都读它）。"""
     ids = [m["id"] for m in TraeProvider().models()]
     assert "deepseek-v4.1-flash" in ids
-    # 上一代两兄弟不受影响
-    assert {"deepseek-v4-flash", "DeepSeek-V4-Pro"} <= set(ids)
+    # 保留的 V4-Pro 对外名也统一小写；用户决定移除旧 V4-Flash。
+    assert "deepseek-v4-pro" in ids
+    assert "deepseek-v4-flash" not in ids
+    assert all(model_id == model_id.lower() for model_id in ids)
+
+
+def test_work_catalog_ids_are_lowercase_and_map_upstream_names():
+    """对外目录和 model_order 统一用小写，转发时还原大小写敏感的上游名。"""
+    from buddy_proxy.trae.config import map_model_for
+
+    ids = {m["id"] for m in TraeProvider().models()}
+    assert all(model_id == model_id.lower() for model_id in ids)
+    assert map_model_for("cn", "doubao-seed-evolving") == "Doubao-Seed-Evolving"
+    assert map_model_for("cn", "doubao-seed-2.1-pro") == "Doubao-Seed-2.1-Pro"
+    assert map_model_for("cn", "deepseek-v4-pro") == "DeepSeek-V4-Pro"
+    assert map_model_for("cn", "step-5-preview") == "Step-5-Preview"
+    assert not {"glm-5.2", "kimi-k2.7-code", "deepseek-v4-flash",
+                "glm-5", "glm-5-turbo", "qwen-3.7-plus"} & ids
 
 
 def test_v41_flash_is_t1():
@@ -75,13 +91,11 @@ def test_v41_flash_declares_image_support():
     上游 4001。上一代 V4-Flash / V4-Pro 确认读不了图，不得进表。
     """
     assert "deepseek-v4.1-flash" in MODEL_SUPPORTS_IMAGES
-    assert not {"deepseek-v4-flash", "DeepSeek-V4-Pro"} & MODEL_SUPPORTS_IMAGES
+    assert not {"deepseek-v4-pro", "deepseek-v4-flash"} & MODEL_SUPPORTS_IMAGES
     entry = next(m for m in TraeProvider().models()
                  if m["id"] == "deepseek-v4.1-flash")
     assert entry["images"] is True
-    # 对照组必须仍报纯文本（本文件的判定试验就是拿它当锚的）
-    ctrl = next(m for m in TraeProvider().models() if m["id"] == "deepseek-v4-flash")
-    assert ctrl["images"] is False
+    # 旧 V4-Flash 已从可用目录移除，不再暴露为客户端模型。
 
 
 def test_v41_flash_credit_multiplier():

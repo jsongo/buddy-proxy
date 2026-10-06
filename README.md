@@ -252,10 +252,12 @@ Installing the package also puts a `trae-cli` command on your PATH for checking/
 uv run trae-cli status            # check-in / credit status
 uv run trae-cli claim             # claim today's check-in credits
 uv run trae-cli usage             # entitlements / usage (total, used %, pack list)
-uv run trae-cli chat -m glm-5.2 -q "hello"
+uv run trae-cli chat -m glm-5.3 -q "hello"
 ```
 
 Auth is loaded automatically: the Work multi-account state dir `~/.buddy-proxy/trae/` (`index.json` + one 0600 cred per account; generated/appended by `python -m buddy_proxy.auth.trae_work_login` or `buddy login trae`, upserted by uid/refresh_token — relogin updates, a new account appends) first. The legacy single-account `~/.buddy-proxy/trae_work.json` (and `~/.ethan/trae_work.json`) is auto-migrated to account #1 on first read. Then the decrypted local Trae IDE `storage.json`. No manual token setup.
+
+The domestic Trae Work model catalog exposes lowercase IDs so `model_order` stays consistent across providers (for example, `doubao-seed-evolving` and `deepseek-v4-pro`). Requests are translated to the case-sensitive upstream names (such as `Doubao-Seed-Evolving`) automatically. The old `kimi-k2.7-code`, `glm-5.2`, `deepseek-v4-flash`, `glm-5`, `glm-5-turbo`, and `qwen-3.7-plus` entries have been removed.
 
 Work channel multi-account **primary/backup failover**: account #1 by login order is preferred; account-level errors (401 credential expired / 429 quota) cool down for 60s/5min then fail over to the next. Upstream SSE quota codes (4008 quota exceeded / 4011 / 4021 / 4031) and auth codes (1001 / 4010) are mapped to 429/401 into the same classification (since 2026-10-06: previously everything passed through as 502 without switching, so with two accounts — one drained, one funded — the request still failed outright). Checkin/quota query and claim **every account**; the admin panel has `▲▼` reorder / `✕` delete (same as qoder/kimi/antigravity). With multiple accounts, the check-in status carries a per-account breakdown (`accounts`: index/name/state) and the check-in card renders one line per account (已签到 / 可领 / 查询失败 with the reason) — the aggregated badge alone could not tell which account actually failed; manual claims toast each account's result (who got +N, who failed). Each line's name follows the alias > nickname > uid > id display chain (an ✎ rename shows up here too, matching the quota panels) and carries an ✎ rename button of its own. Single-account setups stay unchanged (no breakdown, same badge semantics).
 

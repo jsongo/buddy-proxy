@@ -196,21 +196,20 @@ MODEL_MAP: dict[str, str] = {
     # 大小写容错：Trae config_name 大小写不统一（DeepSeek-/Doubao- 为大写前缀），
     # 而 OpenAI 生态习惯全小写；小写请求若不在此映射，会落回默认 CodeBuddy 通道
     # （报错表现为 CodeBuddy 上游的安全审核/路由错误，而非 Trae 响应）
+    # 对外模型 ID 一律小写；这里仅把上游要求大小写敏感的 config_name 转回原样。
     "deepseek-v4-pro": "DeepSeek-V4-Pro",
-    "deepseek-v4-flash": "DeepSeek-V4-Flash",
     "doubao-seed-evolving": "Doubao-Seed-Evolving",
     "doubao-seed-2.1-pro": "Doubao-Seed-2.1-Pro",
     "doubao-seed-2.1-turbo": "Doubao-Seed-2.1-Turbo",
     "doubao-seed-code": "Doubao-Seed-Code",
+    "step-5-preview": "Step-5-Preview",
     # qwen 官方命名点号/连字符混用，两种写法都放行
     "qwen-3.8-max": "qwen3.8-max",
-    "qwen3.7-plus": "qwen-3.7-plus",
 }
 
 # 模型分级（T1 最强 -> T4 最弱）。
-# config_name 全部为 2026-09 实测通过值（Work 凭证 + llm_utils_chat 端点）：
-# 注意命名大小写不统一——DeepSeek-/Doubao- 为大写前缀，glm/kimi/minimax 小写，
-# qwen 两种写法并存（qwen3.8-max 用点号、qwen-3.7-plus 用连字符）。
+# 目录对外 ID 统一小写；大小写敏感的上游 config_name 由 MODEL_MAP 转换。
+# 各项均为 2026-09 实测通过值（Work 凭证 + llm_utils_chat 端点）。
 # kimi-k3 需会员 Pro+/Ultra/Express（免费账号 1005）；付费账号实测可用
 # （2026-09-06 chat_v3 出流正常），故收录。
 #
@@ -241,12 +240,10 @@ MODEL_MAP: dict[str, str] = {
 # _WORK_FUNCTION_OVERRIDE 加条目，真失败时让它诚实地 4001 冒出来。
 MODEL_TIERS: dict[str, list[str]] = {
     "T1": ["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx",
-           "deepseek-v4.1-flash", "Doubao-Seed-Evolving", "kimi-k3"],
-    "T2": ["glm-5.2", "Doubao-Seed-2.1-Pro", "DeepSeek-V4-Pro",
-           "kimi-k2.7-code", "qwen3.8-max"],
-    "T3": ["Doubao-Seed-2.1-Turbo", "DeepSeek-V4-Flash", "minimax-m3",
-           "kimi-k2.6", "glm-5.1", "Step-5-Preview"],
-    "T4": ["Doubao-Seed-Code", "glm-5", "glm-5-turbo", "qwen-3.7-plus"],
+           "deepseek-v4.1-flash", "doubao-seed-evolving", "kimi-k3"],
+    "T2": ["doubao-seed-2.1-pro", "deepseek-v4-pro", "qwen3.8-max"],
+    "T3": ["doubao-seed-2.1-turbo", "minimax-m3", "kimi-k2.6", "glm-5.1", "step-5-preview"],
+    "T4": ["doubao-seed-code"],
 }
 
 # 模型积分倍率：整理自知识库《模型及成本整理-workbuddy-trae-含选用建议》
@@ -270,23 +267,19 @@ MODEL_TIERS: dict[str, list[str]] = {
 # 可用性未实测，**勿只凭价目表收录**（deepseek-v4.1-pro 就是反例：价目之外
 # 的「名字被上游接受」才是收录依据）。
 MODEL_CREDITS: dict[str, str] = {
-    "Doubao-Seed-Evolving": "x0.08",
-    "Doubao-Seed-2.1-Pro": "x0.08",
-    "Doubao-Seed-2.1-Turbo": "x0.20",
-    "Doubao-Seed-Code": "x0.06",
-    "Step-5-Preview": "x0.48",
+    "doubao-seed-evolving": "x0.08",
+    "doubao-seed-2.1-pro": "x0.08",
+    "doubao-seed-2.1-turbo": "x0.20",
+    "doubao-seed-code": "x0.06",
+    "step-5-preview": "x0.48",
     "glm-5.3-flash": "x0.06",
     "glm-5.3-flashx": "x0.31",
     "glm-5.3": "x0.40",
-    "glm-5.2": "x0.40",
     "deepseek-v4.1-flash": "x0.08",
     "kimi-k3": "x1.83",
-    "DeepSeek-V4-Flash": "x0.08",
-    "DeepSeek-V4-Pro": "x0.72",
-    "kimi-k2.7-code": "x0.83",
+    "deepseek-v4-pro": "x0.72",
     "minimax-m3": "x0.26",
     "qwen3.8-max": "x1.50",
-    "qwen-3.7-plus": "x0.25",
 }
 
 # 支持图片输入的模型（内部 config_name 口径）。

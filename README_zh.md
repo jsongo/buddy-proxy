@@ -225,7 +225,7 @@ uv run python -m buddy_proxy --desensitize --trae
 uv run trae-cli status            # 签到/积分状态（剩余积分、今日是否已签到）
 uv run trae-cli claim             # 领取今日签到积分
 uv run trae-cli usage             # 权益/用量（总额、已用比例、权益包列表）
-uv run trae-cli chat -m glm-5.2 -q "你好"    # 发一条对话测试
+uv run trae-cli chat -m glm-5.3 -q "你好"    # 发一条对话测试
 ```
 
 认证自动加载：优先 Work 多账号状态目录 `~/.buddy-proxy/trae/`（`index.json` + 每账号
@@ -233,6 +233,8 @@ uv run trae-cli chat -m glm-5.2 -q "你好"    # 发一条对话测试
 生成/追加，按 uid/refresh_token upsert——重登同号更新、新号追加）。历史单账号
 `~/.buddy-proxy/trae_work.json`（及遗留 `~/.ethan/trae_work.json`）会在首次读取时自动
 迁移为账号 #1。其次解密本机 Trae IDE `storage.json`，无需手动配置 token。
+
+国内版 Trae Work 模型目录使用小写 ID，方便与其他 provider 的 `model_order` 统一配置；例如 `doubao-seed-evolving`、`deepseek-v4-pro`。转发时会自动转换成上游要求的大小写敏感名称（如 `Doubao-Seed-Evolving`），客户端和顺序配置无需写大写。旧模型 `kimi-k2.7-code`、`glm-5.2`、`deepseek-v4-flash`、`glm-5`、`glm-5-turbo`、`qwen-3.7-plus` 已从目录移除。
 
 Work 通道多账号**主备 failover**：按登录顺位优先用 #1，账号级错误（401 凭据失效 /
 429 额度）冷却 60s/5min 后自动换下一个——上游 SSE 的额度码（4008 quota exceeded /

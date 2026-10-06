@@ -96,7 +96,7 @@ def _chat_body(stream: bool = False, tools: bool = True, multi_turn: bool = Fals
              "content": "{\"temp_c\": 25, \"condition\": \"sunny\"}"},
             {"role": "user", "content": "总结一下"},
         ]
-    body: dict = {"model": "deepseek-v4-flash", "stream": stream, "messages": messages}
+    body: dict = {"model": "glm-5.3-flash", "stream": stream, "messages": messages}
     if stream:
         body["stream_options"] = {"include_usage": True}
     if tools:
