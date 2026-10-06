@@ -590,8 +590,39 @@ class TraeProvider(BaseProvider):
             seen.add(key)
             used: float | None = None
             limit_v: float | None = None
-            limit = _first_num(quota, _LIMIT_KEYS_DOLLAR if dollar else _LIMIT_KEYS_CREDITS)
-            if limit is not None and limit > 0:
+            rows: list[tuple[str, float | None, float | None, str]] = []
+            if dollar and ("premium_model_fast_request_limit" in quota
+                           or "basic_usage_limit" in quota):
+                if p.get("is_hide"):
+                    # 海外用 is_hide 标记「UI 不展示」的包（实测：Promo Code
+                    # 包全 0 配额仍会出现在列表里）。只在海外结构下过滤——
+                    # CN 快照没有这个字段，别让新过滤改变 CN 行为。
+                    continue
+                # 海外实测结构（2026-10-06，Pro plan 快照）：额度字段与 CN
+                # 完全不同名，且**一个包里混两种量纲**——Premium 快速请求是
+                # 次数（``premium_model_fast_request_limit: 600``），Basic 是
+                # 美元（``basic_usage_limit: 20`` + 已用
+                # ``usage.basic_usage_amount``）。原通用键表
+                # （``_LIMIT_KEYS_DOLLAR`` 命中 credits_limit=0）在这里只能
+                # 解析出 0/0 的空条目，这就是「海外版查不到额度」的根因。
+                # 两条量纲分开成两行，不能相加也不能共用一个 percent。
+                fast = _first_num(quota, ("premium_model_fast_request_limit",))
+                if fast is not None and fast > 0:
+                    # 已用次数上游不给（usage 只有 basic/bonus/credits_amount
+                    # 三个键）——used=None 显示「—」，好过拿美元已用配次数
+                    # 上限算出一个错百分比对用户撒谎。
+                    rows.append(("Premium 快速请求", None, float(fast), "count"))
+                slow = _first_num(quota, ("premium_model_slow_request_limit",))
+                basic = _first_num(quota, ("basic_usage_limit",))
+                if basic is not None and basic > 0:
+                    amt = _first_num(p.get("usage") or {}, ("basic_usage_amount",))
+                    rows.append(("Basic 用量", round(float(amt), 4) if amt is not None else None,
+                                 float(basic), "dollar"))
+                # slow / advanced / auto_completion 的 -1 是「无限」，不占
+                # 条目——无限没有进度可画，铺出来只是噪声。
+            limit = None if rows else _first_num(
+                quota, _LIMIT_KEYS_DOLLAR if dollar else _LIMIT_KEYS_CREDITS)
+            if not rows and limit is not None and limit > 0:
                 limit_v = float(limit)
                 # ``*_amount`` 是**已用**不是剩余——2026-10-03 实测交叉
                 # 校验：Σlimit=9500.0、Σamount=6257.1772，Σlimit-Σamount 与
@@ -608,17 +639,22 @@ class TraeProvider(BaseProvider):
                 amount = _first_num(p.get("usage") or {},
                                     _AMOUNT_KEYS_DOLLAR if dollar else _AMOUNT_KEYS_CREDITS)
                 used = round(float(amount), 2) if amount is not None else 0.0
-            packs.append({
-                "label": f"{label_prefix}{desc}",
-                "used": used,
-                "total": round(limit_v, 2) if limit_v else None,
-                "percent": round(used / limit_v * 100) if used is not None and limit_v else None,
-                "remaining": round(limit_v - used, 2) if used is not None and limit_v else None,
-                # 权益包只有到期、没有周期性重置，故 reset_ts 恒 None
-                "reset_ts": None,
-                "expire_ts": int(end_time),
-                "unit": unit,
-            })
+            if not rows:
+                rows.append(("", used, limit_v, unit))
+            for suffix, row_used, row_total, row_unit in rows:
+                packs.append({
+                    "label": f"{label_prefix}{desc}{(' · ' + suffix) if suffix else ''}",
+                    "used": row_used,
+                    "total": round(row_total, 2) if row_total else None,
+                    "percent": (round(row_used / row_total * 100)
+                                if row_used is not None and row_total else None),
+                    "remaining": (round(row_total - row_used, 2)
+                                  if row_used is not None and row_total else None),
+                    # 权益包只有到期、没有周期性重置，故 reset_ts 恒 None
+                    "reset_ts": None,
+                    "expire_ts": int(end_time),
+                    "unit": row_unit,
+                })
         packs.sort(key=lambda it: it["expire_ts"] or 0)  # 先到期的排前面
         items.extend(packs)
         return items

@@ -26,6 +26,7 @@ from buddy_proxy.trae.config import (
     TRAE_REGIONS,
     model_tables,
     resolve_trae_region,
+    work_function_override,
 )
 from buddy_proxy.trae.credentials import _region_of, save_account_cred
 from buddy_proxy.trae.intl_provider import TraeIntlProvider
@@ -496,3 +497,132 @@ def test_pick_region_noninteractive_uses_default(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert _pick_region("Trae", None, default_key="cn") == "cn"
     assert _pick_region("Qoder", None, default_key="global") == "global"
+
+
+# ───────────────────────── 海外模型目录（2026-10-06 probe 填表） ─────────────────────────
+
+
+def test_intl_model_catalog():
+    """probe 实测收录 10 模型；用户点名不要的老模型 / 实测 4001 的反例别补回来。"""
+    _, tiers, credits, images = model_tables("global")
+    flat = [m for ms in tiers.values() for m in ms]
+    assert len(flat) == 10
+    assert set(tiers["T1"]) == {"gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol",
+                                "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3"}
+    assert set(tiers["T2"]) == {"gpt-5.4", "gpt-5.2", "glm-5.2"}
+    assert set(tiers["T3"]) == {"minimax-m3"}
+    # 实测通但用户决定不收录（2026-10-06：太老）——别当漏收补回来
+    for gone in ("kimi-k2.7-code", "kimi-k2.5", "minimax-m2.7"):
+        assert gone not in flat
+    # 实测三种 function 全 4001 的反例——报进目录只会让客户端撞墙
+    for dead in ("gpt-6-astra", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash"):
+        assert dead not in flat
+    assert credits == {}, "海外次数制，无 CN 的积分倍率"
+    assert images == set(), "图片能力未实测（probe 只发过纯文本），不声明读图"
+
+
+def test_work_function_override_by_region():
+    """两区 function 绑定互不通用，同名模型的绑定也可能不同。"""
+    intl = work_function_override("global")
+    cn = work_function_override("cn")
+    assert intl["gpt-5.6-sol"] == "chat_v3"
+    assert intl["minimax-m3"] == "chat_v3"
+    assert cn["glm-5.1"] == "chat_v3"
+    # 同名模型两区绑定不同：glm-5.2 / minimax-m3 海外必须 chat_v3，CN 不需要
+    assert "glm-5.2" in intl and "glm-5.2" not in cn
+    assert "minimax-m3" in intl and "minimax-m3" not in cn
+    assert "glm-5.1" not in intl
+    # 未收录的模型走 solo_work_lite 默认（表里没有条目即可，调用侧 .get）
+    assert "kimi-k3" not in intl
+    # region 缺省按 CN
+    assert work_function_override("") == cn
+
+
+def test_intl_content_blocks_wraps_plain_strings_only():
+    """海外 Go 侧要求 content 为内容块数组；只包装字符串形态，其余原样。"""
+    from buddy_proxy.trae.transport import _intl_content_blocks
+
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "text", "text": "blocks"}]},
+        {"role": "tool", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                      "content": "x"}]},
+        "not-a-dict",
+    ]
+    out = _intl_content_blocks(msgs)
+    # 纯字符串 → [{"type": "text", "text": ...}]，其余键保留
+    assert out[0] == {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+    # 块列表消息（tool_result 等）与非 dict 原样放行
+    assert out[1] is msgs[1] and out[2] is msgs[2] and out[3] is msgs[3]
+    # 包装是拷贝不是原地改——入参不动
+    assert msgs[0]["content"] == "hi" and len(msgs) == 4
+
+
+# ───────────────────────── 海外额度（次数制 + 美元混量纲） ─────────────────────────
+
+
+def _intl_usage_fixture() -> dict:
+    """海外 Pro plan 快照的实测结构（2026-10-06）：一个包混两种量纲。"""
+    return {
+        "is_dollar_usage_billing": True,
+        "usage_summary": {"total_amount": 20.00013, "consumed_amount": 0.00013,
+                          "consumption_ratio": 0.0000065},
+        "user_entitlement_pack_list": [
+            {"display_desc": "Pro Plan",
+             "entitlement_base_info": {
+                 "entitlement_id": 1, "end_time": 1795000000,
+                 "quota": {"premium_model_fast_request_limit": 600,
+                           "premium_model_slow_request_limit": -1,
+                           "basic_usage_limit": 20}},
+             "usage": {"basic_usage_amount": 0.00013}},
+            {"display_desc": "Promo Code", "is_hide": True,
+             "entitlement_base_info": {
+                 "entitlement_id": 2, "end_time": 1795000000,
+                 "quota": {"premium_model_fast_request_limit": 50,
+                           "basic_usage_limit": 3}},
+             "usage": {}},
+        ],
+    }
+
+
+def test_intl_quota_dollar_packs_split_by_unit():
+    """海外 Pro 包拆成 count/dollar 两行；is_hide 垃圾包被过滤。"""
+    items = TraeIntlProvider()._quota_items(_intl_usage_fixture(), label_prefix="")
+    head = items[0]
+    assert head["unit"] == "dollar" and head["head_only"] is True
+    labels = [it["label"] for it in items[1:]]
+    # Promo Code（is_hide，UI 不展示）被跳过；通用键表在海外结构下本来
+    # 只能解析出 0/0 空条目——这正是「海外查不到额度」的根因
+    assert labels == ["Pro Plan · Premium 快速请求", "Pro Plan · Basic 用量"], labels
+    fast, basic = items[1], items[2]
+    # 次数制：上游不给已用次数 → used=None（好过拿美元已用配次数上限撒谎）
+    assert fast["total"] == 600 and fast["used"] is None
+    assert fast["unit"] == "count" and fast["percent"] is None
+    # 美元制：已用取 usage.basic_usage_amount
+    assert basic["used"] == 0.0001 and basic["total"] == 20
+    assert basic["unit"] == "dollar"
+    # slow 的 -1（无限）不占条目
+    assert len(items) == 3
+
+
+def test_quota_cn_credits_branch_unchanged():
+    """CN 积分制不回归：无 premium/basic 键 → 走通用分支，unit=credit。"""
+    data = {
+        "is_credits_billing": True,
+        "usage_summary": {"total_amount": 100, "consumed_amount": 10,
+                          "consumption_ratio": 0.1},
+        "user_entitlement_pack_list": [
+            {"display_desc": "会员包",
+             "entitlement_base_info": {
+                 "entitlement_id": 9, "end_time": 1795000000,
+                 "quota": {"credits_limit": 4000}},
+             "usage": {"credits_amount": 100}},
+        ],
+    }
+    items = TraeProvider()._quota_items(data, label_prefix="")
+    assert items[0]["unit"] == "credit"
+    pack = items[1]
+    assert pack["label"] == "会员包"
+    assert pack["used"] == 100.0 and pack["total"] == 4000.0
+    assert pack["unit"] == "credit"
+    assert pack["percent"] == round(pack["used"] / pack["total"] * 100)
