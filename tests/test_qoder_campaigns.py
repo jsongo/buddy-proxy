@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from buddy_proxy.qoder.campaigns import (
     CLAIM_ACTION,
     Campaign,
