@@ -1122,7 +1122,9 @@ def test_ui_test_reports_provider_selected_by_model_order(env):
 
 def test_model_test_result_shows_provider_with_reply_model(env):
     ui = _ui_source(env.client)
-    assert "[r.provider || provider, r.model || model].filter(Boolean).join('/')" in ui
+    assert "const replyProvider = String(r.provider || provider || '')" in ui
+    assert "!replyModel.startsWith(replyProvider + '/')" in ui
+    assert "${esc(replyTarget)}" in ui
 
 
 def test_ui_test_provider_error(env):
