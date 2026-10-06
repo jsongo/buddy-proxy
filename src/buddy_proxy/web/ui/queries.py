@@ -115,7 +115,7 @@ async def ui_benefits(request: Request):
     if manager is None:
         return {"providers": [], "calendar": [], "auto_checkin": False,
                 "checkin_time": "09:30", "checkin_enabled_providers": []}
-    return await manager.snapshot()
+    return await manager.snapshot(getattr(state, "disabled_providers", set()) or set())
 
 
 @app.post("/ui/api/benefits/refresh")
@@ -136,7 +136,9 @@ async def ui_benefits_refresh(request: Request):
     if not provider_id:
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 provider"}})
     manager.invalidate_quota(provider_id)
-    return await manager.snapshot()
+    # 与 ui_benefits 同款带上 disabled_providers：refresh 返回的快照也要有
+    # disabled 标记和告警过滤，否则一刷停用通道的卡片就又冒出来了。
+    return await manager.snapshot(getattr(state, "disabled_providers", set()) or set())
 
 
 @app.post("/ui/api/checkin")

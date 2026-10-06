@@ -485,6 +485,19 @@ async function toggleModel(provider, model, disabled) {
   } catch (e) { toast('操作失败: ' + e.message, true); }
 }
 
+async function toggleProvider(provider, enabled) {
+  try {
+    await api('/ui/api/provider-toggle', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ provider, disabled: !enabled })});
+    toast(`${provider} 已${enabled ? '启用' : '停用（调用直接失败，额度页不再展示）'}`);
+    refreshAll();
+  } catch (e) {
+    toast('操作失败: ' + e.message, true);
+    if (MODELS) renderGroups();  // 失败回滚 checkbox 视觉：按服务端状态重画
+  }
+}
+
 // ── 限时可用时段编辑 ──
 let SCHEDULE_CTX = null;  // { provider, model }
 
@@ -1001,9 +1014,15 @@ async function loadOrderOptions() {
 // 行内处理器只带 this，作用域由 orderRowCtx 从**事件元素自身的行**上读——
 // 不做全局 querySelector 反查：页面上可能同时存在多张展开的卡片，各自都有
 // data-idx="0" 的行，全局查会写错数据源。
+// 模型页开关停用的通道集合（MODELS.groups[].disabled 由后端下发）
+function disabledProviderSet() {
+  return new Set(((MODELS && MODELS.groups) || []).filter(g => g.disabled).map(g => g.id));
+}
+
 function orderRow(item, idx, marks, scope) {
   const id = `order-p-${String(scope).replace(/[^a-zA-Z0-9]/g, '_')}-${idx}`;
   const marksMap = marks || {};
+  const provOff = disabledProviderSet().has(item.provider);
   const models = (ORDER_OPTIONS && ORDER_OPTIONS[item.provider]) || [];
   // 自由文本 + <datalist>：既能点选（用户要的「可以选」），又保留手输
   // （目录里的名字可能与上游实际接受的 id 不同，锁死成下拉会把人卡住）
@@ -1018,7 +1037,7 @@ function orderRow(item, idx, marks, scope) {
   const multTxt = mult ? String(mult).replace(/\s*credits\s*$/i, '') : '';
   // per-account 模型支持画像（qoder 特有）：该模型只在部分账号上可用
   const sup = (models.find(m => m.id === item.model) || {}).support;
-  return `<div class="order-row" draggable="true" data-idx="${idx}" data-scope="${esc(scope)}">
+  return `<div class="order-row" draggable="true" data-idx="${idx}" data-scope="${esc(scope)}"${provOff ? ' style="opacity:.45"' : ''}>
     <span class="order-grip" title="拖拽调整顺序">⠿</span>
     <span class="order-no muted mono">${idx + 1}</span>
     <select class="order-provider" title="候选通道" onchange="orderSetProvider(this)">
@@ -1032,6 +1051,7 @@ function orderRow(item, idx, marks, scope) {
     <datalist id="${id}">${list}</datalist>
     <span class="order-flags">
       ${multTxt ? `<span class="tag mult" title="积分倍率：${esc(mult)}（估算参考，非实际扣费）">${esc(multTxt)}</span>` : ''}
+      ${provOff ? '<span class="tag bad" title="该通道已在模型页停用：这一档转发时会被跳过">通道已停用</span>' : ''}
       ${sup ? `<span class="tag" title="受账号限制，仅支持：${esc((sup.accounts || []).join('、'))}">部分账号</span>` : ''}
       ${left ? `<span class="tag bad" style="cursor:pointer" title="冷却中，剩余 ${left}s；点击清除冷却，立即重试" onclick="clearOneMark('${esc(item.provider)}/${esc(item.model)}')">⏸ ${left}s</span>` : ''}
       ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}

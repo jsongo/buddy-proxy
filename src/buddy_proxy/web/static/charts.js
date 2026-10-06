@@ -359,12 +359,20 @@ function renderGroups() {
             <button class="${dis ? 'primary' : 'ghost'}" title="${dis ? '重新启用后可正常调用' : '停用后调用此模型的请求直接失败'}" onclick="toggleModel('${esc(g.id)}','${esc(m.id)}',${dis ? 'false' : 'true'})">${dis ? '启用' : '停用'}</button>
         </td></tr>`;
     }).join('');
-    return `<div class="group${COLLAPSED.has(g.id) ? ' collapsed' : ''}" data-gid="${esc(g.id)}">
+    const gdis = !!g.disabled;
+    const isDefaultProv = g.id === 'codebuddy';
+    const swTitle = isDefaultProv ? '默认兜底通道，不能停用'
+      : (gdis ? '重新启用该通道' : '停用该通道：调用直接失败，额度页不再展示，顺序页模型置灰');
+    return `<div class="group${COLLAPSED.has(g.id) ? ' collapsed' : ''}" data-gid="${esc(g.id)}"${gdis ? ' style="opacity:.55"' : ''}>
       <div class="group-head" title="点击折叠/展开">
-        <span class="dot" style="background:${okFlag ? 'var(--ok)' : 'var(--err)'}"></span>
+        <span class="dot" style="background:${gdis ? 'var(--muted)' : (okFlag ? 'var(--ok)' : 'var(--err)')}"></span>
         <span class="name">${esc(g.name)}</span>
         <span class="tag">${g.id}</span>
+        ${gdis ? '<span class="tag bad">已停用</span>' : ''}
         <span class="tag ${okFlag ? 'ok' : 'bad'}">${healthTxt}</span>
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px;margin-left:6px;cursor:${isDefaultProv ? 'not-allowed' : 'pointer'}" title="${swTitle}" onclick="event.stopPropagation()">
+          <input type="checkbox" ${gdis ? '' : 'checked'} ${isDefaultProv ? 'disabled' : ''} onchange="toggleProvider('${esc(g.id)}', this.checked)"> 启用
+        </label>
         <span class="spacer"></span>
         <span class="muted" style="font-size:12px">${g.models.length} 个模型</span>
         <span class="chev">▾</span>

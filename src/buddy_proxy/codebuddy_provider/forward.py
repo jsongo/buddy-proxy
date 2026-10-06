@@ -116,12 +116,36 @@ def _resolved_model_id(provider: Any, model: str) -> str:
     return model
 
 
+def _provider_disabled(state: Any, provider_id: str) -> bool:
+    """通道是否被管理页开关整通道停用（disabled_providers，用户 2026-10-06 需求）。
+
+    与模型级停用（disabled_models）并存、优先级更高：整通道都不用了，模型级的
+    停用/时段配置不用逐条碰。
+    """
+    disabled = getattr(state, "disabled_providers", None)
+    return bool(disabled) and provider_id in disabled
+
+
 def _reject_if_disabled(state: Any, provider_id: str, model_id: Any) -> None:
     """命中管理页停用或「不在可用时段」的 (provider, model) 组合时返回 403 拒绝转发。
 
-    判定优先级：永久停用（disabled_models）> 限时窗口（model_schedules）。
-    两者都未命中才放行。
+    判定优先级：整通道停用（disabled_providers）> 永久停用（disabled_models）
+    > 限时窗口（model_schedules）。三者都未命中才放行。
     """
+    # 整通道检查放在 isinstance guard 之前：通道停了就该拦，与请求带没带
+    # 合法 model 名无关（review 2026-10-06）。
+    if _provider_disabled(state, provider_id):
+        diagnostic("provider_disabled_reject", provider=provider_id, model=str(model_id))
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": {
+                    "message": (f"通道 {provider_id} 已在管理页停用（模型页 provider "
+                                f"开关），重新打开后再调用"),
+                    "type": "provider_disabled",
+                }
+            },
+        )
     if not isinstance(model_id, str):
         return
     # 键必须与配置加载/UI 保存同口径（settings.model_key）：legacy 的
@@ -243,6 +267,8 @@ def _target_gated_out(state: Any, provider_id: str, model: str) -> bool:
     一个今天不想用的通道时，不该把整个模型的请求打成 403（决策：跳过并继续）。
     ``_reject_if_disabled`` 仍然保留，用于非候选路径（未配顺序时行为不变）。
     """
+    if _provider_disabled(state, provider_id):
+        return True
     key = settings_mod.model_key(provider_id, model)
     disabled = getattr(state, "disabled_models", None)
     if disabled and key in disabled:

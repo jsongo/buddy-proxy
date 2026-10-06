@@ -413,10 +413,11 @@ class BenefitsManager:
     # 快照（GET /ui/api/benefits）
     # ------------------------------------------------------------------
 
-    async def snapshot(self) -> dict[str, Any]:
+    async def snapshot(self, disabled_providers: set[str] | None = None) -> dict[str, Any]:
         checkin_cfg = read_checkin_settings()
         done = self.history.ok_dates_by_provider()
         today = _today()
+        disabled = disabled_providers or set()
 
         provider_entries = []
         for pid, p in self._providers().items():
@@ -424,6 +425,9 @@ class BenefitsManager:
             entry: dict[str, Any] = {
                 "id": pid,
                 "name": getattr(p, "name", pid),
+                # 整通道停用标记（模型页 provider 开关）：前端额度卡/专属面板
+                # 据此隐藏；数据照查照带，开关一开就能原样回来
+                "disabled": pid in disabled,
                 "checkin": {"supported": supports_checkin},
                 "quota": {"supported": False},
             }
@@ -482,10 +486,12 @@ class BenefitsManager:
             # 自己存一份常量，改后端忘改前端就会出现「写着 7 天、实际 3 天」
             # 的文案（比不写更让人困惑）。下发之后只有一处定义。
             "expiry_warn_days": EXPIRY_WARN_DAYS,
-            "expiring": _expiring(provider_entries),
+            # 告警过滤掉停用通道：整通道都不用了，它的权益到期/余额告急再上
+            # 横幅就是骚扰（数据仍带在 providers 条目上，前端隐藏展示）
+            "expiring": _expiring([e for e in provider_entries if not e["disabled"]]),
             # 余额告急明细（见 _quota_low）。与 expiring 同一套思路：规则集中
             # 后端、pytest 直接覆盖，前端只渲染不判规则。
-            "low_quota": _quota_low(provider_entries),
+            "low_quota": _quota_low([e for e in provider_entries if not e["disabled"]]),
         }
 
     async def _cached(self, key: str, fn: Callable, *args):

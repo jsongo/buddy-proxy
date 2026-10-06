@@ -329,6 +329,119 @@ def test_disabled_model_call_fails(env):
 
 
 # ---------------------------------------------------------------------------
+# 通道停用/启用（模型页 provider 标题栏开关，2026-10-06）
+# ---------------------------------------------------------------------------
+def test_provider_toggle_disable_and_enable(env):
+    r = env.client.post("/ui/api/provider-toggle",
+                        json={"provider": "fakeprov", "disabled": True})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "provider": "fakeprov", "disabled": True}
+    assert "fakeprov" in env.state.disabled_providers
+    assert settings_mod.load_settings()["disabled_providers"] == ["fakeprov"]
+    # /ui/api/models 反映组级停用标记（前端据此置灰）
+    models = env.client.get("/ui/api/models").json()["groups"]
+    fp = next(g for g in models if g["id"] == "fakeprov")
+    assert fp["disabled"] is True
+    other = next(g for g in models if g["id"] == "fakestream")
+    assert other["disabled"] is False
+
+    r = env.client.post("/ui/api/provider-toggle",
+                        json={"provider": "fakeprov", "disabled": False})
+    assert r.status_code == 200 and r.json()["disabled"] is False
+    assert "fakeprov" not in env.state.disabled_providers
+
+
+def test_provider_toggle_defaults_to_flip(env):
+    r1 = env.client.post("/ui/api/provider-toggle", json={"provider": "fakeprov"})
+    assert r1.json()["disabled"] is True
+    r2 = env.client.post("/ui/api/provider-toggle", json={"provider": "fakeprov"})
+    assert r2.json()["disabled"] is False
+
+
+def test_provider_toggle_rejects_codebuddy(env):
+    """codebuddy 是默认兜底通道，停了整个代理就没有兜底。"""
+    r = env.client.post("/ui/api/provider-toggle",
+                        json={"provider": "codebuddy", "disabled": True})
+    assert r.status_code == 400
+
+
+def test_provider_toggle_rejects_unknown(env):
+    r = env.client.post("/ui/api/provider-toggle",
+                        json={"provider": "nope", "disabled": True})
+    assert r.status_code == 404
+
+
+def test_disabled_provider_call_fails(env):
+    """整通道停用：该通道所有模型调用 403（provider_disabled），/v1/models 不再列出。"""
+    env.client.post("/ui/api/provider-toggle",
+                    json={"provider": "fakeprov", "disabled": True})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 403
+    assert "通道" in json.dumps(r.json(), ensure_ascii=False)
+    # 公开模型列表不再列出停用通道的模型（客户端选了也只会 403）
+    ids = [m["id"] for m in env.client.get("/v1/models").json()["data"]]
+    assert not any(i.startswith("fakeprov") or "/fake-model" in i for i in ids)
+    # 重新打开后恢复
+    env.client.post("/ui/api/provider-toggle",
+                    json={"provider": "fakeprov", "disabled": False})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fakeprov/fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+
+
+def test_disabled_provider_skipped_in_order_candidates(env):
+    """候选顺序里放着停用通道：跳过它继续下一档，不把整条请求打成 403。"""
+    env.state.model_order = {"fake-model": ["fakeprov/fake-model", "fakestream/fake-model"]}
+    env.client.post("/ui/api/provider-toggle",
+                    json={"provider": "fakeprov", "disabled": True})
+    r = env.client.post("/v1/chat/completions",
+                        json={"model": "fake-model",
+                              "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200, "停用通道应被跳过、请求落到下一档"
+
+
+def test_disabled_provider_rejects_even_without_valid_model(env):
+    """整通道检查排在 isinstance guard **之前**：通道停用后 model 非 str 也拦。
+
+    review 2026-10-06：检查原本放在 guard 之后，请求没带合法 model 名时
+    停用通道会被静默放过去。
+    """
+    from buddy_proxy.codebuddy_provider.forward import _reject_if_disabled
+
+    env.state.disabled_providers = {"fakeprov"}
+    with pytest.raises(HTTPException) as caught:
+        _reject_if_disabled(env.state, "fakeprov", None)
+    assert caught.value.status_code == 403
+    # 未停用通道 + model 非 str：照旧静默放行（交给后续链路判定）
+    env.state.disabled_providers = set()
+    _reject_if_disabled(env.state, "fakeprov", None)
+
+
+def test_benefits_refresh_keeps_disabled_marker(env, tmp_path):
+    """refresh 端点的快照也要带 disabled 标记并过滤告警。
+
+    review 2026-10-06：ui_benefits 带了 disabled_providers 但 refresh 还是
+    无参调用，额度卡「↻」一刷，停用通道的卡片就又回来了。
+    """
+    env.state.providers["fakeprov"].quota = lambda: {
+        "items": [{"label": "总额度", "used": 30, "total": 100,
+                   "remaining": 70, "percent": 30, "reset_ts": None}],
+        "level": "pro"}
+    env.state.benefits = BenefitsManager(tmp_path / "c.jsonl", env.state)
+    env.client.post("/ui/api/provider-toggle",
+                    json={"provider": "fakeprov", "disabled": True})
+    snap = env.client.post("/ui/api/benefits/refresh",
+                           json={"provider": "fakeprov"}).json()
+    fp = next(e for e in snap["providers"] if e["id"] == "fakeprov")
+    assert fp["disabled"] is True
+    # 告警（余额告急/到期）不收停用通道
+    assert all(e["id"] != "fakeprov" for e in snap["low_quota"])
+
+
+# ---------------------------------------------------------------------------
 # 限时可用时段
 # ---------------------------------------------------------------------------
 def test_model_schedule_open_same_day():
@@ -1870,3 +1983,28 @@ def test_model_stats_use_bare_model_name(alias_env):
     assert row["stats"]["count"] == 1, (
         f"带前缀 id 查不到裸名口径的指标：{row['id']} → {row['stats']}"
     )
+
+
+def test_model_groups_pair_zcode_start_after_zcode(monkeypatch):
+    """模型页分组：zcode-start 的组排到 zcode 旁边（同一家两档套餐，隔家远
+    不好对照——与额度页 benefits.js 的同款处理一致）。"""
+    from types import SimpleNamespace
+
+    from buddy_proxy.core import state as st
+    from buddy_proxy.web.ui.models_api import _model_groups
+
+    def prov(pid):
+        return SimpleNamespace(id=pid, name=pid, health=lambda: {}, models=lambda: [])
+
+    state = SimpleNamespace(
+        mock_dir=None,
+        client=SimpleNamespace(session={"auth": {"accessToken": "t",
+                                                 "expiresAt": int((time.time() + 3600) * 1000)}}),
+        providers={"glm": prov("glm"), "mimo": prov("mimo"),
+                   "zcode": prov("zcode"), "zcode-start": prov("zcode-start")},
+        logger=mock.MagicMock(), json_logger=mock.MagicMock(),
+        write_log=mock.MagicMock(), enable_desensitize=False,
+    )
+    monkeypatch.setattr(st, "proxy_state", state)  # diagnostic → get_state 要有归属
+    ids = [g["id"] for g in _model_groups(state)]
+    assert ids.index("zcode-start") == ids.index("zcode") + 1, f"组序: {ids}"

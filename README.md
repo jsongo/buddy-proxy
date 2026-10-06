@@ -33,7 +33,7 @@ uv run python -m buddy_proxy --desensitize
 
 The first run creates the state directory `~/.buddy-proxy/` (mode `0700`; override with
 `BUDDY_PROXY_STATE_DIR`). Everything machine-local lives there: `settings.json` (default
-model, disabled models, model time windows), the Trae Work credential `trae_work.json`,
+model, disabled models/providers, model time windows), the Trae Work credential `trae_work.json`,
 the PAT token cache `trae_pat_token.json`, the cached MiMo token/serviceToken state, and
 the client-name map `buddy_client_names.json`. It holds credentials — keep it out of
 backups and version control. Startup prints the resolved path as `[State] ...`.
@@ -161,6 +161,7 @@ curl http://127.0.0.1:8787/v1/models    # model list
 Open <http://127.0.0.1:8787/ui> in a browser (or just run `buddy start` / `buddy ui`):
 
 - **Default model** — models are grouped by provider; click "Set as default" (设为默认) on any model to make it the proxy default. Client requests **without a `model` field** are routed to it automatically. Settings persist in `~/.buddy-proxy/settings.json` (override via `BUDDY_PROXY_SETTINGS`) and survive restarts; `--default-model zcode/glm-5.3` seeds the initial value (an existing settings file wins).
+- **Provider on/off switch** — each provider group header on the models tab has an "启用" checkbox (default on). Turning a provider off: its calls are rejected with 403 (`provider_disabled`), its models disappear from `/v1/models`, its quota card/panel and alert-banner entries are hidden, and its rows on the model-order tab are greyed out. The groups data stays so the switch can simply be turned back on. `codebuddy` is the default fallback channel and cannot be disabled. Persisted in `settings.json` as `disabled_providers`.
 - **One-click test** — every model row has a "Test" (测试) button that sends a real `hi` upstream and shows latency, token usage and the reply preview (non-streaming, `max_tokens=256` — a real, billable upstream call).
 - **Stats & charts** — per-provider/per-model request counts, errors, average latency and token usage: a 14-day stacked daily chart, a top-models bar list, and the latest 50 requests. Each completed request appends one line to `logs/metrics.jsonl`; the tail is reloaded on startup so history survives restarts (30 days kept).
 - **Provider health** — login/config status at a glance (CodeBuddy session, zcode key, mimo auth mode, ...).
