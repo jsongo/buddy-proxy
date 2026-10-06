@@ -7,7 +7,8 @@
 #   buddy restart            重启
 #   buddy status             查看状态
 #   buddy logs               跟踪日志
-#   buddy cleanup            删除 15 天前的历史日志（保留窗口可用 BUDDY_LOG_KEEP_DAYS 覆盖）
+#   buddy cleanup            删除 15 天前的历史日志（保留窗口可用 BUDDY_LOG_KEEP_DAYS 覆盖）；
+#                            超过 10MB 的 service.log / proxy.sh.log 顺带 copytruncate 轮转
 #   buddy login [provider]   登录上游账号（codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity/kimi）
 #   buddy ui                 仅打开管理页（必要时先启动）
 #   buddy update             更新到最新代码（git pull -> uv sync -> 重启）
@@ -195,10 +196,28 @@ cmd_stop() {
     fi
 }
 
+# bootout 是异步的：launchctl 返回了不代表 job 卸载完、端口释放了。固定 sleep 1
+# 撞上旧进程还在收尾就出两种故障（2026-10-06 14:35/14:39 两次 restart 各抖一轮，
+# jsonl 里成对 startup 可证）：新进程 bind 不上立刻退场、KeepAlive 再拉一个才稳；
+# 以及 wait_healthy 的探活打在**垂死的旧进程**上假成功——它一死服务又没了。
+# 所以重启前等两个事实都落地：job 真卸载 + 端口真空闲（带 10s 超时兜底，
+# 超时靠 svc_start 里的 evict_port_squatters 强制清场，不让 restart 卡死）。
+wait_svc_gone() {
+    local i
+    for i in $(seq 1 20); do
+        if ! svc_loaded && ! port_listening; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    log "警告: 旧服务 10s 未完全退场（继续启动，端口占用交 evict_port_squatters 清）"
+    return 1
+}
+
 cmd_restart() {
     if [[ -f "$PLIST" ]]; then
         svc_stop
-        sleep 1
+        wait_svc_gone || true
         svc_start
         wait_healthy
         open_ui
@@ -375,10 +394,38 @@ cmd_update() {
 # 没有日期后缀）——判据是文件名尾部严格匹配 .YYYY-MM-DD。用 `find -mtime`
 # 是不行的：轮转文件的 mtime 是「写完那天的 23:59」，不等于文件名里的日期，
 # 跨盘挂载或做过备份恢复时 mtime 会被改，删错活跃文件的风险太高。
+# launchd / nohup 重定向的原生日志（service.log / proxy.sh.log）不走应用层的
+# 按日滚动，只会长不短——cleanup 的日期后缀匹配管不到它们。这里对超过阈值的
+# 做 copytruncate：先拷贝归档、再截断当前文件。launchd 持有的 fd 指向 inode，
+# 截断后继续追加是安全的；归档名带创建时刻，mtime 就是轮转时刻，下面按
+# mtime 清理归档是准确的（与上方「日期文件不能信 mtime」不矛盾：那些的
+# mtime 是内容写完的时刻，这里的是我们亲手创建的时刻）。
+# 阈值 10MB；cp 失败（如盘满）就不截断，绝不因清理丢数据。
+rotate_native_log() {
+    local f="$1"
+    local bytes
+    if stat -f%z "$f" >/dev/null 2>&1; then
+        bytes="$(stat -f%z "$f")"                    # BSD/macOS
+    else
+        bytes="$(stat -c%s "$f" 2>/dev/null || echo 0)"  # GNU
+    fi
+    (( bytes > 10 * 1024 * 1024 )) || return 0
+    local ts
+    ts="$(date +%Y%m%d-%H%M%S)"
+    if cp "$f" "${f}.${ts}" && : > "$f"; then
+        log "已轮转 $(basename "$f")（${bytes} 字节 -> ${f}.${ts}）"
+    else
+        log "警告: 轮转 $(basename "$f") 失败，保留原文件不动"
+    fi
+}
+
 cmd_cleanup() {
     local keep="${BUDDY_LOG_KEEP_DAYS:-15}"
     local logdir="$BUDDY_HOME/logs"
     [[ -d "$logdir" ]] || { log "没有 logs 目录（${logdir}）"; return 0; }
+
+    rotate_native_log "$logdir/service.log"
+    rotate_native_log "$logdir/proxy.sh.log"
 
     # 截止日：删除「文件名日期 < 截止日」的轮转文件（保留最近 keep 天）。
     # macOS 与 Linux 的 date 语法不同，各写一支（-v vs -d）。
@@ -406,6 +453,22 @@ cmd_cleanup() {
         [[ "$d" < "$cutoff" ]] || continue
         rm -f "$f" && n=$((n + 1))
     done < <(find "$logdir" -maxdepth 1 -type f -name '*.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' 2>/dev/null)
+    # copytruncate 归档（service.log.<时刻> / proxy.sh.log.<时刻>）：mtime 即
+    # 轮转时刻，按 mtime 清即可，同样不碰当前活跃文件（无时刻后缀）。
+    local r base ts d8 cutoff8
+    cutoff8="$(date -v-"${keep}"d +%Y%m%d 2>/dev/null || date -d "-${keep} days" +%Y%m%d)"
+    for r in "$logdir"/service.log.* "$logdir"/proxy.sh.log.*; do
+        [[ -f "$r" ]] || continue
+        base="${r##*/}"
+        ts="${base##*.}"
+        case "$ts" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+            *) continue ;;
+        esac
+        d8="${ts%%-*}"
+        [[ "$d8" < "$cutoff8" ]] || continue
+        rm -f "$r" && n=$((n + 1))
+    done
     after="$(du -sh "$logdir" 2>/dev/null | cut -f1)"
 
     if [[ "$n" -eq 0 ]]; then
