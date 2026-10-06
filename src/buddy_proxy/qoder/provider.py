@@ -656,7 +656,7 @@ class QoderProvider(BaseProvider):
             "endpoint_type": "cosy",
             "protocol": "openai-envelope",
             "cosy_version": COSY_VERSION,
-            "models": len(self._catalog_for(self._region.key)._models or Catalog.fallback()),
+            "models": len(self._entries()),
             "authenticated": bool(accounts),
             "accounts": [
                 {
