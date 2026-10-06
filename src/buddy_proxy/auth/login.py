@@ -95,7 +95,7 @@ def _pick_region(provider_label: str, cli_region: str | None, *, default_key: st
     return default_key
 
 
-def _login_codebuddy(open_browser: bool = True) -> int:
+def _login_codebuddy(open_browser: bool = True, **_kwargs) -> int:
     """CodeBuddy（copilot.tencent.com）浏览器 OAuth 登录。"""
     import json
 
