@@ -51,10 +51,11 @@ from .transport import send_trae_chat
 
 log = logging.getLogger(__name__)
 
-#: 4001 兜底链的退避秒数：上游对**刚失败**的账号有亚秒级快速重试惩罚（2026-10-07
-#: 实测：失败后 ~0.2s 紧接的重试照样 4001「param is invalid」，隔 1s 即恢复），
-#: 兜底请求不退避只会再吃一个 4001。2s 取「>1s 恢复点」的安全余。
-_REJECT_BACKOFF_S = 2.0
+#: 4001 兜底链的退避秒数：上游对**刚失败**的账号有快速重试惩罚（2026-10-07
+#: 实测：失败后 ~0.2s 紧接的重试照样 4001「param is invalid」，隔 1s 即恢复；
+#: 且窗口随连续失败次数拉长——累积多次失败后实测 ~15-20s 才恢复）。所以兜底
+#: 链每一跳前都退避 4s：窗口小时内足够恢复，也把失败彼此拉开、避免喂养窗口。
+_REJECT_BACKOFF_S = 4.0
 
 #: 「该模型 chat_v3 流式被上游整体拒绝」的标记 TTL。流式 4001 后短 TTL 内直接
 #: 跳过必败的流式尝试、straight to 非流式缓冲——既省一次注定失败的往返，也避免
@@ -962,11 +963,11 @@ class TraeProvider(BaseProvider):
                             # body 非流式 200、流式 4001，且文本协议兜底对 GPT-6 系
                             # 的 solo_work_lite 也 4001）。先降级 native 非流式重试
                             # ——非流式响应本就是 SSE 帧形态，整段缓冲后走同一解析
-                            # 路径；也被拒才落文本协议兜底。
-                            # 注意重试前必须退避：上游对刚失败（4001）的账号有亚秒级
-                            # 快速重试惩罚（实测失败后 ~0.2s 紧接的请求照样 4001，隔
-                            # 1s 即恢复），不退避的兜底只会再吃一个 4001。读线程里睡，
-                            # 心跳照常喂下游，客户端无感。
+                            # 路径。
+                            # 注意每一跳前必须退避：上游对刚失败（4001）的账号有快速
+                            # 重试惩罚（实测失败后 ~0.2s 紧接的请求照样 4001，且窗口
+                            # 随连续失败拉长到 ~15-20s），不退避的兜底只会再吃一个
+                            # 4001、还把窗口越喂越长。读线程里睡，心跳照常喂下游。
                             if not skip_stream:
                                 log.warning(
                                     "trae native stream rejected (4001), "
@@ -979,8 +980,20 @@ class TraeProvider(BaseProvider):
                                     native["messages"], model, stream=False,
                                     tools=native["tools"])
                             if _native_rejected(raw_text):
+                                # 非流式也被拒（多落在惩罚窗内）：安静退避后原路再试
+                                # 一次——窗口随时间衰减，隔 4s 的第二次尝试大概率能
+                                # 过；文本协议对 GPT-6 系已死，能用非流式救回就别落
+                                # 文本多喂一次必败失败
                                 log.warning(
                                     "trae native nonstream rejected (4001), "
+                                    "quiet retry: model=%s", model)
+                                time.sleep(_REJECT_BACKOFF_S)
+                                raw_text = self._send_native_request(
+                                    native["messages"], model, stream=False,
+                                    tools=native["tools"])
+                            if _native_rejected(raw_text):
+                                log.warning(
+                                    "trae native nonstream rejected twice (4001), "
                                     "fallback to text protocol: model=%s", model)
                                 time.sleep(_REJECT_BACKOFF_S)
                                 raw_text = send_trae_chat(
@@ -1206,9 +1219,16 @@ class TraeProvider(BaseProvider):
             if _native_rejected(raw) and not self._keeps_native_error(model):
                 log.warning(
                     "trae native tools rejected (4001), "
-                    "fallback to text protocol: model=%s", model)
+                    "quiet retry nonstream: model=%s", model)
                 _debug_dump("trae_native_fallback", model=model, phase="collect")
-                # 同 _stream：紧接失败的兜底必须先退避，否则吃快速重试惩罚
+                # 同 _stream：先安静退避原路重试一次，仍拒才落文本协议
+                time.sleep(_REJECT_BACKOFF_S)
+                raw = self._send_native_request(
+                    native["messages"], model, stream=False, tools=native["tools"])
+            if _native_rejected(raw) and not self._keeps_native_error(model):
+                log.warning(
+                    "trae native nonstream rejected twice (4001), "
+                    "fallback to text protocol: model=%s", model)
                 time.sleep(_REJECT_BACKOFF_S)
                 raw = send_trae_chat(messages, model, stream=False,
                                      base_url=self._base_url)
