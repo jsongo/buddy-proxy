@@ -227,7 +227,7 @@ function renderBenefits() {
         </div>
         <div class="br-meta">${st}${meta}${nextTimeHtml(c)}</div>
         <div class="br-act">
-          <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}')">立即打卡</button>
+          <button class="primary" ${(c.done_today || c.inactive) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)">立即打卡</button>
         </div>
       </div>
       ${acctsHtml ? `<div class="ck-accts">${acctsHtml}</div>` : ''}
