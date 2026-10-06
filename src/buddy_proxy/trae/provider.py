@@ -51,6 +51,11 @@ from .transport import send_trae_chat
 
 log = logging.getLogger(__name__)
 
+#: 4001 兜底链的退避秒数：上游对**刚失败**的账号有亚秒级快速重试惩罚（2026-10-07
+#: 实测：失败后 ~0.2s 紧接的重试照样 4001「param is invalid」，隔 1s 即恢复），
+#: 兜底请求不退避只会再吃一个 4001。2s 取「>1s 恢复点」的安全余。
+_REJECT_BACKOFF_S = 2.0
+
 #: 多账号额度并发查询：整轮 deadline + 常驻线程池（与 antigravity/qoder 同口径）。
 #: 常驻（不是每轮新建）的理由见 trae/pat/quota.py：每轮新建 + shutdown(wait=False)
 #: 会让慢轮线程留在后台累积；常驻池上限封顶，慢轮占名额、后续轮次自然排队。
@@ -934,6 +939,11 @@ class TraeProvider(BaseProvider):
                             # 的 solo_work_lite 也 4001）。先降级 native 非流式重试
                             # ——非流式响应本就是 SSE 帧形态，整段缓冲后走同一解析
                             # 路径；也被拒才落文本协议兜底。
+                            # 注意重试前必须退避：上游对刚失败（4001）的账号有亚秒级
+                            # 快速重试惩罚（实测失败后 ~0.2s 紧接的请求照样 4001，隔
+                            # 1s 即恢复），不退避的兜底只会再吃一个 4001。读线程里睡，
+                            # 心跳照常喂下游，客户端无感。
+                            time.sleep(_REJECT_BACKOFF_S)
                             raw_text = self._send_native_request(
                                 native["messages"], model, stream=False,
                                 tools=native["tools"])
@@ -941,6 +951,7 @@ class TraeProvider(BaseProvider):
                                 log.warning(
                                     "trae native nonstream also rejected (4001), "
                                     "fallback to text protocol: model=%s", model)
+                                time.sleep(_REJECT_BACKOFF_S)
                                 raw_text = send_trae_chat(
                                     messages, model, stream=False,
                                     base_url=self._base_url)
@@ -1166,6 +1177,8 @@ class TraeProvider(BaseProvider):
                     "trae native tools rejected (4001), "
                     "fallback to text protocol: model=%s", model)
                 _debug_dump("trae_native_fallback", model=model, phase="collect")
+                # 同 _stream：紧接失败的兜底必须先退避，否则吃快速重试惩罚
+                time.sleep(_REJECT_BACKOFF_S)
                 raw = send_trae_chat(messages, model, stream=False,
                                      base_url=self._base_url)
                 used_native = False

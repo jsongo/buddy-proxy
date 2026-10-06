@@ -151,6 +151,11 @@ def native_env(monkeypatch):
             return SSE_NATIVE_REJECTED
         return getattr(state, "_legacy_sse", None) or SSE_LEGACY_TOOL_CALL
 
+    # 4001 兜底链会退避 sleep(_REJECT_BACKOFF_S)：记录调用并跳过真实等待
+    sleeps: list[float] = []
+    state._sleeps = sleeps
+    monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
+
     monkeypatch.setattr(tp_impl, "_send_native_chat", fake_native)
     monkeypatch.setattr(tp_impl, "send_trae_chat", fake_legacy)
     monkeypatch.setattr(tp_impl, "_auth", lambda: ("fake-token", "fake-uid"))
@@ -293,6 +298,8 @@ def test_native_4001_falls_back_to_legacy(client, native_env):
     assert ch["finish_reason"] == "tool_calls"
     assert ch["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
     assert len(native_calls) == 1 and len(legacy_calls) == 1
+    # collect 的文本兜底同样先退避
+    assert state._sleeps == [2.0]
 
 
 def test_native_4001_stream_retries_native_nonstream(client, native_env):
@@ -310,6 +317,8 @@ def test_native_4001_stream_retries_native_nonstream(client, native_env):
     # 两次 native 调用：流式被拒 → 非流式成功；文本协议未动用
     assert [c["stream"] for c in native_calls] == [True, False]
     assert legacy_calls == []
+    # 重试前有退避（上游对刚失败的账号有亚秒级快速重试惩罚）
+    assert state._sleeps == [2.0]
 
 
 def test_native_4001_stream_full_fallback_to_legacy(client, native_env):
@@ -327,6 +336,8 @@ def test_native_4001_stream_full_fallback_to_legacy(client, native_env):
     assert "tool_calls" in finish
     assert [c["stream"] for c in native_calls] == [True, False]
     assert len(legacy_calls) == 1 and legacy_calls[0]["stream"] is False
+    # 两级兜底各退避一次
+    assert state._sleeps == [2.0, 2.0]
 
 
 # ---------------------------------------------------------------------------
