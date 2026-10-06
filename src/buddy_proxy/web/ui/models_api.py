@@ -712,6 +712,7 @@ async def ui_test(request: Request):
     return {
         "ok": True,
         "latency_ms": latency_ms,
+        "provider": getattr(resp, "_buddy_provider_id", provider),
         "model": payload.get("model") or model,
         "content": (content or "").strip()[:600] or "(空回复)",
         "finish_reason": (choices[0].get("finish_reason") if choices else None),

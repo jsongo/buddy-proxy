@@ -1200,7 +1200,7 @@ async function clearOneMark(target) {
 
 async function runTest(provider, model) {
   const overlay = document.getElementById('overlay');
-  document.getElementById('modal-title').textContent = `测试 ${provider}/${model}`;
+  document.getElementById('modal-title').textContent = `测试 ${provider ? provider + '/' : ''}${model}`;
   document.getElementById('modal-body').innerHTML = '<span class="spin"></span>发送 "hi" 到上游，等待回复…（最长 120s）';
   setModalFoot('');  // 这个弹窗只有固定的「关闭」；不清空会残留上一个弹窗的按钮
   overlay.classList.add('show');
@@ -1209,11 +1209,15 @@ async function runTest(provider, model) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ provider, model })});
     const u = r.usage || {};
+    const replyProvider = String(r.provider || provider || '');
+    const replyModel = String(r.model || model || '');
+    const replyTarget = replyProvider && !replyModel.startsWith(replyProvider + '/')
+      ? `${replyProvider}/${replyModel}` : replyModel;
     document.getElementById('modal-body').innerHTML = r.ok ? `
       <div class="kv">
         <span class="k">结果</span><span style="color:var(--ok)">✓ 成功</span>
         <span class="k">耗时</span><span class="mono">${fmtMs(r.latency_ms)}</span>
-        <span class="k">回复模型</span><span class="mono">${esc(r.model || '')}</span>
+        <span class="k">回复模型</span><span class="mono">${esc(replyTarget)}</span>
         <span class="k">Tokens</span><span class="mono">${u.prompt_tokens ?? '—'} + ${u.completion_tokens ?? '—'}</span>
         <span class="k">finish</span><span class="mono">${esc(r.finish_reason || '—')}</span>
       </div>
