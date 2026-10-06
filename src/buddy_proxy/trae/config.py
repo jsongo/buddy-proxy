@@ -203,8 +203,6 @@ MODEL_MAP: dict[str, str] = {
     "doubao-seed-2.1-turbo": "Doubao-Seed-2.1-Turbo",
     "doubao-seed-code": "Doubao-Seed-Code",
     "step-5-preview": "Step-5-Preview",
-    # qwen 官方命名点号/连字符混用，两种写法都放行
-    "qwen-3.8-max": "qwen3.8-max",
 }
 
 # 模型分级（T1 最强 -> T4 最弱）。

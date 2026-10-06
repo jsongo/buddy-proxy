@@ -61,7 +61,7 @@ def test_work_catalog_ids_are_lowercase_and_map_upstream_names():
     assert map_model_for("cn", "deepseek-v4-pro") == "DeepSeek-V4-Pro"
     assert map_model_for("cn", "step-5-preview") == "Step-5-Preview"
     assert not {"glm-5.2", "kimi-k2.7-code", "deepseek-v4-flash",
-                "glm-5", "glm-5-turbo", "qwen-3.7-plus"} & ids
+                "glm-5", "glm-5-turbo", "qwen-3.7-plus", "qwen-3.8-max"} & ids
 
 
 def test_v41_flash_is_t1():
