@@ -202,7 +202,8 @@ buddy start
 
 - **原理**：自动解密 Trae IDE 本地存储的 tc 加密登录态（AES-128-CBC + SHA-512），
   或从 `.env` 读 `TRAE_TOKEN` / `TRAE_USER_ID`，直连 `trae-api-cn.mchost.guru`
-- **模型**：目录列出已验证可用的模型名及其别名（如 `claude-sonnet-4-5` → `glm-5.2`），
+- **模型**：目录列出已验证可用的模型名及其别名（如 `deepseek-v4-pro` → `DeepSeek-V4-Pro`，
+  对外统一小写、转发时还原上游大小写敏感名；step-5-preview 这类上游只认全小写的则原样透传），
   顺序沿用上游客户端的展示顺序。
 - **原生通道（2026-09 起）**：全部请求（含纯聊天）默认走 `chat_v3` 直通——
   带 `tools` 时为原生 function calling（结构化 `tool_calls` + `role:"tool"` 历史回放），

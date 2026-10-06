@@ -75,23 +75,6 @@ def _stream_rejected_recently(model: str) -> bool:
 def _mark_stream_rejected(model: str) -> None:
     _stream_reject_until[model] = time.monotonic() + _STREAM_REJECT_SKIP_S
 
-#: 「该模型 chat_v3 流式被上游整体拒绝」的标记 TTL。流式 4001 后短 TTL 内直接
-#: 跳过必败的流式尝试、straight to 非流式缓冲——既省一次注定失败的往返，也避免
-#: 每个流式请求都喂养一次惩罚窗口（实测惩罚窗会随连续失败拉长，02:31 时 ~1s、
-#: 02:42 已漂到 ~5s+）。TTL 过后放一次流式探测，上游恢复流式即自动回到直通。
-_STREAM_REJECT_SKIP_S = 300.0
-_stream_reject_until: dict[str, float] = {}
-
-
-def _stream_rejected_recently(model: str) -> bool:
-    """该模型的流式尝试近期被 4001 拒过（TTL 内）。单调钟，免疫墙钟跳变。"""
-    until = _stream_reject_until.get(model)
-    return until is not None and time.monotonic() < until
-
-
-def _mark_stream_rejected(model: str) -> None:
-    _stream_reject_until[model] = time.monotonic() + _STREAM_REJECT_SKIP_S
-
 #: 多账号额度并发查询：整轮 deadline + 常驻线程池（与 antigravity/qoder 同口径）。
 #: 常驻（不是每轮新建）的理由见 trae/pat/quota.py：每轮新建 + shutdown(wait=False)
 #: 会让慢轮线程留在后台累积；常驻池上限封顶，慢轮占名额、后续轮次自然排队。
