@@ -251,6 +251,60 @@ def test_status_checks_later_account_when_first_has_no_checkin_campaign(monkeypa
     assert st["accounts"][1]["name"] == "Second"
 
 
+def test_status_aggregation_carries_daily_credit_top_and_per_account(monkeypatch):
+    """多账号聚合不能丢活动信息——否则卡片上「每日 +100.00」时有时无。
+
+    实测 bug：单账号通道（qoderintl）原样返回带 ``daily_credit``，多账号
+    通道（qoder CN）聚合时只拷了状态五键，chips 因此忽有忽无。
+    """
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    first = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
+    second = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [first, second])
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [first, second])
+    clients = {"a1": _FakeClient(LIVE_LISTING), "a2": _FakeClient(LIVE_LISTING)}
+
+    async def client_for(self, account=None):
+        return clients[account.id]
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    st = asyncio.run(QoderProvider().checkin_status())
+    assert st["daily_credit"] == 100
+    assert st["benefit_kind"] == "CREDITS"
+    assert st["activity_name"] == "act-20260923-556"
+    for row in st["accounts"]:
+        assert row["daily_credit"] == 100
+        assert row["activity_name"] == "act-20260923-556"
+
+
+def test_single_account_status_also_carries_account_rows(monkeypatch):
+    """单账号（qoderintl 只有一个号）也要带 accounts 明细：卡片第二行显示
+    账号，和多账号通道版式一致。"""
+    from types import SimpleNamespace
+    from buddy_proxy.qoder import provider as qoder_provider
+
+    only = SimpleNamespace(id="a9", priority=0, alias="G1", name="G1", email="g@test", region="global")
+    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [only])
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [only])
+    p = QoderProvider()
+
+    async def client_for(self, account=None):
+        return _FakeClient(LIVE_LISTING)
+
+    monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
+    st = asyncio.run(p.checkin_status())
+    assert st["daily_credit"] == 100
+    assert st["accounts"] == [{
+        "id": "a9", "index": 1, "name": "G1",
+        "checked_in": False, "claimable": True, "inactive": False,
+        "unavailable": False, "message": st["message"],
+        "daily_credit": 100, "benefit_kind": "CREDITS",
+        "activity_name": "act-20260923-556",
+    }]
+
+
 def test_status_claimable_today():
     """领取前：claimable=true，带每日金额与结束时间。"""
     fake = _FakeClient(LIVE_LISTING)

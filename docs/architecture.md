@@ -307,8 +307,12 @@ silent:
   account because their campaign lists are independent; it aggregates whether
   any account can claim and exposes the per-account state. Manual Qoder claims
   still claim only the first claimable account in priority order. Single-account
-  responses omit the list — the badge *is* the account's state, and a one-row
-  breakdown is noise.
+  responses carry a one-row `accounts` list too (2026-10-07): the card layout
+  keeps the badge row and the account row uniform across channels, instead of
+  a single-account channel like qoderintl rendering a differently-shaped card.
+  The aggregation also forwards `daily_credit`/`benefit_kind`/`activity_name`
+  (top level and per row) — dropping them made the “每日 +100.00” chip appear
+  on single-account channels only.
 - **Activity presence is not the same as a claimable check-in.** Qoder's
   campaign list may contain `VIEW_DETAILS` entries alongside, or instead of,
   `CLAIM_BENEFIT`. Only the latter with `CLAIMABLE` is sent to the claim API.
