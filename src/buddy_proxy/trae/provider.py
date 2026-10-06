@@ -21,15 +21,12 @@ from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
 from ..providers.base import BaseProvider
 from .benefits_api import claim_checkin_credits, fetch_checkin_status, fetch_ent_usage
 from .config import (
-    BASE_URL_CN,
-    MODEL_CREDITS,
-    MODEL_MAP,
-    MODEL_SUPPORTS_IMAGES,
-    MODEL_TIERS,
     TRAE_HEARTBEAT_INTERVAL,
     TRAE_SEMANTIC_TIMEOUT,
     _NATIVE_TOOLS_ENABLED,
     _debug_dump,
+    model_tables,
+    resolve_trae_region,
 )
 from . import failover
 from .credentials import (
@@ -71,20 +68,65 @@ def _quota_executor() -> "concurrent.futures.ThreadPoolExecutor":
         return _quota_pool
 
 
+#: 权益包额度/已用的候选字段名，按计费口径各一套（见 ``_quota_items`` 注释）。
+#: CN 侧是 2026-10-03 实测的确切字段名；海外（dollar）尚未拿到真账号快照，故
+#: 把美元专用名放前面、CN 名放后面兜底——上游若沿用同名 credits_* 承载美元
+#: 数值也读得对，等实测拿到海外响应后再收敛成单一字段名。
+_LIMIT_KEYS_CREDITS = ("credits_limit",)
+_AMOUNT_KEYS_CREDITS = ("credits_amount",)
+_LIMIT_KEYS_DOLLAR = ("dollar_limit", "usage_limit", "credits_limit", "limit")
+_AMOUNT_KEYS_DOLLAR = ("dollar_amount", "usage_amount", "credits_amount", "amount")
+
+
+# ---- 签到节流 / 限流退避 ----
+# 上游签到接口有短窗口频控：多账号背靠背连打时，第二个起的请求命中
+# 「当前参与用户太多，请稍后再试」（2026-10-06 ethan/ethan0 实测复现）。
+# 对策两段：账号间强制间隔，让每个 claim 看起来都是独立用户行为；
+# 仍命中限流时退避重试（间隔递增），活动高峰期第一发也可能被挤掉。
+_CHECKIN_THROTTLE_S = 4.0
+_CHECKIN_RETRY_DELAYS = (5.0, 10.0)
+
+#: 限流文案特征（上游 message 原样匹配，出现在 data["message"] 或 RuntimeError
+#: 文案里都算）。宁可误判（多等几秒重试）不可漏判——漏判就是白丢一天积分。
+_CHECKIN_RATE_LIMIT_MARKERS = ("参与用户太多", "稍后再试", "稍后重试")
+
+
+def _claim_rate_limited(data: dict[str, Any] | None, err: str = "") -> bool:
+    """该次 claim 响应是否命中上游频控（按文案判断——上游无独立错误码）。"""
+    text = err + str((data or {}).get("message") or "")
+    return any(m in text for m in _CHECKIN_RATE_LIMIT_MARKERS)
+
+
+def _first_num(obj: dict[str, Any], keys: Sequence[str]) -> float | None:
+    """按候选名依次取第一个数值字段；全不命中/非数值返回 None。"""
+    for k in keys:
+        v = obj.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+    return None
+
+
 class TraeProvider(BaseProvider):
     id = "trae"
     name = "Trae (本地解密直连)"
-    # 打卡/积分 API 只有 Trae 上游提供（/ui 自动打卡据此识别）
+    # 打卡/积分 API 只有 Trae 上游提供（/ui 自动打卡据此识别）。
+    # 海外版上游没有签到端点，TraeIntlProvider 会把它覆写成 False。
     supports_checkin = True
 
-    def __init__(self, base_url: str | None = None, edition: str = "cn"):
-        self._base_url = base_url or BASE_URL_CN
-        self._edition = edition
+    def __init__(self, base_url: str | None = None, region: str | None = None):
+        # region 决定：chat 网关、模型目录、failover 选账号、额度/签到口径。
+        # base_url 仍可显式传入（测试注入点/自定义网关），缺省按区域取。
+        self._region = resolve_trae_region(region)
+        self._base_url = base_url or self._region.chat_base
 
     def models(self) -> Sequence[dict[str, Any]]:
+        # 按区域取模型表：CN 与海外是两套几乎不重叠的目录（GLM/Doubao/Qwen vs
+        # Claude/GPT/Gemini 系），必须各用各的——见 config.model_tables。
+        model_map, model_tiers, model_credits, supports_images = model_tables(
+            self._region.key)
         result = []
         seen = set()
-        for tier, models in MODEL_TIERS.items():
+        for tier, models in model_tiers.items():
             for m in models:
                 if m in seen:
                     continue
@@ -95,14 +137,14 @@ class TraeProvider(BaseProvider):
                     "created": 0,
                     "owned_by": self.id,
                     "tier": tier,
-                    "credits": MODEL_CREDITS.get(m),
+                    "credits": model_credits.get(m),
                     # 图片能力：与 CodeBuddy 通道同口径（供 /v1/models 的
                     # input_modalities 判定），漏报会让客户端误剥图片
-                    "images": m in MODEL_SUPPORTS_IMAGES,
+                    "images": m in supports_images,
                     "description": f"Trae {tier} 模型",
                 })
         # 加别名（外部名映射）——倍率与图片能力均跟随映射到的内部模型
-        for external, internal in MODEL_MAP.items():
+        for external, internal in model_map.items():
             if external not in seen:
                 seen.add(external)
                 result.append({
@@ -111,8 +153,8 @@ class TraeProvider(BaseProvider):
                     "created": 0,
                     "owned_by": self.id,
                     "maps_to": internal,
-                    "credits": MODEL_CREDITS.get(internal),
-                    "images": internal in MODEL_SUPPORTS_IMAGES,
+                    "credits": model_credits.get(internal),
+                    "images": internal in supports_images,
                     "description": f"Trae 别名 -> {internal}",
                 })
         return result
@@ -160,7 +202,10 @@ class TraeProvider(BaseProvider):
         """
         if self._is_pat_variant():
             return []
-        return failover.available_accounts()
+        # 只遍历本区账号——CN / 海外账号不通用（连错域 401），额度与签到请求
+        # 打错区就是白付一次失败往返，还会把海外的美元 Usage 混进 CN 的积分卡。
+        # PAT 子类的 region 恒为 cn（见 pat/chat.py 注释），过滤对它无影响。
+        return failover.available_accounts(self._region.key)
 
     def checkin_status(self) -> dict[str, Any] | None:
         """查今日签到状态。多账号**都查**，聚合：任一账号可领→可领；
@@ -169,7 +214,7 @@ class TraeProvider(BaseProvider):
         if not accounts:
             # 单账号（legacy 迁移前 / PAT 兜底）或全部在冷却：走首个可用账号
             try:
-                data = fetch_checkin_status()
+                data = fetch_checkin_status(region=self._region.key)
             except Exception as e:  # noqa: BLE001 — 状态查询失败不该让整页 500
                 log.warning("trae 签到状态查询失败: %s", e)
                 return {"checked_in": False, "claimable": False, "message": str(e)[:200]}
@@ -186,7 +231,12 @@ class TraeProvider(BaseProvider):
         failed_accts: list[str] = []
         acct_details: list[dict[str, Any]] = []
         enabled_any = False
-        for i, acct in enumerate(accounts, 1):
+        # 展示序号一律取 failover.display_index()（与 /ui 账号快照同源）。
+        # 不能用 enumerate 的位置：accounts 是「本区 + 未冷却」子集，位次与
+        # 快照对不上，前端会把签到行对到别的账号上（✎ 改名改错人）。
+        didx = failover.display_index()
+        for pos, acct in enumerate(accounts, 1):
+            i = didx.get(acct.id, pos)
             # 显示名 alias 优先（管理页 ✎ 改的名，签到卡与额度面板保持一致）；
             # id 一并下发——签到明细行的 ✎ 改名按钮要拿它定位账号。
             name = acct.alias or acct.nickname or acct.uid or acct.id
@@ -236,7 +286,8 @@ class TraeProvider(BaseProvider):
         说不清是 token 过期还是网络问题）。"""
         try:
             token, _cred = ensure_account_token(acct.id)
-            data = fetch_checkin_status(token=token, account_id=acct.id)
+            data = fetch_checkin_status(token=token, account_id=acct.id,
+                                       region=self._region.key)
         except Exception as e:  # noqa: BLE001 — 单账号失败不该让整页 500
             log.warning("trae 签到状态查询失败（%s）: %s", acct.id, e)
             return None, str(e)[:120]
@@ -267,12 +318,20 @@ class TraeProvider(BaseProvider):
     def checkin_claim(self) -> dict[str, Any] | None:
         """领取今日签到积分。多账号**每个都领**（用户决策），逐个尝试、
         各自容错：单个账号失败（网络/token/已领过）不阻塞其它账号。汇总
-        ``extra_credits`` 为各账号实领之和，``message`` 据实说明每个账号结果。"""
+        ``extra_credits`` 为各账号实领之和，``message`` 据实说明每个账号结果。
+
+        多账号**串行 + 节流**（用户 2026-10-06 要求）：实测双账号背靠背连打，
+        第二个必中「当前参与用户太多，请稍后再试」——上游把短窗口内的连续
+        claim 识别为刷量限流。账号间强制间隔 ``_CHECKIN_THROTTLE_S``，命中
+        限流文案再按 ``_CHECKIN_RETRY_DELAYS`` 退避重试。本方法经 benefits 层
+        ``asyncio.to_thread`` 跑（``_call``），``time.sleep`` 不阻塞事件循环；
+        手动点击的 HTTP 响应最坏多等约 15s（两次重试），前端 fetch 无超时，可接受。
+        """
         accounts = self._work_accounts()
         if not accounts:
             # 单账号 legacy 兜底（PAT 由 supports_checkin=False 挡住 UI 调度，
             # 走不到这里；即便走到也退回原单账号语义）
-            data = claim_checkin_credits()
+            data = claim_checkin_credits(region=self._region.key)
             if data.get("code") not in (0, None):
                 raise RuntimeError(data.get("message") or json.dumps(data, ensure_ascii=False)[:200])
             return {
@@ -286,7 +345,8 @@ class TraeProvider(BaseProvider):
             acct = accounts[0]
             try:
                 token, _cred = ensure_account_token(acct.id)
-                data = claim_checkin_credits(token=token, account_id=acct.id)
+                data = claim_checkin_credits(token=token, account_id=acct.id,
+                                            region=self._region.key)
             except Exception as e:  # noqa: BLE001 — 与多账号循环同款容错
                 log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
                 raise RuntimeError(str(e)[:200]) from e
@@ -303,32 +363,70 @@ class TraeProvider(BaseProvider):
         any_claimed = False
         messages: list[str] = []
         acct_details: list[dict[str, Any]] = []
-        for i, acct in enumerate(accounts, 1):
+        # 展示序号取 failover.display_index()（与 /ui 账号快照同源，理由同
+        # checkin_status）；**节流**用的是本轮循环位置 pos，两者必须分开：
+        # 展示序号是「这账号在管理页排第几」（跨区、含冷却账号都占位），
+        # 节流要的是「是不是本轮第一个打的」——拿展示序号判会把「快照里的
+        # 第 3 个、但本轮第 1 个」也睡一拍（无谓等待），更糟的是若某轮只领
+        # 快照第 2、3 号，`i > 1` 对两者都成立，第 1 个也白睡。
+        didx = failover.display_index()
+        for pos, acct in enumerate(accounts, 1):
+            i = didx.get(acct.id, pos)
             # 显示名 alias 优先（同 checkin_status）；id 下发供明细行 ✎ 定位
             name = acct.alias or acct.nickname or acct.uid or acct.id
             tag = f"#{i}"
-            try:
-                token, _cred = ensure_account_token(acct.id)
-                data = claim_checkin_credits(token=token, account_id=acct.id)
+            # 串行节流：从第 2 个账号起先等一段再打（实测零间隔必中频控——
+            # 见 _CHECKIN_THROTTLE_S 注释）。异常路径同样等：哪怕上一个账号
+            # 是网络失败，下一个也照常歇一拍，节奏一致才像「人在操作」。
+            if pos > 1:
+                time.sleep(_CHECKIN_THROTTLE_S)
+            msg = ""
+            ok = False
+            granted: float | None = None
+            last_rl = False
+            for attempt in range(len(_CHECKIN_RETRY_DELAYS) + 1):
+                last_rl = False
+                try:
+                    token, _cred = ensure_account_token(acct.id)
+                    data = claim_checkin_credits(token=token, account_id=acct.id,
+                                                region=self._region.key)
+                except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号
+                    log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
+                    msg = str(e)[:60]
+                    last_rl = _claim_rate_limited(None, msg)
+                    if last_rl and attempt < len(_CHECKIN_RETRY_DELAYS):
+                        time.sleep(_CHECKIN_RETRY_DELAYS[attempt])
+                        continue
+                    break
                 if data.get("code") in (0, None):
-                    any_claimed = True
-                    granted = data.get("credits_granted", data.get("extra_credits"))
-                    if isinstance(granted, (int, float)):
-                        total_credits += float(granted)
-                    messages.append(f"{tag} 已领 {granted or ''}".strip())
-                    acct_details.append({
-                        "index": i, "id": acct.id, "name": name, "ok": True,
-                        "credits": granted if isinstance(granted, (int, float)) else None,
-                        "message": str(data.get("message") or "")[:80],
-                    })
-                else:
-                    msg = str(data.get("message"))[:60]
-                    messages.append(f"{tag} 失败：{msg}")
-                    acct_details.append({"index": i, "id": acct.id, "name": name,
-                                         "ok": False, "message": msg})
-            except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号
-                log.warning("trae 签到领取失败（%s）: %s", acct.id, e)
-                msg = str(e)[:60]
+                    ok = True
+                    g = data.get("credits_granted", data.get("extra_credits"))
+                    if isinstance(g, (int, float)):
+                        granted = float(g)
+                    msg = str(data.get("message") or "")[:80]
+                    break
+                msg = str(data.get("message"))[:60]
+                last_rl = _claim_rate_limited(data)
+                if last_rl and attempt < len(_CHECKIN_RETRY_DELAYS):
+                    log.info("trae 签到限流（%s），%.0fs 后重试 %d/%d",
+                             acct.id, _CHECKIN_RETRY_DELAYS[attempt],
+                             attempt + 1, len(_CHECKIN_RETRY_DELAYS))
+                    time.sleep(_CHECKIN_RETRY_DELAYS[attempt])
+                    continue
+                break
+            if ok:
+                any_claimed = True
+                if granted is not None:
+                    total_credits += granted
+                messages.append(f"{tag} 已领 {granted or ''}".strip())
+                acct_details.append({
+                    "index": i, "id": acct.id, "name": name, "ok": True,
+                    "credits": granted,
+                    "message": msg,
+                })
+            else:
+                # 重试耗尽仍限流：说明「稍后再试」——别写死「失败」，
+                # message 保持上游原话，用户稍后手动再点一次即可补上
                 messages.append(f"{tag} 失败：{msg}")
                 acct_details.append({"index": i, "id": acct.id, "name": name,
                                      "ok": False, "message": msg})
@@ -347,7 +445,7 @@ class TraeProvider(BaseProvider):
         if not accounts:
             # 单账号 legacy 兜底（迁移前 / PAT）：保持原行为
             try:
-                data = fetch_ent_usage()
+                data = fetch_ent_usage(region=self._region.key)
             except Exception as e:  # noqa: BLE001 — 额度查询失败不阻塞整页
                 log.warning("trae 额度查询失败: %s", e)
                 return None
@@ -355,15 +453,21 @@ class TraeProvider(BaseProvider):
             return {"items": items, "level": None}
 
         multi = len(accounts) > 1
+        # 展示序号取 failover.display_index()（与 /ui 账号快照同源）。这里曾经
+        # 是 enumerate 的位置，失败说明条里还另用过 ``priority + 1``——三套编号
+        # 各说各话：额度块按快照序号对上账号后，✕ 删除 / ▲▼ 顺位 / ✎ 改名拿到的
+        # 是**别的账号**的 id，删号是不可逆的（凭据文件一并 unlink）。
+        # display_index 用全量列表位次，快照与标签必然同源。
+        didx = failover.display_index()
         if multi:
             pool = _quota_executor()
-            futures = [pool.submit(self._quota_one, a, i + 1, multi=True)
-                       for i, a in enumerate(accounts)]
+            futures = [pool.submit(self._quota_one, a, didx.get(a.id, n + 1), multi=True)
+                       for n, a in enumerate(accounts)]
             deadline = time.monotonic() + _QUOTA_ROUND_DEADLINE_S
             items: list[dict[str, Any]] = []
             failed: list[str] = []
             for acct, fut in zip(accounts, futures):  # 按 failover 顺位收集，UI 顺序稳定
-                name = f"#{acct.priority + 1}"
+                name = f"#{didx.get(acct.id, 0) or '?'}"
                 try:
                     its, ok = fut.result(timeout=max(deadline - time.monotonic(), 0.05))
                 except Exception:  # noqa: BLE001 - 超时/异常账号都算失败
@@ -382,7 +486,7 @@ class TraeProvider(BaseProvider):
                     "query_failed": True,
                 })
         else:
-            its, ok = self._quota_one(accounts[0], 1, multi=False)
+            its, ok = self._quota_one(accounts[0], didx.get(accounts[0].id, 1), multi=False)
             items = its if ok else []
 
         return {"items": items, "level": None}
@@ -400,7 +504,8 @@ class TraeProvider(BaseProvider):
         """单账号额度查询：``(items, ok)``。同步跑在常驻线程池里。"""
         try:
             token, _cred = ensure_account_token(acct.id)
-            data = fetch_ent_usage(token=token, account_id=acct.id)
+            data = fetch_ent_usage(token=token, account_id=acct.id,
+                                  region=self._region.key)
         except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞整页
             log.warning("trae 额度查询失败（%s）: %s", acct.id, e)
             return [], False
@@ -408,7 +513,24 @@ class TraeProvider(BaseProvider):
         return self._quota_items(data, label_prefix=prefix), True
 
     def _quota_items(self, data: dict[str, Any], *, label_prefix: str) -> list[dict[str, Any]]:
-        """把上游 ``/ug/usage`` 原始响应收拢成统一额度条目列表。"""
+        """把上游 ``/ug/usage`` 原始响应收拢成统一额度条目列表。
+
+        **计费口径分叉**：CN 是积分制（``unit="credit"``），海外是美元 Usage
+        余额制（``unit="dollar"``）。判据用**响应自带的** ``is_dollar_usage_billing``
+        flag，而不是 ``self._region.billing``——两区共用同一个
+        ``ide_user_ent_usage`` 接口，flag 才是上游对「这份额度按什么计价」的
+        权威声明；区域只作 flag 缺失时的兜底（老快照/字段改名都不至于把美元
+        报成积分）。数字字段两侧同名（``total_amount``/``consumed_amount``/
+        ``credits_limit``/``credits_amount``），所以只换量纲标签与展示单位。
+
+        量纲标签不能沿用 ``credit``：``benefits._quota_low`` 对 credit 通道用
+        **绝对值** 300 门槛判「余额告急」，$20 的海外套餐会被天天误报；改成
+        ``dollar`` 后它走非 credit 分支，按剩余占比判定（与 day/count/permille
+        同款），才是对的口径。
+        """
+        dollar = bool(data.get("is_dollar_usage_billing")) or (
+            not data.get("is_credits_billing") and self._region.billing == "dollar")
+        unit = "dollar" if dollar else "credit"
         us = data.get("usage_summary", {})
         items: list[dict[str, Any]] = []
         total, consumed = us.get("total_amount"), us.get("consumed_amount")
@@ -422,7 +544,7 @@ class TraeProvider(BaseProvider):
                           "remaining": remaining, "percent": percent,
                           # 总额度是所有包的合计，没有单一到期日——到期告警
                           # 由下面各权益包自己承担，合计行不参与
-                          "reset_ts": None, "expire_ts": None, "unit": "credit",
+                          "reset_ts": None, "expire_ts": None, "unit": unit,
                           # head_only：只在标题行「剩 X / Y」用它的数字，明细
                           # 列表不单列这一条（它是下面各权益包的合计，再铺一条
                           # 带进度条的明细行是重复——用户 2026-10-04 反馈）。
@@ -437,7 +559,7 @@ class TraeProvider(BaseProvider):
             if not end_time:
                 continue
             desc = p.get("display_desc") or "权益包"
-            limit = (eb.get("quota") or {}).get("credits_limit")
+            quota = eb.get("quota") or {}
             # 去重按「名字 + 权益 id + 到期日」三元组，只防上游返回重复行。
             # **不能**只按名字去重：那样 25 条「签到奖励」会被合并成 1 条，
             # 12 条尚未消费的额度直接从界面上消失（2026-10-03 实测：升级前
@@ -448,10 +570,10 @@ class TraeProvider(BaseProvider):
             seen.add(key)
             used: float | None = None
             limit_v: float | None = None
-            if isinstance(limit, (int, float)) and limit > 0:
+            limit = _first_num(quota, _LIMIT_KEYS_DOLLAR if dollar else _LIMIT_KEYS_CREDITS)
+            if limit is not None and limit > 0:
                 limit_v = float(limit)
-                amount = (p.get("usage") or {}).get("credits_amount")
-                # ``credits_amount`` 是**已用**不是剩余——2026-10-03 实测交叉
+                # ``*_amount`` 是**已用**不是剩余——2026-10-03 实测交叉
                 # 校验：Σlimit=9500.0、Σamount=6257.1772，Σlimit-Σamount 与
                 # 接口自报 remaining（3242.82）差 0.00，而「amount=剩余」的
                 # 假设差 3014.36。算反会把「剩 3242」显示成「剩 6257」。
@@ -463,7 +585,9 @@ class TraeProvider(BaseProvider):
                 # 的——真·满额。这与 ``trae/pat/quota.py`` 的相反先例不是一回
                 # 事：那里是网关偶发只回半拉数据（包容量回来了、用量没回来），
                 # 按 0 算会把未知说成满血；这里是接口语义，值为 0 就是没消费。
-                used = round(float(amount), 2) if isinstance(amount, (int, float)) else 0.0
+                amount = _first_num(p.get("usage") or {},
+                                    _AMOUNT_KEYS_DOLLAR if dollar else _AMOUNT_KEYS_CREDITS)
+                used = round(float(amount), 2) if amount is not None else 0.0
             packs.append({
                 "label": f"{label_prefix}{desc}",
                 "used": used,
@@ -473,7 +597,7 @@ class TraeProvider(BaseProvider):
                 # 权益包只有到期、没有周期性重置，故 reset_ts 恒 None
                 "reset_ts": None,
                 "expire_ts": int(end_time),
-                "unit": "credit",
+                "unit": unit,
             })
         packs.sort(key=lambda it: it["expire_ts"] or 0)  # 先到期的排前面
         items.extend(packs)
@@ -528,8 +652,22 @@ class TraeProvider(BaseProvider):
             finally:
                 set_current_work_account(None)
 
-        accounts = failover.available_accounts()
+        # 只在本区账号间 failover——CN / 海外账号不通用（连错域 401）。
+        # **不做** ``or available_accounts()`` 全量兜底：那会让 CN 通道在只有海外
+        # 账号时捞到海外账号（反之亦然），每轮白付一次 401。现有账号的 region
+        # 已由 list_accounts 归一成 "cn"（credentials.py），过滤本身就覆盖到它们。
+        # 空列表时区分「本区无账号但别区有」（401，配置问题）与「全在冷却」（429）。
+        accounts = failover.available_accounts(self._region.key)
         if not accounts:
+            other = failover.available_accounts()
+            if other:
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": {
+                        "message": (f"trae 无 {self._region.label} 区域的可用账号"
+                                    f"（已有 {len(other)} 个账号属于其它区域，"
+                                    f"跨区账号间不自动切换）"),
+                        "type": "authentication_error"}})
             raise HTTPException(
                 status_code=429,
                 detail={"error": {

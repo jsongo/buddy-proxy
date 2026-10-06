@@ -95,9 +95,10 @@ function acctRenamePrompt(pid, id, current) {
       (typeof AG_ACCTS !== 'undefined' ? AG_ACCTS : []) || [],
       (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : []) || [],
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : []) || [],
+      (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : []) || [],
       (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : []) || [],
-      // trae 没有额度面板/快照数组，名字在签到明细 BENEFITS.providers[].checkin
-      // .accounts[].name（后端已按 alias 链下发，这里拿到的就是显示名）
+      // 签到明细行（各通道 checkin.accounts[].name，后端按 alias 链下发）兜底——
+      // 快照数组未到位（首屏）时从这里也能拿到显示名
       (typeof BENEFITS !== 'undefined' && BENEFITS.providers
         ? BENEFITS.providers.flatMap(p => (p.checkin && p.checkin.accounts) || []) : []));
     const a = snap.find(x => x && x.id === id);
@@ -135,6 +136,7 @@ async function acctRenameSubmit(pid, id) {
       (typeof AG_ACCTS !== 'undefined' ? AG_ACCTS : null),
       (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : null),
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : null),
+      (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : null),
       (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : null),
     ];
     for (const arr of snaps) {
@@ -154,6 +156,7 @@ async function acctRenameSubmit(pid, id) {
     if (typeof renderAntigravityPanel === 'function') renderAntigravityPanel();
     if (typeof renderKimiPanel === 'function') renderKimiPanel();
     if (typeof renderQoderPanel === 'function') renderQoderPanel();
+    if (typeof renderTraePanel === 'function') renderTraePanel();
     if (typeof renderBenefits === 'function') renderBenefits();
     closeModal();
     toast(alias ? `已重命名为「${alias}」` : '已恢复默认名');
@@ -259,15 +262,16 @@ function acctFor(state, idx) {
 // ---- 全局分发：acctMove / acctDelete ----
 // 模板里统一写 acctMove/acctDelete（不同通道同一入口），这里按 pid 路由到对应
 // 通道的处理。ag/kimi/qoder 用各自的 agMoveAccount/agDeleteAccount 等（不动它们）；
-// dumate 用下面的 dumateMove/dumateDelete。新增多账号通道时在 ROUTES 里登记即可。
+// trae 用 traeMoveAccount/traeDeleteAccount；dumate 用下面的 dumateMove/dumateDelete。
+// 新增多账号通道时在这里登记即可。
 function acctMove(pid, idx, delta, id) {
   if (pid === 'dumate') return dumateMove(idx, delta, id);
-  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder'})[pid] + 'MoveAccount'];
+  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder', trae: 'trae'})[pid] + 'MoveAccount'];
   if (fn) fn(idx, delta, id);
 }
 function acctDelete(pid, id) {
   if (pid === 'dumate') return dumateDelete(id);
-  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder'})[pid] + 'DeleteAccount'];
+  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder', trae: 'trae'})[pid] + 'DeleteAccount'];
   if (fn) fn(id);
 }
 

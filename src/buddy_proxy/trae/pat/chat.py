@@ -168,6 +168,8 @@ def _chat_base(model: str) -> str:
         if not base:
             raise HTTPException(status_code=503, detail="PAT 模型服务未配置")
         return base
+    # PAT（服务账号）只有 CN 一套，不参与 cn/global 分区：bearer 是国内版
+    # WorkBuddy 签发的，拿到海外网关必 401。海外走 traeintl 通道（个人账号）。
     return str(BASE_URL_CN).rstrip("/")
 
 

@@ -167,6 +167,46 @@ def _build_metadata_user_id(session_id: str) -> str:
     }, ensure_ascii=False)
 
 
+def _required_system_blocks() -> list[dict[str, Any]]:
+    """ZCode 风控要求的系统块：模板的每块各带一个 cache_control 断点。"""
+    return [
+        {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
+        for text in _SYSTEM_BLOCKS
+    ]
+
+
+def _client_system_blocks(system: Any) -> list[dict[str, Any]]:
+    """客户端自带 system → 合并用的纯文本块（不带客户端的 cache_control）。
+
+    断点要保持「前置 ZCode 块各一个」的形状：客户端块再带 cache_control 既会把
+    断点数撑过 Anthropic 上限，也会让风控指纹漂移。
+    """
+    out: list[dict[str, Any]] = []
+    if isinstance(system, str):
+        if system:
+            out.append({"type": "text", "text": system})
+    elif isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if text:
+                    out.append({"type": "text", "text": text})
+            elif isinstance(block, str) and block:
+                out.append({"type": "text", "text": block})
+    return out
+
+
+def _merged_system(client_system: Any) -> list[dict[str, Any]]:
+    """最终 system：ZCode 块永远在最前，客户端 system 合并在后。
+
+    2026-10-06 实测：anthropic 路径原先只在**没有** system 时才注入 ZCode 块，
+    而 Claude Code 的请求一律自带 system（``/model`` 探测、正常对话都是），
+    注入被跳过后整条通道撞 3012「unusual activity」（HTTP 405）。openai→anthropic
+    转换路径（``_openai_to_anthropic_request``）一直是合并口径且实测可过，
+    两边对齐。"""
+    return _required_system_blocks() + _client_system_blocks(client_system)
+
+
 def _openai_to_anthropic_request(body: dict[str, Any]) -> dict[str, Any]:
     """将 OpenAI chat completions 请求体转换为 Anthropic Messages 请求体。
 
@@ -558,12 +598,10 @@ class ZCodeStartPlanProvider(BaseProvider):
             if isinstance(original, dict) and original and body.get("model"):
                 upstream_body["model"] = MODEL_NAME_CANONICAL.get(body["model"], body["model"])
 
-            # 确保 system prompt 存在（风控必需）
-            if "system" not in upstream_body and _SYSTEM_BLOCKS:
-                upstream_body["system"] = [
-                    {"type": "text", "text": block_text, "cache_control": {"type": "ephemeral"}}
-                    for block_text in _SYSTEM_BLOCKS
-                ]
+            # 风控必需：ZCode 系统块永远在 system 最前，客户端 system 合并在后
+            # （只在「没有 system」时补不够——自带 system 的请求会整条撞 3012）
+            if _SYSTEM_BLOCKS:
+                upstream_body["system"] = _merged_system(upstream_body.get("system"))
 
             # 注入 metadata.user_id（风控必需）
             upstream_body["metadata"] = upstream_body.get("metadata") or {}

@@ -255,6 +255,7 @@ function renderBenefits() {
   renderAntigravityPanel();
   renderKimiPanel();
   renderQoderPanel();
+  renderTraePanel();
   syncQuotaFold();  // 样式与布局就位后按实际高度校准（各面板都已重建完）
 }
 
