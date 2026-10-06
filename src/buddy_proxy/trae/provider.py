@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.checkin import SOURCE_INFERRED, next_daily_reset
+from ..core.metrics import ACCOUNT_META
 from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
 from ..providers.base import BaseProvider
 from .benefits_api import claim_checkin_credits, fetch_checkin_status, fetch_ent_usage
@@ -56,6 +57,23 @@ log = logging.getLogger(__name__)
 #: 且窗口随连续失败次数拉长——累积多次失败后实测 ~15-20s 才恢复）。所以兜底
 #: 链每一跳前都退避 4s：窗口小时内足够恢复，也把失败彼此拉开、避免喂养窗口。
 _REJECT_BACKOFF_S = 4.0
+
+#: 「该模型 chat_v3 流式被上游整体拒绝」的标记 TTL。流式 4001 后短 TTL 内直接
+#: 跳过必败的流式尝试、straight to 非流式缓冲——既省一次注定失败的往返，也避免
+#: 每个流式请求都喂养一次惩罚窗口（实测惩罚窗会随连续失败拉长，02:31 时 ~1s、
+#: 02:42 已漂到 ~5s+）。TTL 过后放一次流式探测，上游恢复流式即自动回到直通。
+_STREAM_REJECT_SKIP_S = 300.0
+_stream_reject_until: dict[str, float] = {}
+
+
+def _stream_rejected_recently(model: str) -> bool:
+    """该模型的流式尝试近期被 4001 拒过（TTL 内）。单调钟，免疫墙钟跳变。"""
+    until = _stream_reject_until.get(model)
+    return until is not None and time.monotonic() < until
+
+
+def _mark_stream_rejected(model: str) -> None:
+    _stream_reject_until[model] = time.monotonic() + _STREAM_REJECT_SKIP_S
 
 #: 「该模型 chat_v3 流式被上游整体拒绝」的标记 TTL。流式 4001 后短 TTL 内直接
 #: 跳过必败的流式尝试、straight to 非流式缓冲——既省一次注定失败的往返，也避免
@@ -163,27 +181,25 @@ class TraeProvider(BaseProvider):
     def models(self) -> Sequence[dict[str, Any]]:
         # 按区域取模型表：CN 与海外是两套几乎不重叠的目录（GLM/Doubao/Qwen vs
         # Claude/GPT/Gemini 系），必须各用各的——见 config.model_tables。
-        model_map, model_tiers, model_credits, supports_images = model_tables(
+        model_map, model_ids, model_credits, supports_images = model_tables(
             self._region.key)
         result = []
         seen = set()
-        for tier, models in model_tiers.items():
-            for m in models:
-                if m in seen:
-                    continue
-                seen.add(m)
-                result.append({
-                    "id": m,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": self.id,
-                    "tier": tier,
-                    "credits": model_credits.get(m),
-                    # 图片能力：与 CodeBuddy 通道同口径（供 /v1/models 的
-                    # input_modalities 判定），漏报会让客户端误剥图片
-                    "images": m in supports_images,
-                    "description": f"Trae {tier} 模型",
-                })
+        for m in model_ids:
+            if m in seen:
+                continue
+            seen.add(m)
+            result.append({
+                "id": m,
+                "object": "model",
+                "created": 0,
+                "owned_by": self.id,
+                "credits": model_credits.get(m),
+                # 图片能力：与 CodeBuddy 通道同口径（供 /v1/models 的
+                # input_modalities 判定），漏报会让客户端误剥图片
+                "images": m in supports_images,
+                "description": "Trae 模型",
+            })
         # 加别名（外部名映射）——倍率与图片能力均跟随映射到的内部模型
         for external, internal in model_map.items():
             if external not in seen:
@@ -767,6 +783,14 @@ class TraeProvider(BaseProvider):
         try:
             for i, acct in enumerate(accounts):
                 set_current_work_account(acct.id)
+                # metrics 账号归属（/ui 请求日志「通道」列的账号后缀）：qoder/kimi/
+                # antigravity 同款——选号即写，failover 后被覆盖为最终账号。holder
+                # 是 codebuddy observability._instrument 放入的 dict，离线/测试等
+                # 未经 _instrument 的场景为 None，直接跳过。PAT 子类不走这里
+                # （pat/chat.py 自己写 meta["account"]）。
+                meta = ACCOUNT_META.get()
+                if meta is not None:
+                    meta["account"] = acct.alias or acct.nickname or acct.id
                 try:
                     return await self._forward_once(
                         body, protocol, original, requested_model, prompt,

@@ -24,12 +24,17 @@
 
 ## Install & run
 
-The proxy is a plain Python package under `src/`. Run from source with [uv](https://docs.astral.sh/uv/):
+The proxy is a plain Python package under `src/`. Install its dependencies with [uv](https://docs.astral.sh/uv/), then use the `buddy` shell command for daily operation:
 
 ```bash
 uv sync
-uv run python -m buddy_proxy --desensitize
+./buddy install            # one-time: install the buddy command on PATH
+buddy start                # start the proxy and open the admin UI
 ```
+
+If you have not installed the wrapper yet, run it from the repository as `./buddy start`.
+Use `buddy login <provider>` for upstream sign-in; `buddy` is a repository script, not a
+Python console command supplied by `uv sync`. `buddy start` uses the repository's configured default providers; do not append provider flags as if `buddy` were the Python module CLI.
 
 The first run creates the state directory `~/.buddy-proxy/` (mode `0700`; override with
 `BUDDY_PROXY_STATE_DIR`). Everything machine-local lives there: `settings.json` (default
@@ -43,22 +48,23 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 `buddy` is the day-to-day entry point: one command starts the proxy and opens the admin UI. It can also register the proxy as a macOS launchd service (auto-start at login, automatic restart on crash).
 
 ```bash
-./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
-./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae(=traeintl global)/zcode/glm/doubao/mimo/qoder(=qoderintl global)/gemini/antigravity/kimi)
+# Before installation, use ./buddy from the repository directory.
+./buddy install            # one-time: put buddy on PATH
+
+# After installation, use buddy from any directory.
+buddy start                # start (if not running) and open http://127.0.0.1:8787/ui
+buddy stop / restart / status / logs
+buddy login [provider]     # upstream login (codebuddy(=workbuddy)/trae(=traeintl global)/zcode/glm/doubao/mimo/qoder(=qoderintl global)/gemini/antigravity/kimi)
                            # trae/qoder accept --region cn|global (accounts differ per region); other providers ignore it
                            # traeintl/qoderintl are login aliases meaning --region global; logging in a global account also enables the
                            # traeintl/qoderintl channels — separate quota cards in the UI
-./buddy ui                 # just open the admin UI (starts the proxy if needed)
-./buddy update             # update to the latest code (git pull -> uv sync -> restart)
-
-# one-time install: put buddy on your PATH so it works from anywhere
-./buddy install            # -> /usr/local/bin (falls back to ~/.local/bin)
+buddy ui                   # just open the admin UI (starts the proxy if needed)
+buddy update               # update to the latest code (git pull -> uv sync -> restart)
 
 # register as a system service (launchd)
-./buddy service install    # start/stop/restart now route through launchctl
-./buddy service status
-./buddy service uninstall
+buddy service install      # start/stop/restart now route through launchctl
+buddy service status
+buddy service uninstall
 ```
 
 - When the service is installed, `buddy start/stop/restart` automatically use `launchctl`; otherwise they fall back to `proxy.sh`'s pid management.
@@ -93,7 +99,7 @@ The script:
 
 ## Models
 
-The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — `/v1/models` always serves it (offline-reliable, no remote dependency). The catalog currently ships **46 models** across two channels, each with its credit multiplier (× base cost). `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
+The static catalog in `src/buddy_proxy/web/models_config.json` contains **46 CodeBuddy and Trae PAT entries** and is served without a remote dependency. Other provider catalogs, including Trae Work, are supplied by their providers. The tables below list CodeBuddy and Trae Work models; the Trae Work domestic catalog is defined in `src/buddy_proxy/trae/config.py`. `GET /v1/models` → `data[].credits` / `models[].credits` exposes the multiplier:
 
 **CodeBuddy channel** (19) — bare model ids, no prefix:
 
@@ -121,33 +127,36 @@ The model catalog is maintained in `src/buddy_proxy/web/models_config.json` — 
 
 > Note on `glm-*`: the bare name resolves to whichever channel claims it first in registration order (**zcode**, which serves `glm-5.3` / `glm-5.3-flash`). For `glm-5.3-flashx` the zcode subscription reports `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限` while **CodeBuddy serves it fine** — so use the explicit `codebuddy/glm-5.3-flashx` prefix for that one. The official **`glm/`** channel (below) shares the same upstream and model table; use its explicit prefix to route a request over the official plan's key.
 
-**Trae PAT channel** (27) — addresses as `traepat/<id>`. A bare id that several channels declare resolves to whichever one claims it first in registration order (the personal `trae` channel, if enabled) — **not** to CodeBuddy, whose `models()` is empty and is therefore only reached by the no-match fallback or an explicit `codebuddy/` prefix. So always use the `traepat/` prefix when you mean this channel. Credit values here are the channel's own scale:
+**Trae Work channel** (15 domestic models; IDs are lowercase). Credit multipliers are the current catalog values; `—` means no multiplier is published:
 
-| id | name | credits |
-|---|---|---|
-| `gpt-6-astra-max` | GPT-6-Astra Max | — |
-| `gpt-5.6-sol-max` / `gpt-5.6-sol` | GPT-5.6-Sol Max / GPT-5.6-Sol | — |
-| `gpt-5.6-luna-max` / `gpt-5.6-terra-max` | GPT-5.6-Luna / Terra Max | — |
-| `gpt-5.5-max` / `gpt-5.4` / `gpt-5.2` | GPT-5.5 Max / 5.4 / 5.2 | — |
-| `gemini-3.1-pro` / `gemini-3-flash` | Gemini-3.1-Pro / Gemini-3-Flash | — |
-| `openrouter-3o-max` / `-2o-max` / `-1o` / `-1` | OpenRouter-3o Max / 2o Max / 1o / 1 | — |
-| `glm-5.3` / `glm-5.3-flash` | glm-5.3 / glm-5.3-flash | x0.40 / x0.06 |
-| `glm-5.2` | glm-5.2 | x0.40 |
-| `qwen3.8-max` / `qwen-3.7-plus` | Qwen3.8-Max / Qwen-3.7-Plus | x1.50 / x0.25 |
-| `kimi-k3` / `kimi-k2.7-code` / `kimi-k2.6` | kimi-k3 / Kimi-K2.7-Code / Kimi-K2.6 | x1.83 / x0.83 / — |
-| `deepseek-v4-pro` / `deepseek-v4-flash` | DeepSeek-V4-Pro / -Flash | x0.72 / x0.08 |
-| `minimax-m3` | MiniMax-M3 | x0.26 |
-| `Doubao-Seed-2.1-Pro` / `Doubao-Seed-Code` | Seed-2.1-Pro / Seed-Code | x0.77 / x0.03 |
+| id | credits |
+|---|---|
+| `glm-5.3` | x0.40 |
+| `glm-5.3-flash` | x0.06 |
+| `glm-5.3-flashx` | x0.31 |
+| `deepseek-v4.1-flash` | x0.08 |
+| `doubao-seed-evolving` | x0.08 |
+| `kimi-k3` | x1.83 |
+| `doubao-seed-2.1-pro` | x0.08 |
+| `deepseek-v4-pro` | x0.72 |
+| `qwen3.8-max` | x1.50 |
+| `doubao-seed-2.1-turbo` | x0.20 |
+| `minimax-m3` | x0.26 |
+| `kimi-k2.6` | — |
+| `glm-5.1` | — |
+| `step-5-preview` | x0.48 |
+| `doubao-seed-code` | x0.06 |
 
-Edit `src/buddy_proxy/web/models_config.json` to add or tweak entries — changes take effect on restart.
+The catalog order mirrors the upstream client's display order. The PAT provider remains available at `traepat/<model>` but its model table is intentionally omitted here. Edit `src/buddy_proxy/web/models_config.json` to add or tweak the static CodeBuddy / Trae PAT entries — changes take effect on restart.
 
-First-time login (opens a browser):
+First-time setup: install the `buddy` wrapper as described above, then start the proxy and sign in as needed:
 
 ```bash
-uv run python -m buddy_proxy --login --desensitize
+buddy start
+buddy login codebuddy
 ```
 
-It listens on `http://127.0.0.1:8787` by default; the admin UI lives at **http://127.0.0.1:8787/ui** — see [Admin UI](#admin-ui-ui) below.
+The proxy listens on `http://127.0.0.1:8787` by default; the admin UI lives at **http://127.0.0.1:8787/ui** — see [Admin UI](#admin-ui-ui) below.
 
 ## Quick check
 
@@ -163,7 +172,7 @@ Open <http://127.0.0.1:8787/ui> in a browser (or just run `buddy start` / `buddy
 - **Default model** — models are grouped by provider; click "Set as default" (设为默认) on any model to make it the proxy default. Client requests **without a `model` field** are routed to it automatically. Settings persist in `~/.buddy-proxy/settings.json` (override via `BUDDY_PROXY_SETTINGS`) and survive restarts; `--default-model zcode/glm-5.3` seeds the initial value (an existing settings file wins).
 - **Provider on/off switch** — each provider group header on the models tab has an "启用" checkbox (default on). Turning a provider off: its calls are rejected with 403 (`provider_disabled`), its models disappear from `/v1/models`, its quota card/panel and alert-banner entries are hidden, and its rows on the model-order tab are greyed out. The groups data stays so the switch can simply be turned back on. `codebuddy` is the default fallback channel and cannot be disabled. Persisted in `settings.json` as `disabled_providers`.
 - **One-click test** — every model row has a "Test" (测试) button that sends a real `hi` upstream and shows latency, token usage, the reply preview, and the actual responding provider/model (for example, `zcode/glm-5.3`, including when model-order routing selects the provider). Non-streaming, `max_tokens=256` — a real, billable upstream call.
-- **Stats & charts** — per-provider/per-model request counts, errors, average latency and token usage: a 14-day stacked daily chart, a top-models bar list, and the latest 50 requests. Each completed request appends one line to `logs/metrics.jsonl`; the tail is reloaded on startup so history survives restarts (30 days kept).
+- **Stats & charts** — per-provider/per-model request counts, errors, average latency and token usage: a 14-day stacked daily chart, a top-models bar list, and the latest 50 requests. Multi-account channels (qoder / kimi / antigravity / trae / traepat) tag each request-log row with the account that actually served it in parentheses (after failover, the one that succeeded). Each completed request appends one line to `logs/metrics.jsonl`; the tail is reloaded on startup so history survives restarts (30 days kept).
 - **Provider health** — login/config status at a glance (CodeBuddy session, zcode key, mimo auth mode, ...).
 - **Auto check-in & calendar** — CodeBuddy / Trae / Qoder expose daily sign-in: tick "Auto check-in" (自动打卡) and the proxy claims them every day at the configured time (default 09:30; if the proxy starts later it catches up immediately). Qoder's Global account uses the same inherited campaign check-in path and appears as its own row when `qoderintl` is registered. The last 35 days are shown as a calendar; "Check in now" (立即打卡) claims manually. Campaigns can be seasonal — when CodeBuddy's is closed the UI shows "no sign-in activity today" and skips it. History is appended to `logs/checkin.jsonl`. ZCode (GLM Coding Plan) / Doubao have no sign-in API; DuMate does (auto-claimed).
 - **Next check-in time per channel** — each row shows when the next claim opens, with a per-second countdown (computed locally — no upstream calls; it stops when you leave the tab or the page is hidden). The three channels **rotate on different schedules**, so the source of the timestamp differs: Qoder's window is `10:00 → 09:59` next day (the upstream returns `startAt`/`endAt`, marked `upstream`), while CodeBuddy and Trae rotate at **local midnight** — neither upstream reports a daily rotation field at all (CodeBuddy only gives the whole campaign season, Trae no time fields whatsoever), so midnight is inferred from the real claim timestamps in `logs/checkin.jsonl`, marked `inferred` and given a dashed border plus an italic timestamp in the UI (a marker on the value itself reads as a typo). While a Qoder claim is still unclaimed the timestamp shown is the **deadline** for this round (miss it and it's gone), not the next round's start. When no next time can be computed (campaign over, season ended, nothing today) it is simply not shown rather than showing a stale timestamp. Once the countdown reaches "即将刷新" the next poll picks up the new state **immediately** — that same moment doubles as the expiry condition for the cached status snapshot (otherwise, with the rotation falling inside the cache's 5-minute TTL, the UI would keep showing "已签到" and a disabled button, and those five minutes are enough for Qoder to lose a whole round). To keep an upstream that keeps returning a long-past value from wedging the cache, this early expiry only applies within a one-hour grace window.
@@ -234,28 +243,29 @@ A built-in provider for Baidu's DuMate (千帆桌面端) desktop app. It connect
 Decrypts the Trae IDE's locally stored login state and talks straight to the underlying models.
 
 ```bash
-uv run python -m buddy_proxy --desensitize --trae
+buddy start
 ```
 
 - **How it works** — decrypts the AES-128-CBC + SHA-512 `tc` blob in the local Trae IDE storage, or reads `TRAE_TOKEN` / `TRAE_USER_ID` from `.env`, then connects to the Trae gateway directly.
+- **Catalog** — lists verified model IDs and any external aliases, ordered as the upstream client displays them.
 - **Native channel** — since 2026-09 all requests (plain chat included) go through the `chat_v3` direct path: with `tools` present it does native function calling (structured `tool_calls` + `role:"tool"` history replay); plain chat gets no server-side agent preset, no suppression instructions and no leak scrubbing. Native requests rejected with `4001` fall back to the text protocol. Since 2026-10-07 the upstream rejects `chat_v3` **streaming** requests outright (same body succeeds non-streaming), so for a streaming client request the proxy first retries the native channel with `stream=false` (buffered upstream, still wrapped as an SSE response) and only falls back to the text protocol (also non-streaming) if that is rejected too. Every fallback hop backs off ~4s first: the upstream penalizes a request fired right after a failed one with another `4001` (the window grows with consecutive failures — seconds to ~20s), and a rejected non-streaming call is quietly retried once after the backoff before the chain moves on. After a rejection the model gets a ~5-minute TTL marker that skips the doomed streaming attempt entirely, so only one probe per TTL window pays the fallback tax (and the penalty window stops being fed). The direct channel also returns real token usage. Set `WB_TRAE_NATIVE_TOOLS=0` to always use the legacy prompt-taught text protocol.
 - **PAT channel** — `traepat/<model>` addresses the underlying-model channel with multi-account failover: each account's `4031` / `4008` / `4011` codes are classified and cooled independently, exhausted channels fail fast with a `429` instead of probing every account, and cooldowns are cleared once real credits are confirmed back.
 - **Quota** — free accounts have daily/weekly caps; when exhausted you get `4011` (today's usage limit reached), forwarded with a friendly Chinese message.
 - **Dependencies** — pure Python standard library (including a zero-dependency AES fallback); no Node.js required.
-- **Overseas edition (`traeintl`, since 2026-10)** — log in with `buddy login trae --region global` and a separate channel spins up automatically (`traeintl/<model>` addressing, its own quota card, no check-in — the overseas upstream has no such endpoint). The model pool is **entirely separate** from CN (10 models probe-verified 2026-10-06): T1 `gpt-6-sol` / `gpt-6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `kimi-k3`, T2 `gpt-5.4` / `gpt-5.2` / `glm-5.2`, T3 `minimax-m3`. Two protocol differences from CN: `messages[].content` must be a content-block array (a plain string gets a 400 deserialization error), and the Work function binding is a per-region table — gpt-5.6 family / `glm-5.2` / `minimax-m3` return `4001` under the default `solo_work_lite` and are routed to `chat_v3` automatically. Models visible in the IDE dropdown but rejected by the agent channel across all three functions (`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`) are not listed. Billing is **request-count + dollar mixed** (Pro plan): "Premium fast requests" 600/month (upstream never reports usage count — shown as "—") plus "Basic usage" in real dollars spent; `is_hide` packs (hidden from the upstream UI) are filtered out.
+- **Overseas edition (`traeintl`, since 2026-10)** — log in with `buddy login trae --region global` and a separate channel spins up automatically (`traeintl/<model>` addressing, its own quota card, no check-in — the overseas upstream has no such endpoint). Its model pool is **entirely separate** from CN (10 models probe-verified 2026-10-06): `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `kimi-k3`, `gpt-5.4`, `gpt-5.2`, `glm-5.2`, `minimax-m3`. Two protocol differences from CN: `messages[].content` must be a content-block array (a plain string gets a 400 deserialization error), and the Work function binding is a per-region table — gpt-5.6 family / `glm-5.2` / `minimax-m3` return `4001` under the default `solo_work_lite` and are routed to `chat_v3` automatically. Models visible in the IDE dropdown but rejected by the agent channel across all three functions (`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`) are not listed. Billing is **request-count + dollar mixed** (Pro plan): "Premium fast requests" 600/month (upstream never reports usage count — shown as "—") plus "Basic usage" in real dollars spent; `is_hide` packs (hidden from the upstream UI) are filtered out.
 
-### `trae-cli`
+### Optional Trae account utility (`trae-cli`)
 
-Installing the package also puts a `trae-cli` command on your PATH for checking/claiming check-in credits, viewing entitlements and testing chat:
+`trae-cli` is **not needed to sign in**. Use `buddy login trae` for Trae Work login: it opens the authorization URL in a browser and completes sign-in through the local callback. `trae-cli` is a separate optional utility for checking/claiming check-in credits, viewing entitlements, and sending a test chat. From the repository, run it through the project environment:
 
 ```bash
-uv run trae-cli status            # check-in / credit status
-uv run trae-cli claim             # claim today's check-in credits
-uv run trae-cli usage             # entitlements / usage (total, used %, pack list)
-uv run trae-cli chat -m glm-5.3 -q "hello"
+trae-cli status            # check-in / credit status
+trae-cli claim             # claim today's check-in credits
+trae-cli usage             # entitlements / usage (total, used %, pack list)
+trae-cli chat -m glm-5.3 -q "hello"
 ```
 
-Auth is loaded automatically: the Work multi-account state dir `~/.buddy-proxy/trae/` (`index.json` + one 0600 cred per account; generated/appended by `python -m buddy_proxy.auth.trae_work_login` or `buddy login trae`, upserted by uid/refresh_token — relogin updates, a new account appends) first. The legacy single-account `~/.buddy-proxy/trae_work.json` (and `~/.ethan/trae_work.json`) is auto-migrated to account #1 on first read. Then the decrypted local Trae IDE `storage.json`. No manual token setup.
+`uv sync` installs this entry point in the project virtualenv; a package install exposes it in that Python environment. Auth is loaded automatically: the Work multi-account state dir `~/.buddy-proxy/trae/` (`index.json` + one 0600 cred per account; generated/appended by `buddy login trae`, upserted by uid/refresh_token — relogin updates, a new account appends) first. The legacy single-account `~/.buddy-proxy/trae_work.json` (and `~/.ethan/trae_work.json`) is auto-migrated to account #1 on first read. Then the decrypted local Trae IDE `storage.json`. No manual token setup.
 
 The domestic Trae Work model catalog exposes lowercase IDs so `model_order` stays consistent across providers (for example, `doubao-seed-evolving` and `deepseek-v4-pro`). Requests are translated to the case-sensitive upstream names (such as `Doubao-Seed-Evolving`) automatically. The old `kimi-k2.7-code`, `glm-5.2`, `deepseek-v4-flash`, `glm-5`, `glm-5-turbo`, and `qwen-3.7-plus` entries have been removed.
 
@@ -268,7 +278,7 @@ Work channel multi-account **primary/backup failover**: account #1 by login orde
 Zhipu **GLM Coding Plan** via its Anthropic-compatible endpoint, passed through directly:
 
 ```bash
-uv run python -m buddy_proxy --desensitize --zcode
+buddy start
 ```
 
 Credentials come from `ZCODE_API_KEY`, `~/.buddy-proxy/zcode_api_key` (override the directory with `BUDDY_PROXY_STATE_DIR`), or `~/.zcode/v2/config.json`. `ZCODE_OPENAI_BASE` overrides the base URL. Models are listed by `/v1/models` and appear under the `zcode/` prefix (e.g. `zcode/glm-5.3`).
@@ -288,7 +298,7 @@ For `zcode-start/glm-5.3-flash`, a successful upstream reply must be an Anthropi
 The same GLM Coding Plan upstream as ZCode, but driven by **your own console-issued API key** instead of the ZCode CLI's credentials:
 
 ```bash
-uv run python -m buddy_proxy --desensitize --glm
+buddy start
 ```
 
 `GlmProvider` subclasses `ZcodeProvider` — passthrough forwarding, SSE pumping, the model table and the quota endpoint are all inherited. The only difference is the credential chain: `GLM_API_KEY` or `~/.buddy-proxy/glm_api_key`, and **never** `~/.zcode` — the two channels' keys belong to independently purchased plans, and cross-reading them would bill one plan for the other's usage (and mix up the quota cards). Registered *after* zcode, so a bare `glm-*` request still lands on zcode when both are enabled; use the explicit `glm/<model>` prefix to pin the official key.
@@ -300,7 +310,7 @@ uv run python -m buddy_proxy --desensitize --glm
 Xiaomi **MiMo** (platform.xiaomimimo.com), exposed under the `mimo/` prefix (`mimo-auto`, `mimo-pro`):
 
 ```bash
-uv run python -m buddy_proxy --desensitize --mimo
+buddy start
 ```
 
 Two auth modes, tried in order:
@@ -309,7 +319,7 @@ Two auth modes, tried in order:
 2. **Xiaomi SSO** — sign in with `buddy login mimo` (credentials land in `~/.buddy-proxy/mimo_account.json`); if you have never logged in, the proxy falls back to reusing the login state of an installed **MiMo Desktop** app. Either way it performs the same two-stage exchange the app does to obtain a short-lived `serviceToken`; tokens are refreshed automatically and a stale one is retried once. No clipboard or cookie export needed.
 
 ```bash
-uv run buddy login mimo     # opens a browser; the CLI picks up the result automatically
+buddy login mimo     # opens a browser; the CLI picks up the result automatically
 ```
 
 #### Sign-in (`buddy login mimo`)
@@ -355,8 +365,8 @@ The admin UI shows a quota panel with two rows: **weekly quota used** (the upstr
 Alibaba's **Qoder** IDE (qoder.com global / qoder.com.cn CN), exposed under the `qoder/` prefix:
 
 ```bash
-uv run python -m buddy_proxy --desensitize --qoder
-uv run buddy login qoder     # device flow (PKCE S256); picks the region interactively
+buddy start
+buddy login qoder     # device flow (PKCE S256); picks the region interactively
 ```
 
 The client talks to Qoder's **COSY-signed** face (`/algo/api/v2/service/pro/sse/agent_chat_generation`) — the same endpoint the official IDE uses, and the only one serving the Qwen3.8 models. Signing is reimplemented in pure Python (no extra dependencies, no vendored wasm): `Authorization: Bearer COSY.<payload>.<sig>` plus the mandatory `Cosy-User` header, with the request body in Qoder's custom-alphabet encoding. Global and CN both need signing — the region only changes *how the token is obtained*.
@@ -370,10 +380,9 @@ The client talks to Qoder's **COSY-signed** face (`/algo/api/v2/service/pro/sse/
 | `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
 | `qoder/kimi-k3` | `kmodel_latest` | |
 | `qoder/deepseek-v4-pro` | `dmodel` | |
-| `qoder/minimax-m2.7` | `mmodel` | 上游显示名即 MiniMax-M2.7 |
 | `qoder/auto` | `auto` | platform-routed tier — the only tier upstream actually has; currently gated off upstream (directory `enable=false`) |
 
-Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.
+Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, MiniMax-M2.7, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.
 
 **The model catalog is per-account and region-scoped** — a full account reports all 14 models while a restricted one may only see the Qwen3.8 pair (risk control; the gate is account-level, and it has been seen to drift). `refresh_models` therefore walks **every account in this provider's region** and publishes the union ("at least one account supports it"); a background loop fetches it on startup and re-fetches every `CACHE_TTL_S` (the catalog lives in memory only — without the warmup a restart used to leave the list at the bundled static fallback, which is how the UI once showed just 2 qoder models). When specific accounts lost specific models, the per-model allowlist lives in `qoder/models.json` (shipped next to the provider): entries `{"id": "glm-5.3", "accounts": ["<uuid>", ...]}` list the account ids (UUIDs, shown on the account card) that **support** the model — a model not listed, or `accounts: "all"`, means every account. Forwarding **skips** accounts that do not support the requested model (no cooldown, no failure — the account is healthy, it just lacks the entitlement) and fails fast with 404 when no account supports it at all, instead of paying a slow read-timeout / in-band 400 per unsupported account. The bundled fallback catalog mirrors the full-account measurements (third-party models restored with measured price factors); the admin UI tags limited models 「部分账号」 (hover for the supporting accounts) and each qoder account card notes its restrictions with the full model list in a hover tooltip. Editing the JSON requires a restart (loaded once, deliberately static).
 
@@ -483,8 +492,8 @@ account really has; packages with `available: false` (expired/invalidated) are s
 Google's **Gemini CLI** free quota (Code Assist for individuals), exposed under the `gemini/` prefix:
 
 ```bash
-uv run buddy login gemini   # Google OAuth (PKCE + local callback)
-uv run python -m buddy_proxy --desensitize --gemini
+buddy login gemini   # Google OAuth (PKCE + local callback)
+buddy start
 curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"gemini/gemini-2.5-flash","messages":[...]}'
 ```
 
@@ -497,7 +506,7 @@ The gateway talks to the same `v1internal:generateContent` endpoint as the real 
 - After `buddy login gemini` succeeds, the credentials are written back into `~/.gemini` in the CLI's own format (`oauth_creds.json`, `settings.json` auth type, `google_accounts.json`) — the `gemini` command has a login state immediately, without running its own login.
 - When `~/.gemini/oauth_creds.json` already holds a usable login, `buddy login gemini` offers to reuse it (default yes, no browser round-trip); expired access tokens are refreshed with the same OAuth client, and onboarding is completed automatically.
 
-Models (free tier, community-measured: ~250 req/day flash / ~100 req/day 2.5-pro, upstream 429s pass through as-is):
+Start the proxy with the configured defaults using `buddy start`. Models (free tier, community-measured: ~250 req/day flash / ~100 req/day 2.5-pro, upstream 429s pass through as-is):
 
 | Model id | Upstream | Notes |
 |---|---|---|
@@ -515,8 +524,8 @@ Free-tier prompts may be reviewed by Google for training (the onboarding respons
 Google's **Antigravity** quota (the official successor to the Gemini CLI free tier; both personal free and Google AI Pro tiers land here), exposed under the `antigravity/` prefix. One OAuth login unlocks **Gemini 3.x, Claude Sonnet/Opus and GPT-OSS** models; quota is two independent pools (a Gemini group and a Claude/GPT group), each with a weekly + 5-hour rolling limit shared by the models inside the group:
 
 ```bash
-uv run buddy login antigravity   # Google OAuth (PKCE + local callback); reuses the local agy CLI login if present
-uv run python -m buddy_proxy --desensitize --antigravity
+buddy login antigravity   # Google OAuth (PKCE + local callback); reuses the local agy CLI login if present
+buddy start
 curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"antigravity/claude-sonnet-4-6","messages":[...]}'
 ```
 

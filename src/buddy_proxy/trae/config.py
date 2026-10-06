@@ -197,16 +197,18 @@ MODEL_MAP: dict[str, str] = {
     # 而 OpenAI 生态习惯全小写；小写请求若不在此映射，会落回默认 CodeBuddy 通道
     # （报错表现为 CodeBuddy 上游的安全审核/路由错误，而非 Trae 响应）
     # 对外模型 ID 一律小写；这里仅把上游要求大小写敏感的 config_name 转回原样。
+    # 反例警示：不是所有上游名都要转大写——step-5-preview 上游只认全小写
+    # （2026-10-07 实测，大写 4001），收录新模型前先 probe 原样名能不能通。
     "deepseek-v4-pro": "DeepSeek-V4-Pro",
     "doubao-seed-evolving": "Doubao-Seed-Evolving",
     "doubao-seed-2.1-pro": "Doubao-Seed-2.1-Pro",
     "doubao-seed-2.1-turbo": "Doubao-Seed-2.1-Turbo",
     "doubao-seed-code": "Doubao-Seed-Code",
-    "step-5-preview": "Step-5-Preview",
+    # 注意 step-5-preview **不在此表**（原样透传）：上游只认全小写，见目录注释。
 }
 
-# 模型分级（T1 最强 -> T4 最弱）。
-# 目录对外 ID 统一小写；大小写敏感的上游 config_name 由 MODEL_MAP 转换。
+# 国内 Trae Work 模型目录，按原目录展示顺序平铺。
+# 对外 ID 统一小写；大小写敏感的上游 config_name 由 MODEL_MAP 转换。
 # 各项均为 2026-09 实测通过值（Work 凭证 + llm_utils_chat 端点）。
 # kimi-k3 需会员 Pro+/Ultra/Express（免费账号 1005）；付费账号实测可用
 # （2026-09-06 chat_v3 出流正常），故收录。
@@ -222,8 +224,8 @@ MODEL_MAP: dict[str, str] = {
 # 两个通道是各自独立的授权，这里能通不代表 zcode 也能通。
 #
 # deepseek-v4.1-flash（2026-09-30 补录）：与 flashx 同一批漏收——源码无映射、
-# 原样透传、上游已放行。归 T1 的理由：新一代旗舰系（原生读图 + 1M ctx，
-# 与 glm-5.3-flash 在 T1 的定位一致；上一代 DeepSeek-V4-Pro 是 T2）。
+# 原样透传、上游已放行。它是新一代视觉模型（原生读图 + 1M ctx，上一代
+# DeepSeek-V4-Pro 不支持图片输入）。
 # **它确实是 V4.1 权重而不是 V4-Flash**（名字被上游接受 ≠ 服务的真是这个
 # 模型，还得靠能力指纹区分——self-report 不可靠，V4-Flash 会自称
 # "deepseek-chat"）。判定试验（各 5 张纯色 1x1 PNG 问颜色）：
@@ -236,13 +238,13 @@ MODEL_MAP: dict[str, str] = {
 # Work 通道（solo_work_lite，即文本协议回落时经 ~/.ethan/trae_work.json
 # 转投的那条）未实测——native chat_v3 已通，用不上；**不要**凭猜测往
 # _WORK_FUNCTION_OVERRIDE 加条目，真失败时让它诚实地 4001 冒出来。
-MODEL_TIERS: dict[str, list[str]] = {
-    "T1": ["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx",
-           "deepseek-v4.1-flash", "doubao-seed-evolving", "kimi-k3"],
-    "T2": ["doubao-seed-2.1-pro", "deepseek-v4-pro", "qwen3.8-max"],
-    "T3": ["doubao-seed-2.1-turbo", "minimax-m3", "kimi-k2.6", "glm-5.1", "step-5-preview"],
-    "T4": ["doubao-seed-code"],
-}
+MODEL_IDS: list[str] = [
+    "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx",
+    "deepseek-v4.1-flash", "doubao-seed-evolving", "kimi-k3",
+    "doubao-seed-2.1-pro", "deepseek-v4-pro", "qwen3.8-max",
+    "doubao-seed-2.1-turbo", "minimax-m3", "kimi-k2.6", "glm-5.1",
+    "step-5-preview", "doubao-seed-code",
+]
 
 # 模型积分倍率：整理自知识库《模型及成本整理-workbuddy-trae-含选用建议》
 # （2026-09-05 版，WorkBuddy 定价截图）。别名（如 deepseek-v4-flash）由
@@ -260,7 +262,13 @@ MODEL_TIERS: dict[str, list[str]] = {
 # 截图为准再跟。面板里 Seed-2.1-Pro 显示为「Seed-2.1-Pro-0915」（带日期
 # 后缀的版本名）；转发 config_name 维持实测通过的 Doubao-Seed-2.1-Pro，
 # 若哪天上游只认带后缀的新名（4001）再实测补映射，**勿凭截图改名**。
-# Step-5-Preview(x0.48)：用户确认上游新上架，同批收录进 T3（倍率同图）。
+# Step-5-Preview(x0.48)：用户确认上游新上架，同批收录（倍率同图）。
+# 2026-10-07 probe 补实测：config_name 是**全小写 step-5-preview**（原样透传、
+# 无 MODEL_MAP 映射）——大写 Step-5-Preview / Step5-Preview / Step-5.5-Preview
+# 全部 4001 "param is invalid"（收录当天只进了倍率表、聊天没实测，首次转发即
+# 4001 就是这么来的）。与 deepseek-v4.1-flash 同款「上游精确匹配小写字面量」，
+# **不得**凭面板显示名加大写映射——那会把能用的名字改死。面板显示的
+# "Step-5-Preview" 只是展示名。
 # 图中另有 Kimi-K2.8-Preview(0.98) / Qwen3.8-Flash(0.08) 未接入 trae 目录——
 # 可用性未实测，**勿只凭价目表收录**（deepseek-v4.1-pro 就是反例：价目之外
 # 的「名字被上游接受」才是收录依据）。
@@ -286,7 +294,7 @@ MODEL_CREDITS: dict[str, str] = {
 # 注意：Trae 目录里的 DeepSeek-V4-Flash / V4-Pro **不支持**图片输入；
 # 带图片能力的是新一代 deepseek-v4.1-flash（2026-09-30 实测收录：5 张纯色
 # 1x1 PNG 问颜色 5/5 全对，且对照组 deepseek-v4-flash 确认读不了图——
-# 判定过程见 MODEL_TIERS 处注释）。注意内部名是**全小写**
+# 判定过程见上方注释）。注意内部名是**全小写**
 # ``deepseek-v4.1-flash``，大写 DeepSeek-V4.1-Flash 会被上游 4001。
 # 若声明与实际不符，会导致 /v1/models 把纯文本模型报成可读图，客户端盲发
 # 图片 → 上游 4001。
@@ -414,13 +422,11 @@ def work_function_override(region_key: str) -> dict[str, str]:
 # 实测通但**用户决定不收录**（2026-10-06：模型太老）：`kimi-k2.7-code` /
 # `kimi-k2.5` / `minimax-m2.7`（三者 chat_v3 均实测出流）。别当漏收补回来。
 MODEL_MAP_INTL: dict[str, str] = {}
-MODEL_TIERS_INTL: dict[str, list[str]] = {
-    "T1": ["gpt-6-sol", "gpt-6-luna",
-           "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-           "kimi-k3"],
-    "T2": ["gpt-5.4", "gpt-5.2", "glm-5.2"],
-    "T3": ["minimax-m3"],
-}
+MODEL_IDS_INTL: list[str] = [
+    "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+    "gpt-5.6-luna", "kimi-k3", "gpt-5.4", "gpt-5.2", "glm-5.2",
+    "minimax-m3",
+]
 # 海外是**次数制**（Premium 快速请求 N 次/月 + Basic 美元额度），没有 CN 的
 # 积分倍率概念——留空，额度展示走 _quota_items 的海外分支（见 provider.py）。
 MODEL_CREDITS_INTL: dict[str, str] = {}
@@ -429,16 +435,15 @@ MODEL_CREDITS_INTL: dict[str, str] = {}
 MODEL_SUPPORTS_IMAGES_INTL: set[str] = set()
 
 def model_tables(region_key: str = "cn"):
-    """该区域的四张模型表（映射 / 分级 / 倍率 / 图片能力）。
+    """该区域的模型表（映射 / 模型目录 / 倍率 / 图片能力）。
 
-    按 key **现取**模块级变量，不在导入时快照成 dict：日后实测补齐海外目录时
-    若是整体重新赋值（``MODEL_TIERS_INTL = {...}``）而不是原地 update，
-    快照会静默指向旧的空表，海外通道就永远报不出模型。
+    按 key **现取**模块级变量，不在导入时快照成列表：目录整体重新赋值时，
+    调用方也会读取到最新配置。
     """
     if (region_key or "cn").strip().lower() == "global":
-        return (MODEL_MAP_INTL, MODEL_TIERS_INTL, MODEL_CREDITS_INTL,
+        return (MODEL_MAP_INTL, MODEL_IDS_INTL, MODEL_CREDITS_INTL,
                 MODEL_SUPPORTS_IMAGES_INTL)
-    return (MODEL_MAP, MODEL_TIERS, MODEL_CREDITS, MODEL_SUPPORTS_IMAGES)
+    return (MODEL_MAP, MODEL_IDS, MODEL_CREDITS, MODEL_SUPPORTS_IMAGES)
 
 
 def map_model_for(region_key: str, requested: str) -> str:
