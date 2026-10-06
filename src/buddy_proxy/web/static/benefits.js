@@ -373,7 +373,12 @@ function quotaItemHtml(it) {
         ? `<span class="mono muted" title="standard 池无主动查询接口，用量仅在账号撞 4031 时被动采集；重置后成功请求不带账单事件，故用量待下次撞码确认">已于 ${fmtReset || '—'} 重置 · 用量待确认</span>`
         : (notice
             ? `<span class="mono" style="color:${noticeColor}">${esc(noticeText)}</span>`
-            : '<span class="mono"></span>'));
+            : (it.total != null
+                // 总额已知、用量未知（如海外 Trae 的次数制：上游不给已用
+                // 次数）——明说「剩 — / N · 已用未知」，别兜底成空 span
+                //（那行只剩 label + 到期日，看不出是没用量还是没渲染出来）
+                ? `<span class="mono"><span style="color:var(--text)">剩 —</span> / ${fmtNum(it.total)} · 已用未知</span>`
+                : '<span class="mono"></span>')));
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
   const bar = hasVolume && hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';

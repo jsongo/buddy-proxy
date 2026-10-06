@@ -359,6 +359,11 @@ _WORK_FUNCTION_OVERRIDE: dict[str, str] = {
 # 不进此表。两区的 function 绑定**互不通用**（CN 的 glm-5.3-flash 在
 # solo_work_lite 4001，海外同名不存在；海外 glm-5.2 需要 chat_v3 而 CN 同名
 # 不需要），所以按区域分表，取用走 work_function_override()。
+#
+# 只服务文本兜底通道（transport._send_trae_work_chat，默认 solo_work_lite）；
+# **native 主通道不分表**（native_tools 固定 function=chat_v3）——2026-10-06
+# 复测 chat_v3 对 gpt-6-sol / kimi-k3 亦 200 出流（gpt-5.6 系本就需要
+# chat_v3），海外已收录模型在 chat_v3 下广谱可用，native 直通无回落。
 _WORK_FUNCTION_OVERRIDE_INTL: dict[str, str] = {
     "gpt-5.6-sol": "chat_v3",
     "gpt-5.6-terra": "chat_v3",
@@ -386,9 +391,6 @@ def work_function_override(region_key: str) -> dict[str, str]:
 # 收录判据与 CN 侧一致：**上游认这个名字并回真实 usage**，必要时再补能力指纹。
 # 表缺某个名字时模型名原样透传，上游不认就诚实地 4001 冒出来，
 # 比猜一个名字糊弄过去好。
-#
-# 待办：用海外账号跑 probe 枚举可用 config_name（同 CN 当初的收录流程），
-# 再填 MODEL_TIERS_INTL / MODEL_CREDITS_INTL / MODEL_SUPPORTS_IMAGES_INTL。
 #
 # 【2026-10-06 已填，probe 实录见下】
 #
