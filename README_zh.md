@@ -1,6 +1,6 @@
-# CodeBuddy Proxy
+# buddy-proxy
 
-> 一个轻量级本地代理，把 CodeBuddy 底层的聊天接口转换成标准的 **OpenAI Chat Completions**、**Responses** 和 **Anthropic Messages** 协议——让你能把 CodeBuddy 模型接到 Codex CLI、Claude Code / CC Switch、OpenCode、Grok、Oh My Pi 以及任意 OpenAI 兼容客户端上。
+> 一个本地多通道模型网关：把各家 AI IDE / 编码客户端（CodeBuddy、Trae、Qoder、Gemini、Antigravity……）的订阅额度转换成标准的 **OpenAI Chat Completions**、**Responses** 和 **Anthropic Messages** 协议——让你把这些模型接到 Codex CLI、Claude Code / CC Switch、OpenCode、Grok、Oh My Pi 以及任意 OpenAI 兼容客户端上，一个端点、按模型名路由。
 
 > **English docs: [README.md](README.md).**
 
@@ -8,6 +8,8 @@
 
 ## 特性
 
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
+- **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
 - **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；配置持久化在 `settings.json` 的 `disabled_providers`。按页签懒加载，首屏不会卡在最慢的日志接口上
 - **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）
@@ -16,8 +18,6 @@
 - **工具调用** — 完整的 function calling 支持，自动过滤无效工具定义；`tool_choice` 在 OpenAI / Anthropic 两种形态之间统一归一化，绝不会以 object 形式发给上游
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
-- **多账号** — 隔离的 session 文件，方便工作 / 个人账号切换
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
 ---
@@ -71,6 +71,42 @@ uv run python -m buddy_proxy --login --desensitize
 - 有系统服务时 `buddy start/stop/restart` 自动转 `launchctl`，否则走 `proxy.sh` 的 pid 管理
 - 环境变量 `PROXY_HOST`（默认 0.0.0.0）、`PROXY_PORT`（默认 8787）、`PROXY_EXTRA_ARGS` 对 `start` 与 `service install` 生效
 - `buddy update` 在安装来源那个仓库里跑 `git pull --ff-only` → `uv sync` → 重启服务。**工作树有未提交改动时它会直接拒绝执行**——不 stash、不 merge、不碰任何在制品，所以写了一半的改动不可能被悄悄覆盖。拒绝时会把「脏在哪」列出来，并按实际情况给对应的处理办法：只要含未跟踪文件就提示 `git stash -u`（普通 `git stash` 收不走未跟踪文件，照做会带着同一个 `??` 再被拦一次），纯已跟踪改动才提示普通 `git stash`。`--ff-only` 保证本地分叉时明确报错、而不是替你造一个意外的 merge commit——报错信息里会引 git 自己的原话（`Not possible to fast-forward` 对应本地分叉，`Could not read from remote` 对应连不上远端），好让你一眼分清是哪种。`uv sync` 失败则保留服务继续运行，不会用坏掉的依赖去重启。已经是最新版本时跑它也无害：只是重新同步依赖并重启一遍。
+
+### 用 `proxy.sh` 后台管理
+
+`buddy` 内部即调用 `proxy.sh`；想手动精细控制时可以直接用它：
+
+```bash
+./proxy.sh start          # 后台启动，立刻返回
+./proxy.sh stop           # 停止
+./proxy.sh restart        # 重启
+./proxy.sh status         # 显示 PID 和监听地址
+./proxy.sh logs           # tail -F 日志
+./proxy.sh ui             # 确保在跑并打开管理页
+
+# 自定义 host / port / 额外参数
+./proxy.sh start -p 9000 -H 0.0.0.0
+PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh start
+```
+
+脚本行为：
+- 自动检测 `.venv/bin/python`（优先使用项目 venv）
+- 用 `nohup ... &` 启动，`start` 命令**立即返回**，不会阻塞终端
+- PID 写到 `logs/proxy.pid`，启动输出写到 `logs/proxy.sh.log`；应用日志按天滚动（`logs/proxy.log` 与 `logs/buddy-proxy.jsonl`，保留 30 天）
+- 停止用 `kill` 优雅退出；10s 内未退出会 fallback 到 `kill -9`
+
+## 通道（Providers）
+
+每个通道都是可选的：有什么订阅就启用什么，`buddy login <provider>` 登录，`/v1/models` 自动合并各家目录。多个通道可同时在线；多个通道都声明的裸模型名按注册顺序解析——要钉死某一家就用显式 `<provider>/` 前缀。
+
+### CodeBuddy（默认通道）
+
+腾讯 CodeBuddy / WorkBuddy 订阅，走 IDE 插件认证（浏览器 OAuth，`buddy login codebuddy`，别名 `workbuddy`）。能力：
+
+- **多账号 failover** —— 账号存于 `~/.buddy-proxy/codebuddy/`（`index.json` + 每账号一份凭据文件，0600）。同账号重登只更新凭据、failover 顺位不变；新账号追加到末位。撞 401（凭据失效）/ 429（额度耗尽，如 code 14018）时该账号进入冷却（60s / 5min，尊重 `Retry-After`）并自动切换下一个账号——单账号额度耗尽不再拖垮整个通道。历史的 `~/.codebuddy-session.json` 首次触达时自动迁移为账号 #1。
+- **每日签到** —— 逐账号活动签到（连签积分），管理页聚合展示、逐账号明细；领取时把每个可领的账号都领一遍。
+- **积分** —— 逐账号资源包汇总（管理页按 `CodeBuddy #N · …` 分组），另有按请求粒度的消耗流水（`/ui/api/codebuddy/usage-records`）。
+- 账号管理：`GET /ui/api/codebuddy/accounts` 及 `order` / `rename` / `delete` 端点；管理面板支持逐账号 ▲▼ 顺位、✎ 改名、✕ 删除。
 
 ### 豆包 Provider（可选）
 
@@ -170,6 +206,16 @@ uv run python -m buddy_proxy --desensitize --trae
 - **依赖**：纯 Python 标准库（含零依赖 AES 兜底实现），不需要 Node.js
 - **注意**：免费账号有日/周调用额度，耗尽时报 `4011`（今日用量已达上限），
   错误会以友好中文文案透传
+- **海外版（`traeintl`，2026-10 起）**：`buddy login trae --region global` 登录海外账号后
+  自动启用独立通道（`traeintl/<model>` 寻址、额度卡单独一张、无签到——海外上游没有签到端点）。
+  模型池与 CN 是**两套**（2026-10-06 probe 实测收录 10 个）：T1 `gpt-6-sol` / `gpt-6-luna` /
+  `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `kimi-k3`，T2 `gpt-5.4` / `gpt-5.2` /
+  `glm-5.2`，T3 `minimax-m3`。协议与 CN 两处不同：`messages[].content` 必须是内容块数组
+  （纯字符串上游 400 反序列化错）；function 绑定按区分表——gpt-5.6 系 / `glm-5.2` /
+  `minimax-m3` 在默认 `solo_work_lite` 下 4001，自动改走 `chat_v3`。IDE 下拉里有但实测
+  agent 通道全 4001 的（`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`）
+  不收录。额度是**次数制 + 美元混量纲**（Pro 包）：「Premium 快速请求」600 次/月
+  （上游不给已用次数，显示「—」）+「Basic 用量」$ 美元真实已用；`is_hide` 的垃圾包自动过滤
 
 #### Trae 账号工具（`trae-cli`）
 
@@ -237,29 +283,6 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
 > 排障提示：`30012` 是「**未开通会员**」而不是 token 失效——遇到它本 provider 不会去重换票。
 > 管理页额度面板的 `percent` 已由上游的「剩余」换算成「已用」，且管理页显示的
 > 「已用 N%」用的是 `100 - 剩余`。
-
-### 用 `proxy.sh` 后台管理
-
-`buddy` 内部即调用 `proxy.sh`；想手动精细控制时可以直接用它：
-
-```bash
-./proxy.sh start          # 后台启动，立刻返回
-./proxy.sh stop           # 停止
-./proxy.sh restart        # 重启
-./proxy.sh status         # 显示 PID 和监听地址
-./proxy.sh logs           # tail -F 日志
-./proxy.sh ui             # 确保在跑并打开管理页
-
-# 自定义 host / port / 额外参数
-./proxy.sh start -p 9000 -H 0.0.0.0
-PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh start
-```
-
-脚本行为：
-- 自动检测 `.venv/bin/python`（优先使用项目 venv）
-- 用 `nohup ... &` 启动，`start` 命令**立即返回**，不会阻塞终端
-- PID 写到 `logs/proxy.pid`，启动输出写到 `logs/proxy.sh.log`；应用日志按天滚动（`logs/proxy.log` 与 `logs/buddy-proxy.jsonl`，保留 30 天）
-- 停止用 `kill` 优雅退出；10s 内未退出会 fallback 到 `kill -9`
 
 ## 模型列表
 
@@ -648,6 +671,7 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 | `POST /v1/responses` | Codex CLI Responses 协议适配 |
 | `POST /v1/messages` | Claude Code Anthropic Messages 协议适配 |
 | `forward_chat(body, "openai"/"codex"/"anthropic")` | 按协议转换 + 按模型路由到对应 provider |
+| `GET /ui/api/codebuddy/accounts` | 多账号状态（纯本地不触网，不含秘密）；`order`/`rename`/`delete` 管理顺位、别名、删除 |
 | session / 多账号 | 隔离的 session 文件，`--session-file` 指定 |
 
 ### 2. 豆包 Provider（`doubao_provider.py` + `doubao/cdp_client.py`）
@@ -682,6 +706,8 @@ Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期�
 | PAT 通道 | `pat_provider` + `pat/`（`cooldown`/`store`/`config`/`models`/`keeper`） | `traepat/<模型>` 底层模型通道：多账号 failover、撞码分级冷却（首次 5 分钟换号，反复撞才升级到次日）、4031 通道级快速失败（`429`，5 分钟后自动重探）、standard 池用量被动采集 |
 | 签到 | `benefits_api.fetch_checkin_status()` / `claim_checkin_credits()` | 查询/领取签到积分（`/trae/api/v2/ug/checkin_credits/*`） |
 | 权益 | `benefits_api.fetch_ent_usage()` | 查询积分总额 / 已用量 / 权益包 |
+| 双区域 | `config.TRAE_REGIONS` / `model_tables(region)` / `work_function_override(region)` | CN/global 两套取址（chat 网关 / UG 域 / 额度版本 v2 vs v1）、两套模型目录与按区分表的 function 绑定（海外 `messages[].content` 需内容块数组，见 `transport._intl_content_blocks`） |
+| 海外额度 | `provider._quota_items` dollar 分支 | 次数制 + 美元混量纲分行展示：Premium 快速请求（已用次数上游不给 → 「—」）与 Basic 用量（`usage.basic_usage_amount` 真实已用）各一行；`is_hide` 的 UI 不展示包过滤 |
 | 模型 | `config._map_model()` | T1-T5 分级 + 外部名别名 |
 | 错误 | `sse._trae_error_text()` | 14+ 个官方错误码 → 中文文案（4011 今日额度 / 1005 plan 权益不足等） |
 | 账号工具 | `cli`（`trae-cli status` / `claim` / `usage` / `chat`） | 命令行查询/领取签到、看权益、发测试对话 |

@@ -1,14 +1,27 @@
 """CodeBuddy 默认上游 provider：认证、签到/额度/流水查询与转发分派。
 
 复杂转发逻辑（SSE 解析、DSML、协议转换）在 ``pipeline``；本模块的
-``CodeBuddyProvider.forward`` 只做「认证 + 构造上游请求 + 分派流式/非流式」。
+``CodeBuddyProvider.forward`` 做「多账号 failover + 认证 + 构造上游请求 +
+分派流式/非流式」。
+
+**多账号**（照 qoder/trae 同款，动机 2026-10-06：单账号额度耗尽 429 code 14018
+即整通道挂）：``credentials`` 存每账号凭据、``failover`` 管冷却；forward 按
+failover 顺位逐账号尝试，账号级错误（401/429）冷却当前号换下一个。流式场景
+靠**首事件闸门**（见 ``_forward_once``）：``stream_upstream`` 撞非 200 会把
+错误帧当首个 yield 吐出来再 return——下游视角是 200 的 SSE 假成功，必须在
+吐给客户端之前把错误帧还原成 HTTPException 才能安全换号。
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import re
 import time
 from typing import Any
 
+from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.providers.base import BaseProvider
@@ -16,12 +29,23 @@ from buddy_proxy.core.checkin import (
     SOURCE_INFERRED,
     SOURCE_UPSTREAM,
     daily_reset_within_season,
+    next_daily_reset,
     parse_upstream_datetime,
 )
+from buddy_proxy.core.metrics import ACCOUNT_META
 from buddy_proxy.core.state import diagnostic
 
+from . import credentials as creds
+from . import failover
 from .observability import body_summary
 from .pipeline import desensitize_body
+
+log = logging.getLogger(__name__)
+
+#: 多账号签到领取的账号间强制间隔（照 trae 同款）：上游活动接口对短窗口连打
+#: 有频控（trae 实测零间隔必中「参与用户太多」），多账号逐个领时从第 2 个
+#: 账号起先歇一拍，节奏像「人在操作」。
+_CHECKIN_THROTTLE_S = 4.0
 
 
 def get_state():
@@ -86,6 +110,74 @@ def _normalize_tool_choice(tool_choice: Any) -> Any:
     return "auto"
 
 
+def _is_account_error(e: HTTPException) -> bool:
+    """该 HTTPException 是否「换下一个账号可能好转」。
+
+    401 = 凭据失效（换号有意义）；429 = 额度/限流（如 code 14018 单账号额度
+    耗尽，换号有意义）。502/504 是通道级（所有账号同网关，换号无意义）；
+    其余业务 4xx（模型名不合法等）换号也无意义。
+    """
+    return e.status_code in (401, 429)
+
+
+def _error_frame_to_exception(frame: bytes, protocol: str) -> HTTPException | None:
+    """首个 yield 是否上游错误帧（``stream_upstream`` 非 200 时吐单个错误块
+    再 return）；是则还原成带状态码的 HTTPException（failover 循环据此换号）。
+
+    错误帧形状（pipeline.stream_upstream L203-226）：
+    - anthropic: ``event: error\\ndata: {"type":"error","error":{"type":
+      "api_error","message":"Upstream API error (HTTP 429): …"}}`` ——**没有**
+      数字 code 字段，状态码只在 message 的 ``(HTTP nnn)`` 里，从那儿抠；
+    - openai: ``data: {"error":{…,"code":429,…}}`` ——code 就是状态码。
+    """
+    try:
+        text = bytes(frame).decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 — 解不出来的不是我们的错误帧
+        return None
+    data_part = ""
+    if "data:" in text:
+        data_part = text.split("data:", 1)[1].strip()
+    try:
+        payload = json.loads(data_part) if data_part else None
+    except json.JSONDecodeError:
+        payload = None
+
+    if protocol == "anthropic":
+        if not text.startswith("event: error"):
+            return None
+        msg = ""
+        if isinstance(payload, dict):
+            err = payload.get("error") or {}
+            if isinstance(err, dict):
+                msg = str(err.get("message") or "")
+        m = re.search(r"HTTP (\d{3})", msg or text)
+        try:
+            status = int(m.group(1)) if m else 502
+        except ValueError:
+            status = 502
+        return HTTPException(
+            status_code=status,
+            detail={"error": {"message": msg or text[:200],
+                              "type": "upstream_error"}})
+
+    # openai / responses：错误块是 {"error": {...}} JSON
+    if not isinstance(payload, dict):
+        return None
+    err = payload.get("error")
+    if not isinstance(err, dict) or not err:
+        return None
+    code = err.get("code")
+    try:
+        status = int(code) if code is not None else 502
+    except (TypeError, ValueError):
+        status = 502
+    return HTTPException(
+        status_code=status,
+        detail={"error": {"message": str(err.get("message") or "upstream error"),
+                          "type": "upstream_error",
+                          "details": str(err.get("details") or "")}})
+
+
 class CodeBuddyProvider(BaseProvider):
     """默认的 CodeBuddy 上游，实现 BaseProvider 接口。
 
@@ -115,10 +207,15 @@ class CodeBuddyProvider(BaseProvider):
     # checkin-status 是另一个（web/cookie）变体，Bearer 调用只会返回全空数据。
     # 签到活动有档期（如「开学季」9/1-9/15），active=false 表示当前档期未开。
 
-    def checkin_status(self) -> dict[str, Any] | None:
-        state = get_state()
-        state.ensure_auth()
-        payload = state.client.api_post("/v2/billing/meter/checkin-activity-status")
+    #: 额度/签到分组标签的通道名（``CodeBuddy #N · ``）。
+    _quota_tag = "CodeBuddy"
+
+    def _accounts_for_benefits(self) -> list[Any]:
+        """签到/额度遍历的账号列表（按 failover 顺位，剔除冷却中的）。"""
+        return failover.available_accounts()
+
+    def _checkin_status_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """把上游 checkin-activity-status envelope 收拢成统一签到状态。"""
         if payload.get("code") not in (0, None):
             raise RuntimeError(payload.get("msg") or f"code={payload.get('code')}")
         data = payload.get("data") or {}
@@ -153,29 +250,212 @@ class CodeBuddyProvider(BaseProvider):
                 status["next_ts_source"] = SOURCE_UPSTREAM
         return status
 
+    def _checkin_status_for_account(
+            self, acct: Any, *, index: int, multi: bool) -> tuple[dict[str, Any] | None, str]:
+        """单账号签到状态查询。返回 ``(status, error)``：查询失败时 status 为
+        None、error 带截断后的原因（进 per-account 明细的 title，光「查询失败」
+        说不清是 token 过期还是网络问题）。"""
+        try:
+            payload = creds.api_post_as(acct.id, "/v2/billing/meter/checkin-activity-status")
+            st = self._checkin_status_from_payload(payload)
+        except Exception as e:  # noqa: BLE001 — 单账号失败不该让整页 500
+            log.warning("codebuddy 签到状态查询失败（%s）: %s", acct.id, e)
+            return None, str(e)[:120]
+        if multi:
+            st["message"] = f"{self._quota_tag} #{index} · {st.get('message') or ''}".strip()
+        return st, ""
+
+    def checkin_status(self) -> dict[str, Any] | None:
+        """查今日签到状态。多账号**都查**，聚合：任一账号可领→可领；
+        全部已签→已签；个别账号失败只在日志记、不阻塞整页（与 trae/qoder 一致）。"""
+        accounts = self._accounts_for_benefits()
+        if not accounts:
+            return {"checked_in": False, "claimable": False, "inactive": False,
+                    "message": f"所有账号均在冷却中（{failover.cooldown_report()}）；稍后自动恢复"}
+        if len(accounts) == 1:
+            # 单账号直通：不带 accounts 明细（徽标本身就是它的状态，逐账号
+            # 展开纯属噪音；与 trae 单账号分支对称）
+            st, err = self._checkin_status_for_account(accounts[0], index=1, multi=False)
+            if st is None:
+                return {"checked_in": False, "claimable": False,
+                        "message": err or "查询失败"}
+            return st
+
+        # 多账号：逐账号查询（串行即可——管理页轮询频率低，没必要开线程池），
+        # 聚合任一可领 / 全部已签；per-account 明细放 ``accounts``（管理页签到卡
+        # 逐账号渲染「#N 已签 / 可领 / 查询失败」）。
+        claimable_accts: list[str] = []
+        signed_accts: list[str] = []
+        failed_accts: list[str] = []
+        acct_details: list[dict[str, Any]] = []
+        enabled_any = False
+        # 展示序号一律取 failover.display_index()（与 /ui 账号快照同源）。
+        # 不能用 enumerate 的位置：accounts 是「未冷却」子集，位次与快照对不上，
+        # 前端会把签到行对到别的账号上（✎ 改名改错人）。
+        didx = failover.display_index()
+        for pos, acct in enumerate(accounts, 1):
+            i = didx.get(acct.id, pos)
+            # 显示名 alias 优先（管理页 ✎ 改的名）；id 一并下发——明细行的
+            # ✎ 改名按钮要拿它定位账号。
+            name = acct.alias or acct.nickname or acct.uid or acct.id
+            st, err = self._checkin_status_for_account(acct, index=i, multi=True)
+            if st is None:
+                failed_accts.append(f"#{i}")
+                acct_details.append({"index": i, "id": acct.id, "name": name,
+                                     "error": err or "查询失败"})
+                continue
+            if not st.get("inactive"):
+                enabled_any = True
+            if st.get("claimable"):
+                claimable_accts.append(f"#{i}")
+            elif st.get("checked_in"):
+                signed_accts.append(f"#{i}")
+            acct_details.append({
+                "index": i,
+                "id": acct.id,
+                "name": name,
+                "checked_in": bool(st.get("checked_in")),
+                "claimable": bool(st.get("claimable")),
+                "inactive": bool(st.get("inactive")),
+            })
+        status: dict[str, Any] = {
+            "checked_in": bool(signed_accts) and not claimable_accts,
+            "claimable": bool(claimable_accts),
+            "inactive": not enabled_any and not claimable_accts and not signed_accts,
+            "message": "",
+            "accounts": acct_details,
+        }
+        if claimable_accts:
+            status["message"] = f"账号 {'、'.join(claimable_accts)} 可领"
+        elif signed_accts:
+            status["message"] = f"账号 {'、'.join(signed_accts)} 已签"
+        if failed_accts:
+            status["message"] = (status["message"] + " " if status["message"] else "") + \
+                f"（{len(failed_accts)}/{len(accounts)} 个账号查询失败）"
+        if enabled_any:
+            status["next_ts"] = next_daily_reset()
+            status["next_ts_source"] = SOURCE_INFERRED
+        return status
+
     def checkin_claim(self) -> dict[str, Any] | None:
-        state = get_state()
-        state.ensure_auth()
-        payload = state.client.api_post("/v2/billing/meter/daily-checkin")
-        if payload.get("code") not in (0, None):
-            raise RuntimeError(payload.get("msg") or f"code={payload.get('code')}")
-        data = payload.get("data") or {}
+        """领取今日签到积分。多账号**每个都领**（用户决策），逐个尝试、
+        各自容错：单个账号失败（网络/token/已领过）不阻塞其它账号。汇总
+        ``extra_credits`` 为各账号实领之和，``message`` 据实说明每个账号结果。
+        多账号之间强制间隔 ``_CHECKIN_THROTTLE_S``（上游活动接口对短窗口连打
+        有频控，照 trae 同款）。本方法经 benefits 层 ``asyncio.to_thread`` 跑，
+        sleep 不阻塞事件循环。
+        """
+        accounts = self._accounts_for_benefits()
+        if not accounts:
+            raise RuntimeError(f"所有账号均在冷却中（{failover.cooldown_report()}）；稍后再试")
+        if len(accounts) == 1:
+            # 单账号直通：不带 accounts 明细（与 checkin_status 的单账号分支对称）
+            acct = accounts[0]
+            payload = creds.api_post_as(acct.id, "/v2/billing/meter/daily-checkin")
+            if payload.get("code") not in (0, None):
+                raise RuntimeError(payload.get("msg") or f"code={payload.get('code')}")
+            data = payload.get("data") or {}
+            return {
+                "checked_in": True,
+                "extra_credits": data.get("credit") or data.get("today_credit") or data.get("daily_credit"),
+                "streak_days": data.get("streak_days") or 0,
+                "message": payload.get("msg", ""),
+            }
+
+        didx = failover.display_index()
+        total_credits: float = 0.0
+        any_claimed = False
+        messages: list[str] = []
+        acct_details: list[dict[str, Any]] = []
+        for pos, acct in enumerate(accounts, 1):
+            i = didx.get(acct.id, pos)
+            name = acct.alias or acct.nickname or acct.uid or acct.id
+            tag = f"#{i}"
+            # 串行节流：从第 2 个账号起先等一段再打（照 trae 同款——上游活动
+            # 接口对短窗口连打有频控）。异常路径同样等：哪怕上一个账号失败，
+            # 下一个也照常歇一拍，节奏一致才像「人在操作」。
+            if pos > 1:
+                time.sleep(_CHECKIN_THROTTLE_S)
+            try:
+                payload = creds.api_post_as(acct.id, "/v2/billing/meter/daily-checkin")
+            except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号
+                log.warning("codebuddy 签到领取失败（%s）: %s", acct.id, e)
+                messages.append(f"{tag} 失败：{str(e)[:60]}")
+                acct_details.append({"index": i, "id": acct.id, "name": name,
+                                     "ok": False, "message": str(e)[:60]})
+                continue
+            if payload.get("code") not in (0, None):
+                msg = str(payload.get("msg") or f"code={payload.get('code')}")[:60]
+                messages.append(f"{tag} 失败：{msg}")
+                acct_details.append({"index": i, "id": acct.id, "name": name,
+                                     "ok": False, "message": msg})
+                continue
+            data = payload.get("data") or {}
+            granted = (data.get("credit") or data.get("today_credit")
+                       or data.get("daily_credit") or 0)
+            try:
+                total_credits += float(granted)
+            except (TypeError, ValueError):
+                pass
+            any_claimed = True
+            messages.append(f"{tag} 已领 {granted or ''}".strip())
+            acct_details.append({"index": i, "id": acct.id, "name": name,
+                                 "ok": True, "credits": granted,
+                                 "message": str(payload.get("msg") or "")[:60]})
         return {
-            "checked_in": True,
-            "extra_credits": data.get("credit") or data.get("today_credit") or data.get("daily_credit"),
-            "streak_days": data.get("streak_days") or 0,
-            "message": payload.get("msg", ""),
+            "checked_in": any_claimed,
+            "extra_credits": total_credits if any_claimed else None,
+            "message": "；".join(messages) or "没有可领取的账号",
+            "accounts": acct_details,
         }
 
     def quota(self) -> dict[str, Any] | None:
         """查询积分资源包汇总（get-user-resource-summary）：每个包给周期额度，
-        单位 credits；返回「剩余合计 + 各包明细」。
+        单位 credits；多账号逐个查，各账号条目带 ``CodeBuddy #N · `` 前缀供前端
+        分组；个别账号失败插 ``query_failed`` 说明条（benefits 层认这个标记走
+        短缓存）。
 
         ⚠️ 资源汇总走无前缀路径（/v2 下反而 404），与签到接口的前缀规则相反。
         """
-        state = get_state()
-        state.ensure_auth()
-        payload = state.client.api_post("/billing/meter/get-user-resource-summary")
+        accounts = self._accounts_for_benefits()
+        if not accounts:
+            log.warning("codebuddy 额度查询失败: 所有账号均在冷却中")
+            return None
+        multi = len(accounts) > 1
+        # 展示序号取 failover.display_index()（与 /ui 账号快照同源，理由同
+        # checkin_status：额度块按序号对上账号后 ✕ 删除/▲▼ 顺位拿到的才是
+        # 同一个账号，删号是不可逆的）。
+        didx = failover.display_index()
+        items: list[dict[str, Any]] = []
+        failed: list[str] = []
+        level = None
+        for pos, acct in enumerate(accounts, 1):
+            i = didx.get(acct.id, pos)
+            try:
+                packs, lv = self._quota_one_account(acct)
+            except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞整页
+                log.warning("codebuddy 额度查询失败（%s）: %s", acct.id, e)
+                failed.append(f"#{i}")
+                continue
+            if level is None:
+                level = lv
+            prefix = f"{self._quota_tag} #{i} · " if multi else ""
+            items.extend({"label": f"{prefix}{p['label']}", **{k: v for k, v in p.items() if k != "label"}}
+                         for p in packs)
+        if failed:
+            items.insert(0, {
+                "label": "CodeBuddy 额度查询失败",
+                "used": None, "total": None,
+                "remaining": f"{len(failed)}/{len(accounts)} 个账号取不到额度"
+                             f"（{'、'.join(failed)}）",
+                "percent": None, "reset_ts": None,
+                "query_failed": True,
+            })
+        return {"items": items, "sum_items": True, "level": level}
+
+    def _quota_one_account(self, acct: Any) -> tuple[list[dict[str, Any]], str | None]:
+        """单账号额度查询：``(packs, level)``。"""
+        payload = creds.api_post_as(acct.id, "/billing/meter/get-user-resource-summary")
         if payload.get("code") not in (0, None):
             raise RuntimeError(payload.get("msg") or f"code={payload.get('code')}")
         data = payload.get("data") or {}
@@ -225,8 +505,15 @@ class CodeBuddyProvider(BaseProvider):
         # 已能用 ``sum_items`` 把各包加总出来），多铺一行明细反而与其它通道
         # 不一致（用户 2026-10-03：「其它的都没有」）。声明 sum_items 让前端
         # 自己合计，明细就只剩真正的各资源包。
-        return {"items": packs, "sum_items": True,
-                "level": "pro" if data.get("IsPaidUser") else "free"}
+        return packs, ("pro" if data.get("IsPaidUser") else "free")
+
+    def quota_epoch(self) -> str:
+        """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。"""
+        try:
+            accts = creds.list_accounts()
+        except Exception:  # noqa: BLE001 - 拿不到就退回常量键
+            return "unknown"
+        return ",".join(f"{a.id}#{a.priority}" for a in accts) or "empty"
 
     # ---- 计费流水（WorkBuddy web「使用记录」同源接口，2026-09-06 实测） ----
 
@@ -236,6 +523,7 @@ class CodeBuddyProvider(BaseProvider):
         end: str = "",
         page_num: int = 1,
         page_size: int = 20,
+        account_id: str = "",
     ) -> dict[str, Any]:
         """按请求粒度的积分消耗流水（/billing/meter/get-user-request-usage）。
 
@@ -247,11 +535,17 @@ class CodeBuddyProvider(BaseProvider):
         requestTime、input（prompt 原文/截断）、requestId（crb-…）。
         start/end 格式 "YYYY-MM-DD HH:MM:SS"，缺省为最近 7 天。
 
+        多账号：``account_id`` 给出时查指定账号；缺省查 failover 首账号
+        （暂无 UI 消费方，管理接口 curl 即可查，暂不做跨账号聚合）。
+
         用途预留：管理页消费流水视图；或按 requestTime/model 把流水 credit
         回填 metrics，对上游 usage 缺失实扣的请求做对账。
         """
-        state = get_state()
-        state.ensure_auth()
+        if not account_id:
+            accounts = creds.list_accounts()
+            if not accounts:
+                raise RuntimeError("codebuddy 没有任何账号（先 `buddy login codebuddy`）")
+            account_id = accounts[0].id
         if not end:
             end = time.strftime("%Y-%m-%d %H:%M:%S")
         if not start:
@@ -263,7 +557,7 @@ class CodeBuddyProvider(BaseProvider):
             "pageNum": max(1, int(page_num)),
             "pageSize": min(100, max(1, int(page_size))),
         }
-        payload = state.client.api_post("/billing/meter/get-user-request-usage", body)
+        payload = creds.api_post_as(account_id, "/billing/meter/get-user-request-usage", body)
         if payload.get("code") not in (0, None):
             raise RuntimeError(payload.get("msg") or f"code={payload.get('code')}")
         data = payload.get("data") or {}
@@ -287,9 +581,6 @@ class CodeBuddyProvider(BaseProvider):
         protocol: str,
         original: dict[str, Any] | None = None,
     ) -> StreamingResponse | JSONResponse:
-        state = get_state()
-        state.ensure_auth()
-
         diagnostic("upstream_request", protocol=protocol, **body_summary(body))
 
         stream = bool(body.get("stream"))
@@ -299,7 +590,8 @@ class CodeBuddyProvider(BaseProvider):
         if "tool_choice" in upstream_body:
             upstream_body["tool_choice"] = _normalize_tool_choice(upstream_body["tool_choice"])
 
-        # 应用脱敏处理
+        # 应用脱敏处理（脱敏开关是全局 state 的，与账号无关，循环外做一次）
+        state = get_state()
         if state.enable_desensitize:
             upstream_body = desensitize_body(upstream_body, compact_harness=True)
 
@@ -307,19 +599,86 @@ class CodeBuddyProvider(BaseProvider):
         upstream_body["stream"] = True
         upstream_body.setdefault("stream_options", {"include_usage": True})
 
-        url = state.client.endpoint + "/v2/chat/completions"
+        # ---- 多账号 failover：按顺位试可用账号，账号级错误冷却换号 ----
+        accounts = failover.available_accounts()
+        if not accounts:
+            raise HTTPException(
+                status_code=429,
+                detail={"error": {
+                    "message": (f"codebuddy 所有账号均在冷却中：{failover.cooldown_report()}"
+                                "；额度冷却到点自动恢复"),
+                    "type": "rate_limit_error"}})
+        last_exc: BaseException | None = None
+        try:
+            for i, acct in enumerate(accounts):
+                try:
+                    return await self._forward_once(
+                        upstream_body, protocol, original, acct.id, stream)
+                except HTTPException as e:
+                    last_exc = e
+                    # 账号级错误（401 凭据失效 / 429 额度，如 code 14018）且还有
+                    # 下一个账号：冷却换号；其余错误（502 通道级/业务 4xx）换号
+                    # 无意义，直接透传。
+                    if _is_account_error(e) and i < len(accounts) - 1:
+                        failover.mark_cooldown(
+                            acct.id, quota=e.status_code == 429,
+                            reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
+                        continue
+                    raise
+        except HTTPException as e:
+            # 走到这是「最后一个账号也失败」或「非账号级错误透传」。anthropic 协议
+            # 的错误体用标准形状（Claude Code 等 SDK 靠它渲染错误）；openai 协议
+            # 维持「抛 HTTPException → 外层 exception handler 转 JSON」不变。
+            if protocol == "anthropic":
+                return JSONResponse(
+                    status_code=e.status_code,
+                    content={
+                        "type": "error",
+                        "error": {"type": "api_error", "message": str(e.detail)},
+                    },
+                )
+            raise
+        # 全部账号失败（循环正常跑完不该到这，兜底）
+        raise last_exc or HTTPException(status_code=429, detail=failover.cooldown_report())
+
+    async def _forward_once(
+        self,
+        upstream_body: dict[str, Any],
+        protocol: str,
+        original: dict[str, Any] | None,
+        account_id: str,
+        stream: bool,
+    ) -> StreamingResponse | JSONResponse:
+        """单账号实际转发（forward 的 failover 循环体）。"""
+        # token 与 cred 同源拿取（headers 需要 uid/enterprise_id/machine_id 等
+        # 账号级身份）；刷新是同步 httpx，放线程池避免阻塞事件循环。
+        try:
+            token, cred = await asyncio.to_thread(creds.ensure_account_token, account_id)
+        except creds.AuthError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail={"error": {"message": f"codebuddy 账号 {account_id} 凭据不可用: {exc}",
+                                  "type": "authentication_error"}}) from exc
+        # metrics 账号归属（observability._instrument 预置的 holder dict；
+        # 直接 forward 的调用方可能没有，判空跳过）
+        meta = ACCOUNT_META.get()
+        if isinstance(meta, dict):
+            meta["account"] = account_id
+
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; Genie-IDE/1.0)",
-            **state.client.auth_headers(),
+            **creds.auth_headers_from_cred({**cred, "token": token}),
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
+        url = creds.endpoint() + "/v2/chat/completions"
 
         # 🔍 调试：输出实际发送的IDE识别headers
+        state = get_state()
         if state.logger:
             ide_headers = {k: v for k, v in headers.items()
                            if k.startswith("X-IDE-") or k == "X-Product-Version" or k == "X-Machine-Id"}
-            diagnostic("upstream_ide_headers", **ide_headers)
+            diagnostic("upstream_ide_headers", account=account_id, **ide_headers)
 
         if stream:
             # 流式：直接转发。经包命名空间延迟解析而非模块顶层导入：测试以
@@ -327,13 +686,39 @@ class CodeBuddyProvider(BaseProvider):
             # 补丁时（见 test_endpoints_smoke），这里必须取到补丁后的对象。
             from buddy_proxy.codebuddy_provider import stream_upstream
 
+            raw_gen = stream_upstream(url, headers, upstream_body, protocol, original)
+            # 首事件闸门：预驱动到第一个 yield 再决定放行还是换号。
+            # stream_upstream 撞非 200 时**首个 yield 就是错误帧**（吐完即
+            # return）——此刻 StreamingResponse 还没建、客户端一个字节都没收到，
+            # 把错误帧还原成 HTTPException 抛回 failover 循环可安全换号（防假
+            # 成功：若直接放行，下游收到的是 200 SSE + error 事件，且换号机会
+            # 就此丢失）。见到正常首块即 committed：缓冲重放 + 续跑，绝不重试。
+            try:
+                first = await raw_gen.__anext__()
+            except StopAsyncIteration:
+                first = None
+            if first is not None:
+                err_exc = _error_frame_to_exception(first, protocol)
+                if err_exc is not None:
+                    await raw_gen.aclose()
+                    raise err_exc
+
+            async def _replay():
+                if first is not None:
+                    yield first
+                async for chunk in raw_gen:
+                    yield chunk
+
             return StreamingResponse(
-                stream_upstream(url, headers, upstream_body, protocol, original),
+                _replay(),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "close"},
             )
         else:
-            # 非流式：聚合后返回（延迟解析理由同上）
+            # 非流式：聚合后返回（延迟解析理由同上）。collect_upstream 撞非 200
+            # 在返回前 raise HTTPException(status_code=…)，failover 循环接得住，
+            # 这里**必须让它 raise**、不能吞成 JSONResponse——否则撞错的账号
+            # 不会被冷却、也不会换下一个账号。
             from buddy_proxy.codebuddy_provider import collect_upstream, convert_nonstream
 
             collected = await collect_upstream(url, headers, upstream_body, protocol)

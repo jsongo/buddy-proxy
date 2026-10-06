@@ -29,8 +29,6 @@ from __future__ import annotations
 
 import pathlib
 import sys
-from types import SimpleNamespace
-from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 
@@ -44,16 +42,37 @@ def _pack(code: str, total: float, used: float, remain: float | None = None) -> 
     return p
 
 
-def _quota_with(monkeypatch, packages):
-    client = mock.MagicMock()
-    client.api_post.return_value = {
+def _acct(idx: int = 0):
+    return cbp.creds.AccountRef(id=f"uid-{idx}", uid=f"uid-{idx}", nickname=f"tester-{idx}",
+                                priority=idx, added_at=1000 + idx)
+
+
+def _quota_with(monkeypatch, packages, accounts=None):
+    """quota() 现走多账号 store（failover.available_accounts + creds.api_post_as）。
+
+    单账号（无前缀）是最基本形态，原断言不变；``accounts`` 给出时测多账号
+    前缀分组形态。
+    """
+    envelope = {
         "code": 0, "msg": "OK",
         "data": {"IsPaidUser": True, "SubscriptionPackageCode": "SUB",
                  "Packages": packages},
     }
-    monkeypatch.setattr(cbp, "get_state", lambda: SimpleNamespace(
-        client=client, ensure_auth=lambda: None))
+    accts = accounts if accounts is not None else [_acct()]
+    monkeypatch.setattr(cbp.failover, "list_accounts", lambda: accts)
+    monkeypatch.setattr(cbp.creds, "list_accounts", lambda: accts)
+    monkeypatch.setattr(cbp.creds, "api_post_as",
+                        lambda aid, path, body=None, **kw: dict(envelope))
     return cbp.CodeBuddyProvider().quota()
+
+
+def test_multi_account_labels_are_prefixed_per_account(monkeypatch):
+    """多账号逐个查：各账号条目带「CodeBuddy #N · 」前缀供前端分组（qoder 同款）。"""
+    packages = [_pack("SUB", 4000, 0, 4000)]
+    out = _quota_with(monkeypatch, packages,
+                      accounts=[_acct(0), _acct(1)])
+    labels = [i["label"] for i in out["items"]]
+    assert labels == ["CodeBuddy #1 · 订阅套餐", "CodeBuddy #2 · 订阅套餐"], labels
 
 
 def test_lists_every_pack_and_declares_sum_items(monkeypatch):

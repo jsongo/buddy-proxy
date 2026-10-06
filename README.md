@@ -1,6 +1,6 @@
-# CodeBuddy Proxy
+# buddy-proxy
 
-> A lightweight local proxy that turns CodeBuddy's underlying chat interface into standard **OpenAI Chat Completions**, **Responses**, and **Anthropic Messages** protocols — so you can plug CodeBuddy models into Codex CLI, Claude Code / CC Switch, OpenCode, Grok, Oh My Pi and any OpenAI-compatible client.
+> A local multi-provider model gateway: it turns the subscription quotas of AI IDEs / coding clients (CodeBuddy, Trae, Qoder, Gemini, Antigravity…) into standard **OpenAI Chat Completions**, **Responses**, and **Anthropic Messages** protocols — so you can plug those models into Codex CLI, Claude Code / CC Switch, OpenCode, Grok, Oh My Pi and any OpenAI-compatible client. One endpoint, routed by model name.
 
 > **中文文档见 [README_zh.md](README_zh.md).**
 
@@ -8,6 +8,8 @@
 
 ## Features
 
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **GLM official** (BigModel Coding Plan key — same upstream as ZCode, independent credentials), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state); all listed by `/v1/models` and routed by model name
+- **Multi-account failover** — most subscription channels (codebuddy / trae / qoder / kimi / antigravity…) support multiple accounts: rotated in login order as primary/backup; account-level errors (401 expired credentials / 429 quota exhausted) cool the current account down and switch to the next automatically. Per-account quota, check-in, rename / reorder / delete are all managed in the admin UI
 - **Protocol conversion** — `/v1/chat/completions` (OpenAI), `/v1/responses` (Codex CLI), `/v1/messages` (Anthropic / Claude Code)
 - **Admin UI** — built-in web console at `/ui`: browse models grouped by provider, one-click "set as default model", one-click test per model (sends a "hi"), and per-model request stats with charts. Loads lazily per tab, so the first paint never waits on the slowest endpoint (the request log)
 - **Model list** — `/v1/models` returns an OpenAI-compatible model list plus rich per-model metadata (context window, credits, input modalities / image support)
@@ -16,8 +18,6 @@
 - **Tool calls** — full function calling support with automatic filtering of invalid tool definitions; `tool_choice` is normalized across both OpenAI and Anthropic shapes so it never reaches the upstream as an object
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
 - **Streaming** — SSE output with idle / total-duration timeout protection
-- **Multi-account** — isolated session files for work / personal accounts
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state); all listed by `/v1/models` and routed by model name
 - **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
 ---
@@ -185,7 +185,20 @@ Tabs load lazily and load in parallel on demand, and each tab shows a skeleton u
 
 Security: the `/ui/api/*` admin endpoints are **restricted to localhost (127.0.0.1)**. To manage the proxy from the LAN, set `BUDDY_PROXY_ADMIN_OPEN=1` (at your own risk). `/v1/*` proxy endpoints are unaffected.
 
-## Doubao provider (optional)
+## Providers
+
+Every channel is optional: enable the ones you have subscriptions for, log in with `buddy login <provider>`, and `/v1/models` merges their catalogs. Multiple channels can be live at once; a bare model id that several channels declare resolves by registration order — use the explicit `<provider>/` prefix to pin one.
+
+### CodeBuddy (default channel)
+
+Tencent CodeBuddy / WorkBuddy subscription, via the IDE plugin auth (browser OAuth, `buddy login codebuddy`, alias `workbuddy`). Features:
+
+- **Multi-account failover** — accounts live in `~/.buddy-proxy/codebuddy/` (`index.json` + one credential file per account, mode 0600). Re-logging the same account updates it in place (failover order unchanged); a new account joins at the end. On 401 (credential invalid) / 429 (quota exhausted, e.g. code 14018) the account is cooled down (60s / 5min, `Retry-After` honored) and the next account takes over — a single exhausted account no longer takes the whole channel down. The legacy `~/.codebuddy-session.json` is migrated to account #1 on first touch.
+- **Daily check-in** — per-account activity check-in (streak credits), aggregated in the UI with per-account detail; claims every claimable account one by one.
+- **Credits** — resource-pack summary per account (`CodeBuddy #N · …` groups in the admin UI), plus per-request usage records (`/ui/api/codebuddy/usage-records`).
+- Account management: `GET /ui/api/codebuddy/accounts` plus `order` / `rename` / `delete` endpoints; the admin panel exposes ▲▼ reorder, ✎ rename, ✕ delete per account.
+
+### Doubao provider (optional)
 
 A built-in provider that drives the local Doubao desktop app (DoubaoWork.app) via the Chrome DevTools Protocol — it reuses the app's own login state and injects risk-control signatures inside the page's JS context. Pure stdlib, no Playwright. Enable with `--doubao`.
 
@@ -204,7 +217,7 @@ A built-in provider that drives the local Doubao desktop app (DoubaoWork.app) vi
 
 Models: classic pipeline `doubao` / `doubao-think` / `doubao-expert` (the server routes to its default model — the `model` field is ignored) and agent pipeline `doubao-auto`, `doubao-2.1-turbo`, `doubao-2.1-pro`, `orange-5.0`, `gemini-3.7-flash`, `gpt-5.6-sol` (real per-model routing via the app's own model menu; optional `reasoning_effort` 3–7).
 
-## DuMate provider (optional)
+### DuMate provider (optional)
 
 A built-in provider for Baidu's DuMate (千帆桌面端) desktop app. It connects to the app's embedded local OpenAI-compatible proxy (`dumate-main-server` on `127.0.0.1:<port>`), reusing your Baidu Cloud login to reach the `dumate-svc.baidu.com` gateway — no QR scan, no cloud token. The local auth key (`X-Dumate-Inapp-Key`) is read from the running app's process env and rotates each launch. Enable with `--dumate`.
 
@@ -216,7 +229,7 @@ A built-in provider for Baidu's DuMate (千帆桌面端) desktop app. It connect
 - **Protocol**: OpenAI chat completions; Anthropic `/v1/messages` is converted back from the OpenAI-shaped response (same adapter as kimi/qoder), so Claude Code works directly.
 - **Dependencies**: pure Python stdlib (includes a zero-dependency AES-256-GCM to decrypt the bceConsole cookie).
 
-## Trae provider (optional)
+### Trae provider (optional)
 
 Decrypts the Trae IDE's locally stored login state and talks straight to the underlying models.
 
@@ -229,6 +242,7 @@ uv run python -m buddy_proxy --desensitize --trae
 - **PAT channel** — `traepat/<model>` addresses the underlying-model channel with multi-account failover: each account's `4031` / `4008` / `4011` codes are classified and cooled independently, exhausted channels fail fast with a `429` instead of probing every account, and cooldowns are cleared once real credits are confirmed back.
 - **Quota** — free accounts have daily/weekly caps; when exhausted you get `4011` (today's usage limit reached), forwarded with a friendly Chinese message.
 - **Dependencies** — pure Python standard library (including a zero-dependency AES fallback); no Node.js required.
+- **Overseas edition (`traeintl`, since 2026-10)** — log in with `buddy login trae --region global` and a separate channel spins up automatically (`traeintl/<model>` addressing, its own quota card, no check-in — the overseas upstream has no such endpoint). The model pool is **entirely separate** from CN (10 models probe-verified 2026-10-06): T1 `gpt-6-sol` / `gpt-6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `kimi-k3`, T2 `gpt-5.4` / `gpt-5.2` / `glm-5.2`, T3 `minimax-m3`. Two protocol differences from CN: `messages[].content` must be a content-block array (a plain string gets a 400 deserialization error), and the Work function binding is a per-region table — gpt-5.6 family / `glm-5.2` / `minimax-m3` return `4001` under the default `solo_work_lite` and are routed to `chat_v3` automatically. Models visible in the IDE dropdown but rejected by the agent channel across all three functions (`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`) are not listed. Billing is **request-count + dollar mixed** (Pro plan): "Premium fast requests" 600/month (upstream never reports usage count — shown as "—") plus "Basic usage" in real dollars spent; `is_hide` packs (hidden from the upstream UI) are filtered out.
 
 ### `trae-cli`
 
@@ -247,7 +261,7 @@ Work channel multi-account **primary/backup failover**: account #1 by login orde
 
 **Per-account check-in device fingerprint**: the check-in API is device-scoped (one claim per device per day; error codes change with the device). The early hard-coded "ASUS TUF + windows" fingerprint (the original trae2api recipe) has been blacklisted by the upstream risk engine — under that fingerprint any *new* device fails its first claim with 9074 "当前参与用户太多" (verified 2026-10-06: switching the model string succeeds immediately; status stays fine the whole time, so it is not campaign congestion or concurrency). Each account now owns one **stable** device: the model is derived from a pool of real machine strings keyed by the account hash, and after the first successful claim the `(device_id, brand, type)` triple is pinned into `~/.buddy-proxy/trae/devices.json` (0600) so every day uses the same device; when a claim hits 9074 the next candidate device is tried automatically and the pinned record is replaced. 9095 "当前设备今日已经签到" is treated as an idempotent success (message marks it as device-already-signed).
 
-## ZCode provider (optional)
+### ZCode provider (optional)
 
 Zhipu **GLM Coding Plan** via its Anthropic-compatible endpoint, passed through directly:
 
@@ -263,7 +277,7 @@ When writing the key file, use `>` (overwrite) rather than `>>` (append): only t
 
 The quota panel reads `/api/monitor/usage/quota/limit`. Its `limits[]` entries share one `type` (`CREDIT_LIMIT`) and distinguish windows by `unit` + `number`, not by the reset time: `unit=3`/`number=5` is the 5-hour window and `unit=6`/`number=1` is the monthly one. Name the windows from `unit`/`number` — deriving the name from "how far away is `nextResetTime`" gets both wrong, since the monthly window resets only a few days out (so it reads as "weekly") and the 5-hour window *has no* `nextResetTime` at all (so it degrades to a bare `CREDIT_LIMIT`). Rows are ordered smallest window first, so the 5-hour entry leads the card; ordering by `nextResetTime` instead drops the missing-timestamp 5-hour entry to the end and headlines the monthly bucket. Note the two windows are separate allowances to be read independently — they are not added together.
 
-## GLM provider (official, optional)
+### GLM provider (official, optional)
 
 The same GLM Coding Plan upstream as ZCode, but driven by **your own console-issued API key** instead of the ZCode CLI's credentials:
 
@@ -275,7 +289,7 @@ uv run python -m buddy_proxy --desensitize --glm
 
 `buddy login glm` reports state and prints the key setup steps, same style as zcode (no automatable browser login — the key is minted by hand in the Zhipu console). Plan access measured 2026-10-06 (lite): `glm-5.3` / `glm-5.3-flash` / `glm-5-turbo` work; `glm-5.3-flashx` is refused with `1311 套餐暂未开放` until the plan is upgraded — the model stays in the table as a reserve, no code change needed when it unlocks.
 
-## MiMo provider (optional)
+### MiMo provider (optional)
 
 Xiaomi **MiMo** (platform.xiaomimimo.com), exposed under the `mimo/` prefix (`mimo-auto`, `mimo-pro`):
 
@@ -330,7 +344,7 @@ The admin UI shows a quota panel with two rows: **weekly quota used** (the upstr
 
 > `--mimo` is only needed when you want this channel; without it the provider is not registered and `mimo/...` model names fall through to the fallback provider.
 
-## Qoder provider (optional)
+### Qoder provider (optional)
 
 Alibaba's **Qoder** IDE (qoder.com global / qoder.com.cn CN), exposed under the `qoder/` prefix:
 
@@ -438,7 +452,7 @@ account really has; packages with `available: false` (expired/invalidated) are s
 
 > `--qoder` is only needed when you want this channel; without it the provider is not registered and `qoder/...` model names fall through to the fallback provider.
 
-## Gemini provider (optional)
+### Gemini provider (optional)
 
 Google's **Gemini CLI** free quota (Code Assist for individuals), exposed under the `gemini/` prefix:
 
@@ -470,7 +484,7 @@ Free-tier prompts may be reviewed by Google for training (the onboarding respons
 
 > **Note (Oct 2026):** Google product-retired the Gemini CLI free tier on 2026-06-18 (`UNSUPPORTED_CLIENT` at onboarding; confirmed with the official CLI 0.33.1/0.62.0 as well). Personal/free accounts should use the Antigravity channel below; this gemini channel keeps working for standard-tier (paid/`GOOGLE_CLOUD_PROJECT`) setups.
 
-## Antigravity provider (optional)
+### Antigravity provider (optional)
 
 Google's **Antigravity** quota (the official successor to the Gemini CLI free tier; both personal free and Google AI Pro tiers land here), exposed under the `antigravity/` prefix. One OAuth login unlocks **Gemini 3.x, Claude Sonnet/Opus and GPT-OSS** models; quota is two independent pools (a Gemini group and a Claude/GPT group), each with a weekly + 5-hour rolling limit shared by the models inside the group:
 

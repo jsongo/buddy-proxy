@@ -15,8 +15,8 @@ from .config import (
     BASE_URL_CN,
     ENDPOINTS,
     _WORK_CHAT_MAX_ATTEMPTS,
-    _WORK_FUNCTION_OVERRIDE,
     _debug_dump,
+    work_function_override,
     map_model_for,
     resolve_trae_region,
     resolve_trae_region_by_chat_base,
@@ -78,6 +78,24 @@ def send_trae_chat(
             last_error = e
     raise HTTPException(status_code=502, detail=f"trae all endpoints failed: {last_error}")
 
+def _intl_content_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """海外端点要求 ``messages[].content`` 为内容块数组，纯字符串要包装。
+
+    实测（2026-10-06）：global 网关的 Go 侧把 content 反序列化成
+    ``[]*idecopilot.LLMRawMessageContent``，纯字符串直接 400
+    ``cannot unmarshal string into Go struct field``；CN 两种都收。
+    只包装字符串形态（tool_result 等本来就是块列表的消息原样放行），
+    结构不对时让上游诚实地报错，好过在这里猜格式洗一遍。
+    """
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if isinstance(m, dict) and isinstance(m.get("content"), str):
+            out.append({**m, "content": [{"type": "text", "text": m["content"]}]})
+        else:
+            out.append(m)
+    return out
+
+
 def _send_trae_work_chat(
     messages: list[dict[str, Any]],
     model: str,
@@ -98,10 +116,12 @@ def _send_trae_work_chat(
     """
     region = resolve_trae_region(work.get("region"))
     trae_model = map_model_for(region.key, model)
-    body = _build_chat_body(messages, trae_model, stream)
-    # 绝大多数模型走 solo_work_lite；少数（glm-5.1 / Doubao-Seed-Code 等）
-    # 在该 function 下 4001，需改走 chat_v3（实测）
-    body["function"] = _WORK_FUNCTION_OVERRIDE.get(trae_model, "solo_work_lite")
+    body = _build_chat_body(_intl_content_blocks(messages) if region.key == "global" else messages,
+                            trae_model, stream)
+    # 绝大多数模型走 solo_work_lite；少数在该 function 下 4001，需改走
+    # chat_v3（实测）。覆盖表**按区域取**：两区的 function 绑定互不通用
+    # （CN glm-5.1 / 海外 gpt-5.6 系是各自的 chat_v3 名单）。
+    body["function"] = work_function_override(region.key).get(trae_model, "solo_work_lite")
 
     headers = {
         **_work_headers(work),

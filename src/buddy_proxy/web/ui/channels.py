@@ -703,6 +703,98 @@ async def ui_dumate_accounts_order(request: Request):
     return await ui_dumate_accounts(request)
 
 
+@app.get("/ui/api/codebuddy/accounts")
+async def ui_codebuddy_accounts(request: Request):
+    """codebuddy 各账号本地凭证/冷却状态（纯本地不触网，不含秘密）。"""
+    _ensure_local(request)
+    try:
+        from ...codebuddy_provider import failover
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codebuddy 通道不可用"}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/codebuddy/accounts/order")
+async def ui_codebuddy_accounts_order(request: Request):
+    """调整 codebuddy 账号的 failover 顺位（管理页上移/下移按钮）。
+
+    提交完整账号 id 顺序列表，重写 index.json 的 priority；返回重排后的账号
+    状态（与 GET 同构）。quota 缓存键带 priority（``quota_epoch``），重排后旧
+    额度快照自动失效。
+    """
+    _ensure_local(request)
+    try:
+        from ...codebuddy_provider import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codebuddy 通道不可用"}})
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 ids（账号 id 的完整顺序列表）"}})
+    try:
+        await asyncio.to_thread(creds.reorder_accounts, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    from ...codebuddy_provider import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/codebuddy/accounts/rename")
+async def ui_codebuddy_accounts_rename(request: Request):
+    """改一个 codebuddy 账号的本地别名（管理页 ✎）。
+
+    只改 index.json 的 ``alias`` 字段（显示名），原始凭据与顺位不动；
+    空串 = 清除别名、回退默认显示名。返回改后的账号状态（与 GET 同构）。
+    """
+    _ensure_local(request)
+    try:
+        from ...codebuddy_provider import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codebuddy 通道不可用"}})
+    body = await request.json()
+    aid, alias = body.get("id"), body.get("alias")
+    if not isinstance(aid, str) or not aid.strip() or not isinstance(alias, str):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id 或 alias（要改的账号 id 与新别名）"}})
+    if len(alias.strip()) > 64:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "别名过长（≤64 字符）"}})
+    try:
+        await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
+    from ...codebuddy_provider import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/codebuddy/accounts/delete")
+async def ui_codebuddy_accounts_delete(request: Request):
+    """删除一个 codebuddy 账号（索引条目 + cred 文件 + 冷却标记）。
+
+    不再使用或凭据作废的账号从轮换里摘掉——留着每轮 failover 白打一次上游。
+    返回删除后的账号状态（与 GET 同构，前端直接重渲染）。
+    """
+    _ensure_local(request)
+    try:
+        from ...codebuddy_provider import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codebuddy 通道不可用"}})
+    body = await request.json()
+    aid = body.get("id")
+    if not isinstance(aid, str) or not aid.strip():
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（要删除的账号 id）"}})
+    aid = aid.strip()
+    removed = await asyncio.to_thread(creds.delete_account, aid)
+    if not removed:
+        raise HTTPException(status_code=404,
+                            detail={"error": {"message": f"账号不存在: {aid}"}})
+    from ...codebuddy_provider import failover
+    await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.get("/ui/api/codebuddy/usage-records")
 async def ui_codebuddy_usage_records(
     request: Request, days: int = 7, page: int = 1, page_size: int = 20
