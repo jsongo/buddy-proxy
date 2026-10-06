@@ -88,7 +88,7 @@ class _FakeClient:
         return _FakeResp()
 
 
-def _forward_capture(body: dict) -> dict:
+def _forward_capture(body: dict, protocol: str = "anthropic") -> dict:
     provider = ZCodeStartPlanProvider(base_url="http://upstream.test", api_key="k")
     fake = _FakeClient()
 
@@ -96,7 +96,7 @@ def _forward_capture(body: dict) -> dict:
         return fake
 
     provider._get_client = _get_client  # type: ignore[method-assign]
-    resp = asyncio.run(provider.forward(body, "anthropic", body))
+    resp = asyncio.run(provider.forward(body, protocol, body))
     assert resp.status_code == 200
     assert fake.body is not None
     return fake.body
@@ -139,3 +139,15 @@ def test_forward_block_array_system_preserves_text_only():
                           {"type": "text", "text": "block-b"}]
     # 风控指纹：断点只在前置 3 块上
     assert "cache_control" not in system[3] and "cache_control" not in system[4]
+
+
+def test_forward_openai_path_also_gets_session_metadata():
+    """回归（2026-10-05 深夜实测）：/v1/chat/completions 走的 openai 路径
+    也必须拿到已赋值的 session_id——当时工作树中间态把赋值挪到分支后面，
+    openai 路径直接 UnboundLocalError。锁住「赋值在两个协议分支之前」的形状。
+    """
+    upstream = _forward_capture({
+        "model": "glm-5.3-flash", "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+    }, protocol="openai")
+    assert "session_id" in upstream["metadata"]["user_id"]
