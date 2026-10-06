@@ -140,6 +140,14 @@ renders a separate provider row because check-in rows are provider-driven.
 Adding a Global login while the server is already running still requires a
 restart for registration.
 
+Campaign check-in (`/sash/**`) is **fingerprint-targeted** (CN and Global
+alike): the upstream only returns the daily `CLAIM_BENEFIT` entry to device
+identities it recognizes. Requests therefore carry the desktop app's
+`runtime-info`-generated `Cosy-MachineToken/Code/Type` per account
+(`qoder/umid.py`, cached 1h, subprocess-based with a static-header fallback
+when the binary is absent); without a recognized fingerprint the campaign list
+silently omits the check-in entry and the UI misreports "no claimable reward".
+
 The ASGI event loop is shared by model streaming and management routes, so
 blocking operations must stay off-loop even when wrapped by an `async` method.
 Trae's first-event gate and sync iterator both call `next()` on a blocking

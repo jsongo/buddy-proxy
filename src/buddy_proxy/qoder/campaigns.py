@@ -44,6 +44,7 @@ import httpx
 
 from .config import Region, with_cached_endpoints
 from .credentials import Credential
+from .umid import MachineIdentity, identity_headers
 
 log = logging.getLogger(__name__)
 
@@ -147,14 +148,18 @@ def _to_int(value: object) -> int:
     return 0
 
 
-def campaign_headers(cred: Credential) -> dict[str, str]:
+def campaign_headers(cred: Credential, identity: MachineIdentity | None = None) -> dict[str, str]:
     """活动面的请求头。
 
     与桌面端主进程一致；``Cosy-Machine*`` 一族只作标识用——**签名不参与**
     （这一面不吃 COSY 签名，实测裸 Bearer 即可）。
+
+    签到活动按机器指纹定向发放（CN/全球一致）：有 ``identity``（桌面端
+    runtime-info 同款指纹）时带上真实 ``Cosy-Machine*`` 三件套 + 客户端标识，
+    否则回退静态 machine_id——上游不认识的指纹拿不到签到条目（见 ``umid.py``）。
     """
     machine = cred.machine_id or ""
-    return {
+    headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {cred.token}",
         "Cosy-ClientType": CAMPAIGN_CLIENT_TYPE,
@@ -164,14 +169,20 @@ def campaign_headers(cred: Credential) -> dict[str, str]:
         "Cosy-MachineType": CAMPAIGN_CLIENT_TYPE,
         "User-Agent": "Qoder",
     }
+    if identity is not None:
+        headers.update(identity_headers(identity))
+    return headers
 
 
 class CampaignClient:
     """活动面客户端（异步）。"""
 
-    def __init__(self, region: Region, cred: Credential) -> None:
+    def __init__(
+        self, region: Region, cred: Credential, identity: MachineIdentity | None = None
+    ) -> None:
         self.region = with_cached_endpoints(region)
         self.cred = cred
+        self.identity = identity
 
     def _url(self, suffix: str = "") -> str:
         return f"{self.region.openapi_base}/sash/api/v1/me/campaigns{suffix}"
@@ -179,7 +190,7 @@ class CampaignClient:
     async def list(self) -> list[Campaign]:
         """拉取活动列表（逐条解析，坏条目跳过）。"""
         async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
-            resp = await client.get(self._url(), headers=campaign_headers(self.cred))
+            resp = await client.get(self._url(), headers=campaign_headers(self.cred, self.identity))
         if resp.status_code != 200:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:160]}")
         body = resp.json()
@@ -198,7 +209,7 @@ class CampaignClient:
         """
         url = self._url(f"/{campaign_id}/claim")
         async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
-            resp = await client.post(url, headers=campaign_headers(self.cred), json={})
+            resp = await client.post(url, headers=campaign_headers(self.cred, self.identity), json={})
         try:
             body = resp.json()
         except ValueError:
@@ -214,7 +225,7 @@ class CampaignClient:
         """查领取结果（发奖详情；``replayed`` 为真表示是重放）。"""
         async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
             resp = await client.get(
-                self._url(f"/{campaign_id}/reward"), headers=campaign_headers(self.cred)
+                self._url(f"/{campaign_id}/reward"), headers=campaign_headers(self.cred, self.identity)
             )
         try:
             body = resp.json()

@@ -387,33 +387,40 @@ async function loadAntigravityAccounts() {
 let QODER_ACCTS = null;  // 最近一次 accounts 快照；render 先用它，避免每 30s 闪回「Qoder #N」
 let QODER_MOVING = false;  // 面板账号操作（重排/删除）在途：期间忽略新的点按
 
-function _qoder_acct_for(idx) {
-  // idx=null（单账号组名无 Qoder #N 前缀）只在恰有一个账号时能对上
+function _qoder_acct_for(idx, region) {
+  // 额度标签的「#N」是**区内**顺位（quota 按区域过滤后编号），快照的 index 是
+  // 全列表顺位——按区域过滤后取第 N 个才对得上。idx=null（单账号组名无前缀）
+  // 只在区内恰有一个账号时能对上。
   if (!QODER_ACCTS) return null;
-  if (idx == null) return QODER_ACCTS.length === 1 ? QODER_ACCTS[0] : null;
-  return QODER_ACCTS.find(a => a.index === idx) || null;
+  const inRegion = QODER_ACCTS.filter(a => (a.region || 'cn') === (region || 'cn'));
+  if (idx == null) return inRegion.length === 1 ? inRegion[0] : null;
+  return inRegion[idx - 1] || null;
 }
 
-function _qoder_sub_html(a) {
+function _qoder_sub_html(a, withRegion) {
   // 副标题（进度条上面那行 muted 小字）：区域 / 冷却
   // （「token 剩 Xh」删了：access token 几小时自动刷新，读了只会误导）
+  // 整块包一层 data-qoder-sub 容器：就地回填靠这个属性删旧插新——模型受限行
+  // 以前不带标记，回填时删不掉，状态每变一次就多积一行（真机实报的重复）。
   if (!a) return '';
+  const rows = [];
   const bits = [];
-  if (a.region) bits.push(a.region === 'cn' ? 'CN 区' : 'Global 区');
+  if (withRegion !== false && a.region) bits.push(a.region === 'cn' ? 'CN 区' : 'Global 区');
   for (const c of a.cooling || []) {
     const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
     bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
   }
-  const sub = bits.length
-    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-qoder-sub>${esc(bits.join(' · '))}</div>`
-    : '';
+  if (bits.length) {
+    rows.push(`<div class="muted" style="font-size:11px;margin:1px 0 6px">${esc(bits.join(' · '))}</div>`);
+  }
   // 模型受限小字（覆盖表反查的 models_limited）：转发会自动跳过受限模型，
-  // 列出名字让人知道这个账号还能用哪些，不用等调失败才发现
+  // 提醒这个账号调不了哪些。完整名单塞 title 悬浮——十来个模型名平铺会把卡撑高
   const lim = a.models_limited || [];
-  const limHtml = lim.length
-    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px">模型受限（仅 Qwen3.8 两档可用；其余 ${lim.length} 个：${esc(lim.join('、'))}）</div>`
-    : '';
-  return sub + limHtml;
+  if (lim.length) {
+    rows.push(`<div class="muted" style="font-size:11px;margin:1px 0 6px" title="${esc(lim.join('、'))}">` +
+      `模型受限（仅 Qwen3.8 两档可用；其余 ${lim.length} 个调不了）</div>`);
+  }
+  return rows.length ? `<div data-qoder-sub>${rows.join('')}</div>` : '';
 }
 
 function _qoder_move_btns(idx, n, id) {
@@ -563,19 +570,23 @@ async function loadQoderAccounts() {
       syncQuotaFold();
       return;
     }
-    // 就地回填：组名换成账号名、组名后插副标题（kimi 同款）
-    for (const a of accts) {
-      const el = (accts.length === 1)
+    // 就地回填：组名换成账号名、组名后插副标题（kimi 同款）。
+    // 只回填 CN 账号（面板只显示 CN 额度），位次按区内顺位——与 quota 标签的
+    // 「Qoder #N」编号同口径，全球账号排在前面也不串位。
+    const cnAccts = accts.filter(a => (a.region || 'cn') === 'cn');
+    cnAccts.forEach((a, i) => {
+      const pos = i + 1;
+      const el = (cnAccts.length === 1)
         ? document.querySelector('#qoder-panel .pat-pkg-name')
-        : document.querySelector(`#qoder-panel [data-qoder-idx="${a.index}"]`);
-      if (!el) continue;
+        : document.querySelector(`#qoder-panel [data-qoder-idx="${pos}"]`);
+      if (!el) return;
       el.textContent = a.alias || a.name || a.email || a.id;
       if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-qoder-sub')) {
         el.nextElementSibling.remove();
       }
       const sub = _qoder_sub_html(a);
       if (sub) el.insertAdjacentHTML('afterend', sub);
-    }
+    });
     syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
@@ -583,7 +594,10 @@ async function loadQoderAccounts() {
 }
 
 
-// ---- QODER INTL 面板（只读额度；不复用 CN 账号管理 API）----
+// ---- QODER INTL 面板（只读额度；账号名/副标题来自共享账号接口的 global 区条目，
+//      管理操作（✎/▲▼/✕）仍在 Qoder 主卡，海外卡不重复）----
+let INTL_ACCTS = null;  // 最近一次 accounts 快照的 global 区子集；render 先用，防 30s 闪回「Global」
+
 function renderQoderIntlPanel() {
   const panel = document.getElementById('qoderintl-panel');
   if (!panel) return;
@@ -602,8 +616,16 @@ function renderQoderIntlPanel() {
     groups.get(grp).push(Object.assign({}, it, {label: sub}));
   }
   const quotaHtml = [...groups.entries()].map(([grp, its]) => {
+    // 组标题=账号名（alias 优先）：「Global」和「Global #N」是区内顺位的兜底名，
+    // 多账号时分不清谁是谁；账号数据没到/没对上时回落组名。
+    const m = grp.match(/^Global #(\d+)$/);
+    const inRegion = (INTL_ACCTS || []);
+    const acct = m ? (inRegion[Number(m[1]) - 1] || null)
+      : (inRegion.length === 1 ? inRegion[0] : null);
+    const title = acct ? (acct.alias || acct.name || acct.email || acct.id) : grp;
     const headSum = quotaHeadSum({items: its, sum_items: true});
-    return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>` +
+    return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-qoderintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>` +
+      `${_qoder_sub_html(acct, false)}` +
       `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
       `${quotaItemsHtml(its, 'qoderintl:' + grp)}</div>`;
   }).join('');
@@ -618,6 +640,42 @@ function renderQoderIntlPanel() {
       ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（登录后重启 Buddy 注册通道）</div>'}
     </div>`;
+  loadQoderIntlAccounts();
+}
+
+async function loadQoderIntlAccounts() {
+  try {
+    const r = await api('/ui/api/qoder/accounts');
+    if (!r.enabled) { INTL_ACCTS = []; return; }
+    const accts = (r.accounts || []).filter(a => a.region === 'global');
+    // 数据没变就不动 DOM——renderQoderIntlPanel 已用同一份快照渲染过
+    if (JSON.stringify(accts) === JSON.stringify(INTL_ACCTS)) return;
+    const snapshotMissing = !INTL_ACCTS || !INTL_ACCTS.length;
+    INTL_ACCTS = accts;
+    if (!accts.length) return;
+    if (snapshotMissing) {
+      renderQoderIntlPanel();
+      syncQuotaFold();
+      return;
+    }
+    // 就地回填：组名换成账号名、组名后插副标题（CN 卡同款）
+    accts.forEach((a, i) => {
+      const pos = i + 1;
+      const el = (accts.length === 1)
+        ? document.querySelector('#qoderintl-panel .pat-pkg-name')
+        : document.querySelector(`#qoderintl-panel [data-qoderintl-idx="${pos}"]`);
+      if (!el) return;
+      el.textContent = a.alias || a.name || a.email || a.id;
+      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-qoder-sub')) {
+        el.nextElementSibling.remove();
+      }
+      const sub = _qoder_sub_html(a, false);
+      if (sub) el.insertAdjacentHTML('afterend', sub);
+    });
+    syncQuotaFold();
+  } catch (e) {
+    // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
+  }
 }
 
 // ---- TRAE WORK 面板（qoder 同款布局：每账号一块，标题=账号名、副标题=区域/冷却，
