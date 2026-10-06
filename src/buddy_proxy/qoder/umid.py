@@ -70,15 +70,16 @@ _cache: dict[tuple[str, str], tuple[float, MachineIdentity | None]] = {}
 
 
 def _binary_candidates(region_key: str) -> list[str]:
-    """按环境变量 → 默认路径 → ~/Applications 的顺序找二进制。"""
+    """按环境变量 → /Applications → ~/Applications 的顺序找二进制。"""
     out = []
     env = os.environ.get(_UMID_ENV.get(region_key, ""), "").strip()
     if env:
         out.append(env)
-    out.extend(_UMID_DEFAULTS.get(region_key, ()))
-    home = Path.home() / "Applications"
     for base in _UMID_DEFAULTS.get(region_key, ()):
-        out.append(str(home / base.lstrip("/")))
+        out.append(base)
+        # 用户级安装（~/Applications）的同款 App：把前缀换掉再试一次
+        if "/Applications/" in base:
+            out.append(str(Path.home() / "Applications" / base.split("/Applications/", 1)[1]))
     return out
 
 
