@@ -6,6 +6,15 @@ from unittest.mock import patch
 import httpx
 from fastapi.responses import JSONResponse, StreamingResponse
 
+
+class ChunkStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
 from buddy_proxy.providers import zcode_start as zs
 
 
@@ -19,6 +28,9 @@ class FakeClient:
         return httpx.Request(method, url)
 
     async def send(self, req, stream=False):
+        if isinstance(self.payload, list):
+            return httpx.Response(200, headers={"content-type": self.content_type},
+                                  stream=ChunkStream(self.payload), request=req)
         body = self.payload if isinstance(self.payload, bytes) else json.dumps(self.payload).encode()
         return httpx.Response(200, headers={"content-type": self.content_type},
                               content=body, request=req)
@@ -54,6 +66,12 @@ def test_quota_json_with_http_200_is_rate_limit_for_both_protocols():
 def test_unknown_json_with_http_200_is_bad_gateway():
     resp, _ = forward({"error": {"message": "unavailable"}})
     assert resp.status_code == 502
+
+
+def test_string_error_with_http_200_is_quota():
+    resp, _ = forward({"error": "quota exceeded"})
+    assert resp.status_code == 429
+    assert json.loads(resp.body)["error"]["message"] == "quota exceeded"
 
 
 def test_valid_message_still_passes():
@@ -95,9 +113,26 @@ def test_sse_keepalive_before_message_preserved():
     frame = (b': keepalive\n\n' * 20000 +
              b'event: message_start\ndata: {"type":"message_start","message":'
              b'{"type":"message","role":"assistant","content":[]}}\n\n')
-    resp, data = forward(frame, stream=True, content_type="text/event-stream")
+    resp, _ = forward(frame, stream=True, content_type="text/event-stream")
+    assert isinstance(resp, JSONResponse)
+    assert resp.status_code == 502  # 首事件前累计字节有限，不能无限缓存心跳
+
+
+def test_crlf_split_across_chunks_passes():
+    frame = (b': keepalive\r\n\r\nevent: message_start\r\ndata: '
+             b'{"type":"message_start","message":{"type":"message",'
+             b'"role":"assistant","content":[]}}\r\n\r\n')
+    chunks = [frame[i:i + 1] for i in range(len(frame))]
+    resp, data = forward(chunks, stream=True, content_type="text/event-stream")
     assert isinstance(resp, StreamingResponse)
     assert data == frame
+
+
+def test_sse_error_event_without_data_type_is_quota():
+    frame = b'event: error\ndata: {"code":1308,"msg":"quota exceeded"}\n\n'
+    resp, _ = forward([frame[:7], frame[7:]], stream=True, content_type="text/event-stream")
+    assert isinstance(resp, JSONResponse)
+    assert resp.status_code == 429
 
 
 def test_openai_stream_error_not_fake_done():

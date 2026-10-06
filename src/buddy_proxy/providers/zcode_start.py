@@ -349,8 +349,10 @@ def _invalid_success(payload: Any) -> JSONResponse:
     """HTTP 200 错误体不能让客户端误认为 Anthropic Message。"""
     node = payload.get("error") if isinstance(payload, dict) else None
     error = node if isinstance(node, dict) else payload if isinstance(payload, dict) else {}
-    code = error.get("code")
-    message = error.get("message") or error.get("msg") or "zcode-start upstream returned invalid message"
+    code = error.get("code") or (payload.get("code") if isinstance(payload, dict) else None)
+    message = (error.get("message") or error.get("msg")
+               or (node if isinstance(node, str) else None)
+               or "zcode-start upstream returned invalid message")
     message = str(message)[:500]
     # Start Plan 的额度错误可能以 HTTP 200 返回；让模型顺序在响应提交前换档。
     quota = str(code) in {"1308", "429"} or any(word in message.lower() for word in (
@@ -368,6 +370,7 @@ async def _checked_stream(response: httpx.Response) -> StreamingResponse | JSONR
     """读取首个有效 SSE message_start 后才提交流；错误帧先变成 HTTP 错误。"""
     iterator = response.aiter_bytes()
     prefix = bytearray()
+    handed_off = False
     try:
         # JSON 响应（即使 HTTP 200）不应标成 text/event-stream。
         if "text/event-stream" not in response.headers.get("content-type", "").lower():
@@ -380,34 +383,45 @@ async def _checked_stream(response: httpx.Response) -> StreamingResponse | JSONR
             except (ValueError, TypeError):
                 return _invalid_success(None)
 
-        frame_start = 0
-        handed_off = False
+        # SSE 逐行扫描，原始字节保留给直通客户端；只规范化用于解析的完整行。
+        # 与整个缓冲区 replace(CRLF) 不同，这也能处理 CR/LF 分落两个网络块。
+        line_buffer = bytearray()
+        data_lines: list[bytes] = []
+        event_name = ""
         original_prefix: list[bytes] = []
+        total = 0
         async for chunk in iterator:
+            total += len(chunk)
+            if total > _FIRST_EVENT_LIMIT:
+                return _invalid_success(None)
             original_prefix.append(chunk)
-            prefix.extend(chunk)
-            # SSE 的事件以空行分隔，兼容 LF 和 CRLF；保留原字节给客户端。
-            normalized = bytes(prefix).replace(b"\r\n", b"\n")
-            while True:
-                end = normalized.find(b"\n\n", frame_start)
-                if end < 0:
-                    if len(normalized) - frame_start > _FIRST_EVENT_LIMIT:
-                        return _invalid_success(None)
-                    break
-                frame = normalized[frame_start:end]
-                frame_start = end + 2
-                lines = [line[5:].strip() for line in frame.split(b"\n") if line.startswith(b"data:")]
-                if not lines:
-                    continue  # SSE keepalive/comment
+            for byte in chunk:
+                if byte != 10:  # LF；结尾 CR 在读到 LF 时清除
+                    line_buffer.append(byte)
+                    continue
+                line = bytes(line_buffer).removesuffix(b"\r")
+                line_buffer.clear()
+                if line:
+                    if line.startswith(b"event:"):
+                        event_name = line[6:].strip().decode(errors="replace")
+                    elif line.startswith(b"data:"):
+                        data_lines.append(line[5:].strip())
+                    continue
+                if not data_lines:
+                    event_name = ""  # 空心跳帧
+                    continue
                 try:
-                    event = json.loads(b"\n".join(lines))
+                    event = json.loads(b"\n".join(data_lines))
                 except ValueError:
                     return _invalid_success(None)
+                data_lines = []
                 if not isinstance(event, dict):
                     return _invalid_success(None)
-                if event.get("type") == "error":
+                etype = event.get("type") or event_name
+                event_name = ""
+                if etype == "error":
                     return _invalid_success(event)
-                if event.get("type") == "message_start" and _is_message(event.get("message")):
+                if etype == "message_start" and _is_message(event.get("message")):
                     async def _rest() -> AsyncIterator[bytes]:
                         try:
                             for buffered in original_prefix:
@@ -423,14 +437,10 @@ async def _checked_stream(response: httpx.Response) -> StreamingResponse | JSONR
                         headers={"Cache-Control": "no-cache", "Connection": "close"},
                     )
                 return _invalid_success(None)
-            # 丢掉已解析的 keepalive；成功事件的前缀会在上面的 return 中原样回传。
-            if frame_start:
-                prefix = bytearray(normalized[frame_start:])
-                frame_start = 0
         return _invalid_success(None)
     finally:
-        # 成功时连接所有权交给 _rest；失败时尚未创建响应，必须直接释放。
-        if not locals().get("handed_off", False):
+        # 成功时连接所有权交给 _rest；失败时尚未提交响应，必须直接释放。
+        if not handed_off:
             await response.aclose()
 
 
