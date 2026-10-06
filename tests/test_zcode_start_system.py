@@ -74,6 +74,9 @@ class _FakeResp:
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 1, "output_tokens": 1}}
 
+    async def aclose(self):
+        pass
+
 
 class _FakeClient:
     """只抓 build_request 的 json 出参——被送到上游的 body 就是断言对象。"""
