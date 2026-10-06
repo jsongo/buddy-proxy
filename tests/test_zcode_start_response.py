@@ -140,3 +140,20 @@ def test_openai_stream_error_not_fake_done():
                       stream=True, protocol="openai")
     assert isinstance(resp, JSONResponse)
     assert resp.status_code == 429
+
+
+def test_openai_stream_crlf_delivers_text():
+    frames = (
+        b'event: message_start\r\ndata: {"type":"message_start","message":'
+        b'{"type":"message","role":"assistant","content":[]}}\r\n\r\n'
+        b'event: content_block_delta\r\ndata: {"type":"content_block_delta",'
+        b'"delta":{"type":"text_delta","text":"hello"}}\r\n\r\n'
+        b'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n'
+    )
+    resp, data = forward([frames[i:i + 1] for i in range(len(frames))], stream=True,
+                         protocol="openai", content_type="text/event-stream")
+    assert isinstance(resp, StreamingResponse)
+    events = [json.loads(line[6:]) for line in data.splitlines() if line.startswith(b"data: {")]
+    assert events[0]["choices"][0]["delta"]["role"] == "assistant"
+    assert any(event["choices"][0]["delta"].get("content") == "hello" for event in events)
+    assert data.endswith(b"data: [DONE]\n\n")
