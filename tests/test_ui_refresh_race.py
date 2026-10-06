@@ -36,6 +36,9 @@ SLICE_RE = re.compile(
 
 _STUB = """
 globalThis.toast = () => {};
+globalThis.location = {search: '', href: 'http://localhost/ui'};
+globalThis.history = {replaceState() {}};
+globalThis.localStorage = {getItem() { return null; }, setItem() {}};
 // 万能元素桩：切片里有顶层的 DOM wiring（rb-quick 等），摸不到真 DOM
 const _EL = {
   addEventListener() {}, removeEventListener() {}, insertAdjacentHTML() {},
