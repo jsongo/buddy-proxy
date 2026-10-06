@@ -52,9 +52,10 @@ uv run python -m buddy_proxy --login --desensitize
 ```bash
 ./buddy start              # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # 登录/自检上游账号（codebuddy(=workbuddy)/trae/zcode/glm/doubao/dumate/mimo/qoder/gemini/antigravity/kimi）
-                           # trae/qoder 可加 --region cn|global（两区账号不通用）；登录过海外账号会自动
-                           # 启用 traeintl/qoderintl 独立通道，管理页里海外额度单独一张卡
+./buddy login [provider]   # 登录/自检上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/dumate/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi）
+                           # trae/qoder 可加 --region cn|global（两区账号不通用）；traeintl/qoderintl 是登录别名，
+                           # 等价 --region global；登录过海外账号会自动启用 traeintl/qoderintl 独立通道，
+                           # 管理页里海外额度单独一张卡
 ./buddy ui                 # 仅打开管理页（必要时先启动）
 ./buddy update             # 更新到最新代码（git pull -> uv sync -> 重启）
 

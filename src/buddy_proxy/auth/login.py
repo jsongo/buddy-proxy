@@ -5,6 +5,7 @@
     python -m buddy_proxy.auth.login codebuddy           # CodeBuddy（腾讯）浏览器授权
     python -m buddy_proxy.auth.login workbuddy           # 同 codebuddy（workbuddy 是其别名）
     python -m buddy_proxy.auth.login trae                # Trae Work (SOLO)：浏览器登录后粘贴回调链接
+    python -m buddy_proxy.auth.login traeintl            # 同 trae --region global（海外版；账号落盘后 traeintl 通道自动注册）
     python -m buddy_proxy.auth.login zcode               # 检查并打印 zcode 凭据配置指引（API key，无交互登录）
     python -m buddy_proxy.auth.login doubao              # 打印豆包（CDP）说明
     python -m buddy_proxy.auth.login mimo                # 小米账号浏览器登录（同 qoder 的 device flow）
@@ -39,6 +40,12 @@ PROVIDER_ALIASES: dict[str, str] = {
     "qoder-cn": "qoder",
     # 通道 id 是 gemini-cli（/v1/models 前缀），登录命令两写等价。
     "gemini-cli": "gemini",
+    # traeintl/qoderintl 是**服务端通道 id**（海外版 provider），不是登录入口——
+    # 海外版没有独立账号体系（共用 work 账号池、按 region 落盘过滤）。但
+    # 「buddy login traeintl」是最直觉的敲法，按别名接住：落到主 provider 并
+    # 隐含 region=global（见 _resolve_provider_region 的冲突检查）。
+    "traeintl": "trae",
+    "qoderintl": "qoder",
 }
 
 KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi")
@@ -742,26 +749,50 @@ _DISPATCH = {
 }
 
 
+def _resolve_provider_region(raw: str, cli_region: str | None) -> tuple[str, str | None]:
+    """provider 名归一 + intl 登录别名的隐含区域。
+
+    ``traeintl``/``qoderintl`` 是通道 id（服务端海外版 provider），登录侧没有
+    独立入口——别名落到主 provider 并隐含 ``region=global``（账号落盘打 region
+    标，重启后 ``intl_enabled()`` 检测到海外账号自动注册通道）。显式给了别的
+    ``--region`` 时抛 ValueError，别让两个信号打架。
+    """
+    name = raw.strip().lower()
+    provider = PROVIDER_ALIASES.get(name, name)
+    region = cli_region
+    if name in ("traeintl", "qoderintl"):
+        if region and region != "global":
+            raise ValueError(
+                f"{name} 隐含 --region global（海外版），与 --region {region} 冲突")
+        region = "global"
+    return provider, region
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="buddy_proxy.auth.login",
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy) / trae / zcode / glm / doubao / mimo / qoder(=quoder) / gemini / antigravity / kimi，默认 codebuddy")
+                        help="codebuddy(=workbuddy) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi 登录不自动打开浏览器，只打印链接")
     parser.add_argument("--region", default=None,
                         help="trae/qoder 登录区域：cn（国内版）/ global（海外版）。"
-                             "不给且是交互终端时会问一句；两区账号不通用")
+                             "不给且是交互终端时会问一句；两区账号不通用。"
+                             "traeintl/qoderintl 隐含 global")
     args = parser.parse_args()
 
-    provider = PROVIDER_ALIASES.get(args.provider.strip().lower(), args.provider.strip().lower())
+    try:
+        provider, region = _resolve_provider_region(args.provider, args.region)
+    except ValueError as exc:
+        parser.error(str(exc))
     handler = _DISPATCH.get(provider)
     if handler is None:
         parser.error(f"未知 provider: {args.provider}（支持: {', '.join(KNOWN_PROVIDERS)}，"
-                     f"workbuddy 是 codebuddy 的别名）")
-    return handler(open_browser=not args.no_browser, region=args.region)
+                     f"workbuddy 是 codebuddy 的别名；traeintl/qoderintl 是 "
+                     f"trae/qoder 的海外登录别名）")
+    return handler(open_browser=not args.no_browser, region=region)
 
 
 if __name__ == "__main__":
