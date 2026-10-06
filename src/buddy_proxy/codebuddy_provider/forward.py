@@ -230,11 +230,14 @@ async def _dispatch_once(
     if provider_id == "codebuddy" or provider_id not in providers:
         # 默认 CodeBuddy 通道（不在 providers 里），对称封装，与其它 provider 一致
         _reject_if_disabled(state, "codebuddy", model)
-        return await _instrument(
+        resp = await _instrument(
             state, _default_codebuddy.forward(body, protocol, original),
             provider_id="codebuddy", model_id=model, protocol=protocol,
             stream=bool(body.get("stream")),
         )
+        # The UI test endpoint reports the routed channel without adding a public header.
+        resp._buddy_provider_id = "codebuddy"
+        return resp
     provider = providers[provider_id]
     # 非默认 provider（Trae/豆包等）：由各自 forward 决定协议支持范围。
     # Trae 已支持 anthropic 协议（/v1/messages 客户端如 Claude Code 可直连）；
@@ -245,11 +248,13 @@ async def _dispatch_once(
     _reject_if_disabled(state, provider.id, gate_model)
     diagnostic("provider_route", provider=provider.id, model=model, protocol=protocol)
     provider.ensure_auth()
-    return await _instrument(
+    resp = await _instrument(
         state, provider.forward(body, protocol, original),
         provider_id=provider.id, model_id=model, protocol=protocol,
         stream=bool(body.get("stream")),
     )
+    resp._buddy_provider_id = provider.id
+    return resp
 
 
 def _split_target(target: str) -> tuple[str, str]:

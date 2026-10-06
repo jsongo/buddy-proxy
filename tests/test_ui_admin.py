@@ -1105,9 +1105,24 @@ def test_ui_test_ok(env):
     body = env.client.post("/ui/api/test",
                            json={"provider": "fakeprov", "model": "fake-model"}).json()
     assert body["ok"] is True
+    assert body["provider"] == "fakeprov"
     assert body["content"] == "pong"
     assert body["usage"]["prompt_tokens"] == 3
     assert env.fake.last_body["model"] == "fake-model"
+
+
+def test_ui_test_reports_provider_selected_by_model_order(env):
+    env.state.model_order = {"fake-model": ["fakeprov/fake-model"]}
+    body = env.client.post("/ui/api/test",
+                           json={"provider": "", "model": "fake-model"}).json()
+    assert body["ok"] is True
+    assert body["provider"] == "fakeprov"
+    assert body["model"] == "fake-model"
+
+
+def test_model_test_result_shows_provider_with_reply_model(env):
+    ui = _ui_source(env.client)
+    assert "[r.provider || provider, r.model || model].filter(Boolean).join('/')" in ui
 
 
 def test_ui_test_provider_error(env):
