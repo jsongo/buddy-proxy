@@ -52,6 +52,9 @@ class TraeIntlProvider(TraeProvider):
     name = "Trae 海外版"
     # 海外上游没有签到端点（实测 404）——不进 /ui 打卡列表、不被自动签到调度。
     supports_checkin = False
+    # 额度卡的分组标签用自己的通道名（见 TraeProvider._quota_tag）：与 CN 通道
+    # 并行在线时，两卡的行标不能都叫 ``Trae #N``，否则分不清哪张是美元口径。
+    _quota_tag = "Trae 海外版"
 
     def __init__(self, base_url: str | None = None):
         # 区域钉死 global：chat 网关、模型目录、failover 选账号、额度口径全按它。

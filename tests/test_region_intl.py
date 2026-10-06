@@ -204,6 +204,18 @@ def test_trae_intl_provider_identity():
     assert p.checkin_status() is None and p.checkin_claim() is None
 
 
+def test_intl_quota_label_tag_differs_from_cn(monkeypatch):
+    """两个通道并行在线时，额度行标不能都叫 ``Trae #N``（分不清哪张是美元）。"""
+    _seed_quota_stubs(monkeypatch)
+    save_account_cred(_trae_cred("gl1", region="global"))
+    save_account_cred(_trae_cred("gl2", region="global"))
+
+    cn_labels = _quota_labels(TraeProvider())            # CN 通道查不到本区账号
+    intl_labels = _quota_labels(TraeIntlProvider())
+    assert all(lab.startswith("Trae 海外版 #") for lab in intl_labels), intl_labels
+    assert not any(lab.startswith("Trae 海外版") for lab in cn_labels)
+
+
 def test_trae_intl_enabled_follows_index():
     assert trae_intl_enabled() is False, "没有海外账号时不注册 traeintl"
     save_account_cred(_trae_cred("cn-only", region="cn"))
@@ -401,6 +413,29 @@ def test_checkin_claim_throttle_uses_loop_position(monkeypatch):
     # 本轮第一个账号不睡，第二个睡一次
     assert len(slept) == 1, f"两个账号只该节流一次，实际 {slept}"
     assert out["checked_in"] is True
+
+
+def test_checkin_claim_accounts_use_snapshot_index(monkeypatch):
+    """打卡结果明细的 index 也要对得上快照（✎ 改名按它定位账号）。"""
+    save_account_cred(_trae_cred("gl1", region="global"))
+    save_account_cred(_trae_cred("cn1"))
+    save_account_cred(_trae_cred("cn2"))
+    monkeypatch.setattr(
+        "buddy_proxy.trae.provider.claim_checkin_credits",
+        lambda token="", account_id="", region="": {"code": 0, "message": "ok",
+                                                    "credits_granted": 5})
+    monkeypatch.setattr(
+        "buddy_proxy.trae.provider.ensure_account_token",
+        lambda aid: ("tok", {"uid": aid}))
+
+    snap = _snapshot_index_by_uid()
+    out = TraeProvider().checkin_claim()
+    assert out["checked_in"] is True
+    # 只领了本区的两个 CN 号，且明细行的 index 与快照逐项一致
+    assert sorted(d["index"] for d in out["accounts"]) == \
+        sorted(snap[u] for u in ("cn1", "cn2"))
+    assert {d["id"] for d in out["accounts"]}
+    assert all(d["ok"] for d in out["accounts"])
 
 
 # ───────────────────────── QoderIntlProvider ─────────────────────────

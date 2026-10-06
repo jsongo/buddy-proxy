@@ -178,7 +178,11 @@ requires a restart.
   The error text comes from `settings.PROVIDER_ENABLE_HINTS` rather than being
   assembled from the prefix — `traepat` has no `--traepat` flag (it rides the
   `--trae` branch, gated by `TRAE_PAT_BEARER`), so a generated hint would name
-  a flag that does not exist.
+  a flag that does not exist. The dual-region ids follow the same shape:
+  `traeintl` / `qoderintl` have no flags of their own either — they ride the
+  `--trae` / `--qoder` branches and register only when at least one
+  `region=global` account is logged in, so their hints point at
+  `buddy login <provider> --region global` first.
 - `core/cooldown.py` owns transient target health: a failed target is skipped
   for a short TTL (escalating on repeat failure). It is deliberately **in-memory
   and not persisted** — a restart is a legitimate reason to re-probe, and user
