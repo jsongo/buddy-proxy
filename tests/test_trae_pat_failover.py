@@ -1010,6 +1010,9 @@ def test_quota_code_repeated_hits_escalate_to_next_day(monkeypatch):
     _configure_two(monkeypatch)
     _install_credentials(monkeypatch)
     profile = pat.ensure_pat_config()[0]
+    # 固定在日界之外，避免真实运行恰好跨过 Asia/Shanghai 午夜时测试误报。
+    now = 1_700_000_000.0
+    monkeypatch.setattr(pat.time, "time", lambda: now)
     for _ in range(pat._QUOTA_CODE_ESCALATE_HITS):
         pat._mark_cooldown(profile, "standard", code=4008)
     until = pat._cooldown_until(profile, "standard")
