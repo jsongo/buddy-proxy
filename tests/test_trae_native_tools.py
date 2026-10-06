@@ -3,7 +3,7 @@
 覆盖 buddy_proxy.trae.native_tools 的完整链路：
 - 非流式 / 流式：原生 tool_calls SSE → OpenAI chat.completion（含真实 usage）
 - 多轮结构化历史回放：assistant.tool_calls / role:tool 原样上报（不改写为文本）
-- 4001 参数拒绝 → 自动回落文本协议（send_trae_chat），换号……换通道不影响结果
+- 4001 参数拒绝 → 流式先降级 native 非流式重试，再回落文本协议（send_trae_chat），换号……换通道不影响结果
 - 非 4001 上游错误 → 不回落，原样上报
 - 工具载荷形状：parameters 序列化为 JSON 字符串（上游 Go schema 要求）
 
@@ -139,6 +139,8 @@ def native_env(monkeypatch):
     def fake_native(native_msgs, model, stream, tools):
         native_calls.append({"messages": native_msgs, "model": model,
                              "stream": stream, "tools": tools})
+        if stream and getattr(state, "_native_reject_stream", False):
+            return SSE_NATIVE_REJECTED
         if getattr(state, "_native_sse", None) is not None:
             return state._native_sse
         return SSE_NATIVE_TOOL_CALL
@@ -293,7 +295,26 @@ def test_native_4001_falls_back_to_legacy(client, native_env):
     assert len(native_calls) == 1 and len(legacy_calls) == 1
 
 
-def test_native_4001_stream_falls_back_nonstream_upstream(client, native_env):
+def test_native_4001_stream_retries_native_nonstream(client, native_env):
+    """上游整体拒绝 chat_v3 流式（2026-10-07 实测）：先降级 native 非流式重试，
+    不动文本协议，客户端仍拿到 SSE tool_calls。"""
+    state, native_calls, legacy_calls = native_env
+    state._native_reject_stream = True
+    r = client.post("/v1/chat/completions", json=_chat_body(stream=True))
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse_events(r.text)
+    finish = [d.get("choices", [{}])[0].get("finish_reason")
+              for ev, d in events if isinstance(d, dict) and d.get("choices")]
+    assert "tool_calls" in finish
+    # 两次 native 调用：流式被拒 → 非流式成功；文本协议未动用
+    assert [c["stream"] for c in native_calls] == [True, False]
+    assert legacy_calls == []
+
+
+def test_native_4001_stream_full_fallback_to_legacy(client, native_env):
+    """native 非流式重试也被拒（如 GPT-6 系连 solo_work_lite 一并 4001 的上游）：
+    落文本协议兜底，仍用非流式上游请求，客户端照常收 SSE。"""
     state, native_calls, legacy_calls = native_env
     state._native_sse = SSE_NATIVE_REJECTED
     state._legacy_reject_streaming = True
@@ -304,8 +325,8 @@ def test_native_4001_stream_falls_back_nonstream_upstream(client, native_env):
     finish = [d.get("choices", [{}])[0].get("finish_reason")
               for ev, d in events if isinstance(d, dict) and d.get("choices")]
     assert "tool_calls" in finish
-    assert len(native_calls) == 1 and len(legacy_calls) == 1
-    assert legacy_calls[0]["stream"] is False
+    assert [c["stream"] for c in native_calls] == [True, False]
+    assert len(legacy_calls) == 1 and legacy_calls[0]["stream"] is False
 
 
 # ---------------------------------------------------------------------------

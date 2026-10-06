@@ -925,16 +925,28 @@ class TraeProvider(BaseProvider):
                         used = True
                         if _native_rejected(raw_text) and not self._keeps_native_error(model):
                             log.warning(
-                                "trae native tools rejected (4001), "
-                                "fallback to text protocol: model=%s", model)
+                                "trae native stream rejected (4001), "
+                                "retry nonstream: model=%s", model)
                             _debug_dump("trae_native_fallback", model=model,
                                         phase="stream")
-                            # 文本兜底在此路径本来就会整段缓冲，再由下游 SSE 包装；
-                            # 上游流式请求遇到 4001 时，改用已验证可用的非流式文本协议。
-                            raw_text = send_trae_chat(
-                                messages, model, stream=False,
-                                base_url=self._base_url)
-                            used = False
+                            # 上游会整体拒绝 chat_v3 流式请求（2026-10-07 实测：同
+                            # body 非流式 200、流式 4001，且文本协议兜底对 GPT-6 系
+                            # 的 solo_work_lite 也 4001）。先降级 native 非流式重试
+                            # ——非流式响应本就是 SSE 帧形态，整段缓冲后走同一解析
+                            # 路径；也被拒才落文本协议兜底。
+                            raw_text = self._send_native_request(
+                                native["messages"], model, stream=False,
+                                tools=native["tools"])
+                            if _native_rejected(raw_text):
+                                log.warning(
+                                    "trae native nonstream also rejected (4001), "
+                                    "fallback to text protocol: model=%s", model)
+                                raw_text = send_trae_chat(
+                                    messages, model, stream=False,
+                                    base_url=self._base_url)
+                                used = False
+                            else:
+                                used = True
                         _ev_q.put(("raw", (raw_text, used)))
                     else:
                         _ev_q.put(("raw", (send_trae_chat(

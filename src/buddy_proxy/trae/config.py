@@ -355,6 +355,12 @@ _WORK_FUNCTION_OVERRIDE: dict[str, str] = {
 # **native 主通道不分表**（native_tools 固定 function=chat_v3）——2026-10-06
 # 复测 chat_v3 对 gpt-6-sol / kimi-k3 亦 200 出流（gpt-5.6 系本就需要
 # chat_v3），海外已收录模型在 chat_v3 下广谱可用，native 直通无回落。
+#
+# 【2026-10-07 更新】GPT-6 系（sol/luna）的 solo_work_lite 也整体 4001 了
+# （文本兜底连非流式都被拒），且 chat_v3 的**流式**请求被上游整体拒绝
+# （同 body 非流式 200，非频率限制——100+ 次请求按 stream 标志完美二分）。
+# 海外模型现全靠 native chat_v3 非流式兜底：流式被拒时 provider 自动降级
+# 非流式重试（见 provider._stream 的 4001 分支），文本协议只作最后防线。
 _WORK_FUNCTION_OVERRIDE_INTL: dict[str, str] = {
     "gpt-5.6-sol": "chat_v3",
     "gpt-5.6-terra": "chat_v3",
