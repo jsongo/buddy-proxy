@@ -56,6 +56,23 @@ log = logging.getLogger(__name__)
 #: 兜底请求不退避只会再吃一个 4001。2s 取「>1s 恢复点」的安全余。
 _REJECT_BACKOFF_S = 2.0
 
+#: 「该模型 chat_v3 流式被上游整体拒绝」的标记 TTL。流式 4001 后短 TTL 内直接
+#: 跳过必败的流式尝试、straight to 非流式缓冲——既省一次注定失败的往返，也避免
+#: 每个流式请求都喂养一次惩罚窗口（实测惩罚窗会随连续失败拉长，02:31 时 ~1s、
+#: 02:42 已漂到 ~5s+）。TTL 过后放一次流式探测，上游恢复流式即自动回到直通。
+_STREAM_REJECT_SKIP_S = 300.0
+_stream_reject_until: dict[str, float] = {}
+
+
+def _stream_rejected_recently(model: str) -> bool:
+    """该模型的流式尝试近期被 4001 拒过（TTL 内）。单调钟，免疫墙钟跳变。"""
+    until = _stream_reject_until.get(model)
+    return until is not None and time.monotonic() < until
+
+
+def _mark_stream_rejected(model: str) -> None:
+    _stream_reject_until[model] = time.monotonic() + _STREAM_REJECT_SKIP_S
+
 #: 多账号额度并发查询：整轮 deadline + 常驻线程池（与 antigravity/qoder 同口径）。
 #: 常驻（不是每轮新建）的理由见 trae/pat/quota.py：每轮新建 + shutdown(wait=False)
 #: 会让慢轮线程留在后台累积；常驻池上限封顶，慢轮占名额、后续轮次自然排队。
@@ -924,16 +941,23 @@ class TraeProvider(BaseProvider):
                                 _ev_q.put(("event", upstream_event))
                             _ev_q.put(("eof", None))
                             return
-                        raw_text = self._send_native_request(
-                            native["messages"], model, stream=True,
-                            tools=native["tools"])
+                        skip_stream = (not self._keeps_native_error(model)
+                                       and _stream_rejected_recently(model))
+                        if skip_stream:
+                            # TTL 内：跳过必败的流式尝试，直接非流式缓冲（省一次
+                            # 注定失败的往返，也不再喂养惩罚窗口）
+                            log.info(
+                                "trae native stream rejected recently, "
+                                "skip to nonstream: model=%s", model)
+                            raw_text = self._send_native_request(
+                                native["messages"], model, stream=False,
+                                tools=native["tools"])
+                        else:
+                            raw_text = self._send_native_request(
+                                native["messages"], model, stream=True,
+                                tools=native["tools"])
                         used = True
                         if _native_rejected(raw_text) and not self._keeps_native_error(model):
-                            log.warning(
-                                "trae native stream rejected (4001), "
-                                "retry nonstream: model=%s", model)
-                            _debug_dump("trae_native_fallback", model=model,
-                                        phase="stream")
                             # 上游会整体拒绝 chat_v3 流式请求（2026-10-07 实测：同
                             # body 非流式 200、流式 4001，且文本协议兜底对 GPT-6 系
                             # 的 solo_work_lite 也 4001）。先降级 native 非流式重试
@@ -943,13 +967,20 @@ class TraeProvider(BaseProvider):
                             # 快速重试惩罚（实测失败后 ~0.2s 紧接的请求照样 4001，隔
                             # 1s 即恢复），不退避的兜底只会再吃一个 4001。读线程里睡，
                             # 心跳照常喂下游，客户端无感。
-                            time.sleep(_REJECT_BACKOFF_S)
-                            raw_text = self._send_native_request(
-                                native["messages"], model, stream=False,
-                                tools=native["tools"])
+                            if not skip_stream:
+                                log.warning(
+                                    "trae native stream rejected (4001), "
+                                    "retry nonstream: model=%s", model)
+                                _debug_dump("trae_native_fallback", model=model,
+                                            phase="stream")
+                                _mark_stream_rejected(model)
+                                time.sleep(_REJECT_BACKOFF_S)
+                                raw_text = self._send_native_request(
+                                    native["messages"], model, stream=False,
+                                    tools=native["tools"])
                             if _native_rejected(raw_text):
                                 log.warning(
-                                    "trae native nonstream also rejected (4001), "
+                                    "trae native nonstream rejected (4001), "
                                     "fallback to text protocol: model=%s", model)
                                 time.sleep(_REJECT_BACKOFF_S)
                                 raw_text = send_trae_chat(

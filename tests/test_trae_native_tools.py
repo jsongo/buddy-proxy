@@ -31,10 +31,13 @@ from buddy_proxy.trae.provider import TraeProvider
 def _clear_trae_cooldowns():
     """额度类上游错误（4031/4008…）会落 5 分钟冷却；不清理会污染同进程后续用例。"""
     from buddy_proxy.trae import failover
+    from buddy_proxy.trae import provider as trae_provider
 
     failover._cooldowns.clear()
+    trae_provider._stream_reject_until.clear()
     yield
     failover._cooldowns.clear()
+    trae_provider._stream_reject_until.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +322,30 @@ def test_native_4001_stream_retries_native_nonstream(client, native_env):
     assert legacy_calls == []
     # 重试前有退避（上游对刚失败的账号有亚秒级快速重试惩罚）
     assert state._sleeps == [2.0]
+
+
+def test_native_4001_stream_skip_ttl_second_request(client, native_env):
+    """流式被拒后 TTL 内的后续流式请求直接跳过必败尝试，straight to 非流式。"""
+    state, native_calls, legacy_calls = native_env
+    state._native_reject_stream = True
+    r1 = client.post("/v1/chat/completions", json=_chat_body(stream=True))
+    assert r1.status_code == 200
+    # 第一次：流式被拒 → 非流式重试成功（上一用例已断言细节）
+    assert [c["stream"] for c in native_calls] == [True, False]
+    native_calls.clear()
+    state._sleeps.clear()
+
+    r2 = client.post("/v1/chat/completions", json=_chat_body(stream=True))
+    assert r2.status_code == 200
+    assert r2.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse_events(r2.text)
+    finish = [d.get("choices", [{}])[0].get("finish_reason")
+              for ev, d in events if isinstance(d, dict) and d.get("choices")]
+    assert "tool_calls" in finish
+    # 第二次：跳过流式尝试，仅一次非流式 native 调用，无退避、无文本协议
+    assert [c["stream"] for c in native_calls] == [False]
+    assert legacy_calls == []
+    assert state._sleeps == []
 
 
 def test_native_4001_stream_full_fallback_to_legacy(client, native_env):
