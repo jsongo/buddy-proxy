@@ -14,8 +14,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -36,22 +38,39 @@ CHAT_SCENES = ("chat", "developer", "assistant", "app")
 
 #: 上游不可用时的兜底目录（全部为实测可用的 key）。
 #:
-#: 2026-10-03 起上游把三方模型整批收回（目录 ``enable=false``，调用返回
-#: code 112 + pricingUrl 的 403，官方桌面端同样不可用——账号/套餐级权益门，
-#: 不是代理问题）：DeepSeek/GLM/Kimi/MiniMax 全部摘除，``cmodel``/``smodel``
-#: 则从目录里彻底消失。这里只保留实测仍可调的 Qwen 系（3.8 两档 + 仍在
-#: enable 的 3.7 三档）；上游若恢复，目录会自然带回来，不必改这里。
+#: 2026-10-03 曾实测三方模型整批被收回（目录 ``enable=false``，调用返回
+#: code 112 的 403）；2026-10-05 复测权益已恢复——那是**账号级**分桶而非
+#: 全局门：全量账号（01a0decc）目录回到 14 条。本表按该全量目录重建
+#: （``cmodel``/``smodel`` 目录里彻底消失，不收）；price_factor 全部按实测
+#: 修正（qmodel_latest 0.1→0.5、q37fmodel 0.02→0.1）。个别账号仍受限的
+#: 情况走 :data:`MODEL_OVERRIDE`（per-account 白名单）处理，兜底表不管。
 FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
     {"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.2, "is_free": True, "max_input_tokens": 180000},
     {"key": "qfmodel", "display_name": "Qwen3.8-Flash", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.0, "is_free": True, "max_input_tokens": 180000},
     {"key": "qmodel_latest", "display_name": "Qwen3.7-Max", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
+     "is_vl": True, "price_factor": 0.5, "max_input_tokens": 1000000},
     {"key": "qmodel", "display_name": "Qwen3.7-Plus", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.04, "max_input_tokens": 1000000},
     {"key": "q37fmodel", "display_name": "Qwen3.7-Flash", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.02, "max_input_tokens": 1000000},
+     "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
+    {"key": "dmodel", "display_name": "DeepSeek-V4-Pro", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.5, "max_input_tokens": 1000000},
+    {"key": "dfmodel", "display_name": "DeepSeek-Flash", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
+    {"key": "gmodel", "display_name": "GLM-5.3", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.8, "is_free": False, "max_input_tokens": 180000},
+    {"key": "gfmodel", "display_name": "GLM-5.3-Flash", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
+    {"key": "gm51model", "display_name": "GLM-5.2", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.6, "max_input_tokens": 180000},
+    {"key": "kmodel_latest", "display_name": "Kimi-K3", "is_reasoning": True,
+     "is_vl": True, "price_factor": 1.4, "is_free": False, "max_input_tokens": 180000},
+    {"key": "kmodel", "display_name": "Kimi-K2.8-Preview", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.8},
+    {"key": "mmodel", "display_name": "MiniMax-M2.7", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.2, "max_input_tokens": 180000},
 )
 
 #: 档位模型（由平台路由，不绑定具体底层模型）。
@@ -160,6 +179,106 @@ def _canonical_id_slug(name: str) -> str:
     里的点与连字符，因为对外 id 本身就是给人看的。
     """
     return str(name).strip().lower().replace("_", "-").replace(" ", "-")
+
+
+# -- per-account 模型覆盖表 ---------------------------------------------------
+
+#: 覆盖表文件（与本模块同目录的 ``models.json``）。
+#:
+#: 语义（用户拍板的**白名单**）：只列「有账号限制」的模型，条目里的
+#: ``accounts`` 列出**支持**该模型的账号 id (UUID)；未列出的模型 = 所有账号
+#: 都支持，``accounts`` 缺省 / ``"all"`` 同义。上游目录仍然是模型全集与
+#: enable 与否的权威——本表只做「哪个账号能不能调」的收窄，两边不互相同步。
+#:
+#: 形如：``{"models": [{"id": "glm-5.3", "accounts": ["<uuid>", ...]}]}``。
+#: id 接受对外 id / display_name / 上游 key 三种写法（归一比对）。
+_OVERRIDE_JSON = Path(__file__).with_name("models.json")
+
+
+def _load_model_override() -> dict[str, tuple[str, frozenset[str]]]:
+    """解析覆盖表 → ``{归一模型名: (原始写法, 支持账号集合)}``。
+
+    文件缺失 / 损坏 / 字段类型不对都回落成**空表**（= 全部无限制）并 log——
+    这是一份低频手工配置，任何解析问题都不该拖垮转发；宁可全账号放行交给
+    上游裁决。
+    """
+    try:
+        raw = json.loads(_OVERRIDE_JSON.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log.warning("qoder models.json 读取失败，忽略 per-account 模型限制: %s", exc)
+        return {}
+    models = raw.get("models") if isinstance(raw, dict) else None
+    out: dict[str, tuple[str, frozenset[str]]] = {}
+    for item in models or []:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        if not mid:
+            continue
+        accts = item.get("accounts")
+        if accts is None or accts == "all":
+            continue
+        if isinstance(accts, str):
+            accts = [accts]
+        if not isinstance(accts, list):
+            log.warning("qoder models.json 条目 %r 的 accounts 类型异常，忽略该条", mid)
+            continue
+        ids = frozenset(a for a in (str(x).strip() for x in accts) if a)
+        if not ids:
+            continue
+        out[_normalize(mid)] = (mid, ids)
+    return out
+
+
+def override_accounts(entry: dict[str, Any]) -> frozenset[str] | None:
+    """该目录条目的**支持账号集合**；``None`` = 未限制（所有账号都支持）。
+
+    条目侧按上游 key 与对外 public id 双路查表（覆盖表 id 写哪种都命中）。
+    """
+    if not MODEL_OVERRIDE:
+        return None
+    hit = (MODEL_OVERRIDE.get(_normalize(str(entry.get("key") or "")))
+           or MODEL_OVERRIDE.get(_normalize(public_model_id(entry))))
+    return hit[1] if hit else None
+
+
+def account_supports(entry: dict[str, Any], account_id: str) -> bool:
+    """per-account 支持判定：覆盖表白名单内才支持；未限制 = 全支持。"""
+    allowed = override_accounts(entry)
+    return allowed is None or account_id in allowed
+
+
+def unsupported_models_for(account_id: str) -> list[str]:
+    """该账号**不支持**的模型名列表（覆盖表白名单反查；纯本地不触网）。
+
+    账号卡小字用：覆盖表里 allowed 不含该账号的条目即受限模型，显示名用
+    覆盖表里的原始写法。
+    """
+    return [raw for _norm, (raw, ids) in MODEL_OVERRIDE.items() if account_id not in ids]
+
+
+def override_missing_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """覆盖表登记了、但现有目录没有的模型 → 合成最小条目（保证可显示/可路由）。
+
+    已知判定按条目的**上游 key 与对外 public id 双路归一**（覆盖表 id 多为
+    对外 id，而目录条目 key 是内部代号——只比 key 会把 ``gmodel``/``glm-5.3``
+    误判成两个模型，合成出幻影重复条目）。``resolve_key``/``entry()`` 对未知
+    名字原样透传上游，所以合成条目只需带 key/display_name；客户端按
+    ``qoder/<id>`` 点名即可解析。
+    """
+    known: set[str] = set()
+    for e in entries:
+        known.add(_normalize(str(e.get("key") or "")))
+        public = public_model_id(e)
+        if public:
+            known.add(_normalize(public))
+    out: list[dict[str, Any]] = []
+    for norm, (raw, _ids) in MODEL_OVERRIDE.items():
+        if norm not in known:
+            out.append({"key": raw, "display_name": raw})
+    return out
 
 
 class Catalog:
@@ -357,3 +476,8 @@ def to_openai_model(entry: dict[str, Any], provider_id: str) -> dict[str, Any]:
         model["credits"] = round(float(price), 2)
         model["price_factor"] = round(float(price), 2)
     return model
+
+
+#: 模块级加载一次（进程内静态；改文件需重启——模型限制是低频配置）。
+#: 放在模块尾部：_load_model_override 依赖本文件后段定义的 _normalize。
+MODEL_OVERRIDE: dict[str, tuple[str, frozenset[str]]] = _load_model_override()

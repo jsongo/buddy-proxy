@@ -345,7 +345,7 @@ function renderGroups() {
             ${schTag}
             ${ordTag}</td>
         <td class="muted"${dim}>${esc(m.name || '')}</td>
-        <td${dim}>${m.credits ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
+        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
         <td class="num mono muted"${dim}>${st.count ? fmtMs(st.avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">

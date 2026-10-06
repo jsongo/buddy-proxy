@@ -113,6 +113,23 @@ other index write) is the sole writer of `alias`; the HTTP surface is
 check-in detail rows and the frontend panels, so the quota card and the
 check-in card never disagree about who is who.
 
+**qoder's model catalog is per-account.** The upstream model list is bucketed
+by account (a risk-controlled account may only see the Qwen3.8 pair while a
+full account sees all 14, and the state drifts), so `qoder.refresh_models`
+walks **every** account and stores the union — publishing one account's view
+used to erase the others' models from `/v1/models`. The catalog is memory-only
+per region; `__main__` installs a background warmup loop (fetch on startup,
+re-fetch every `CACHE_TTL_S`) so a restart no longer strands the list on the
+bundled static fallback. Per-model account restrictions are an explicit
+allowlist in `qoder/models.json` (`{"id": "<public id>", "accounts":
+[<uuid>, ...]}` — listed ids **support** the model; unlisted models and
+`"all"` mean every account). `forward` filters candidate accounts through it
+**before** the failover loop: unsupported accounts are skipped silently (no
+cooldown — the account is healthy, it just lacks the entitlement) and an
+empty candidate list fails fast with 404 instead of paying a slow read
+timeout per restricted account. The JSON loads once at import; editing it
+requires a restart.
+
 ## Models and settings
 
 - `web/models_config.json` is the source for static CodeBuddy/PAT catalog

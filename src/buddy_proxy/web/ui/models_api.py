@@ -44,8 +44,15 @@ def _codebuddy_models() -> list[dict[str, Any]]:
 
 
 def _provider_models(provider: Any) -> list[dict[str, Any]]:
+    # per-account 模型支持画像（qoder 特有，鸭子类型取；未实现 = 全账号支持）
+    support_fn = getattr(provider, "model_support_map", None)
+    support_map = support_fn() if callable(support_fn) else {}
+    prefix = f"{provider.id}/"
     models = []
     for m in provider.models():
+        mid = str(m.get("id") or "")
+        if mid.startswith(prefix):
+            mid = mid[len(prefix):]
         models.append({
             "id": m.get("id"),
             "name": m.get("description") or m.get("name") or m.get("id"),
@@ -55,6 +62,8 @@ def _provider_models(provider: Any) -> list[dict[str, Any]]:
             "tags": m.get("tags", []),
             "context_window": m.get("context_window") or m.get("max_input"),
             "reasoning": bool(m.get("reasoning")),
+            # 仅受账号限制的模型带 {"limited": true, "accounts": [...]}；无限制不带
+            "support": support_map.get(mid),
         })
     return models
 
@@ -511,6 +520,9 @@ async def ui_model_order_options(request: Request):
             entry = {"id": mid, "target": settings_mod.model_key(gid, mid)}
             if label and label != mid:
                 entry["label"] = label
+            sup = item.get("support")
+            if isinstance(sup, dict) and sup.get("limited"):
+                entry["support"] = sup
             models.append(entry)
         if models:
             groups.append({"provider": gid, "models": models})

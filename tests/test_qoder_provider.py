@@ -633,16 +633,21 @@ def test_hidden_keys_are_all_real_catalog_keys():
     assert HIDDEN_KEYS <= keys
 
 
-def test_gated_models_are_not_in_fallback():
-    """2026-10-03 被上游收回的三方模型不得再出现在兜底目录。
+def test_fallback_models_third_party_restored_measured():
+    """兜底目录恢复三方模型（2026-10-05 复测：权益收回是**账号级**分桶）。
 
-    兜底目录的语义是「实测可用」；摆着调不通的（调用返回 code 112 的
-    403，官方桌面端同样不可用）只会让 /v1/models 虚报。上游若恢复，
-    live 目录会自然带回来（enable=true），不需要改这里。
+    2026-10-03 曾实测三方模型整批 enable=false 收回；2026-10-05 复测全量
+    账号目录回到 14 条（enable=true）——门是账号级的，不是全局的。兜底表
+    语义仍为「实测可用」，按全量目录重建（price_factor 实测修正）；个别
+    账号受限的场景由 per-account 覆盖表（qoder/models.json）收窄，兜底表
+    不掺和。``cmodel``/``smodel`` 已从上游目录彻底消失，仍不收。
     """
+    keys = {str(m.get("key")) for m in Catalog.fallback()}
     for key in ("dmodel", "dfmodel", "gmodel", "gfmodel", "gm51model",
-                "kmodel", "kmodel_latest", "mmodel", "cmodel", "smodel"):
-        assert key not in {str(m.get("key")) for m in Catalog.fallback()}, key
+                "kmodel", "kmodel_latest", "mmodel"):
+        assert key in keys, key
+    assert "cmodel" not in keys
+    assert "smodel" not in keys
 
 
 def test_disabled_entries_are_filtered_from_listings():
@@ -918,18 +923,19 @@ def _provider() -> object:
 def test_models_hide_legacy_but_keep_current():
     """列表只列当前模型；旧模型隐藏（隐藏 ≠ 停用，点名仍可调）。
 
-    2026-10-03 起三方模型被上游收回（enable=false）、auto 档位也停用——
-    已停用的条目一律不列（is_enabled 过滤），列表只剩仍可调的 Qwen 系。
+    2026-10-05 复测三方模型恢复（账号级分桶），兜底目录重建后三方模型
+    回到列表；auto 档位仍停用（TIER_MODELS enable=False）、Qwen 3.7 三档
+    仍按 HIDDEN_KEYS 隐藏、cantus/sonus 目录里已消失。
     """
     ids = [m["id"] for m in _provider().models()]
     assert "qoder/qwen3.8-max" in ids
     assert "qoder/qwen3.8-flash" in ids
-    # 被上游停用的：不展示
-    assert "qoder/glm-5.3" not in ids
-    assert "qoder/kimi-k3" not in ids
+    assert "qoder/glm-5.3" in ids
+    assert "qoder/kimi-k3" in ids
+    assert "qoder/glm-5.2" in ids
+    # 隐藏/停用/消失的：不展示
     assert "qoder/auto" not in ids
     assert "qoder/qwen3.7-max" not in ids
-    assert "qoder/glm-5.2" not in ids
     assert "qoder/cantus" not in ids
 
 
