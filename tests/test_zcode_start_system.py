@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 
+from buddy_proxy.providers import zcode_start as zs
 from buddy_proxy.providers.zcode_start import (
     _SYSTEM_BLOCKS,
     _client_system_blocks,
@@ -96,7 +97,11 @@ def _forward_capture(body: dict, protocol: str = "anthropic") -> dict:
         return fake
 
     provider._get_client = _get_client  # type: ignore[method-assign]
-    resp = asyncio.run(provider.forward(body, protocol, body))
+    # deviceMid 来自本机 ~/.zcode/v2/telemetry-state.json（CI 没有这个文件，
+    # _build_metadata_user_id 会退化成 "{}"）——固定住，测试不依赖环境。
+    import unittest.mock as mock
+    with mock.patch.object(zs, "_load_device_mid", lambda: "test-device-mid"):
+        resp = asyncio.run(provider.forward(body, protocol, body))
     assert resp.status_code == 200
     assert fake.body is not None
     return fake.body
