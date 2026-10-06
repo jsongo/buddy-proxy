@@ -45,7 +45,9 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 ```bash
 ./buddy start              # start (if not running) and open http://127.0.0.1:8787/ui
 ./buddy stop / restart / status / logs
-./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity)
+./buddy login [provider]   # upstream login (codebuddy(=workbuddy)/trae/zcode/doubao/mimo/qoder/gemini/antigravity/kimi)
+                           # trae/qoder accept --region cn|global (accounts differ per region); logging in a global
+                           # account also enables the traeintl/qoderintl channels — separate quota cards in the UI
 ./buddy ui                 # just open the admin UI (starts the proxy if needed)
 ./buddy update             # update to the latest code (git pull -> uv sync -> restart)
 

@@ -224,7 +224,7 @@ def main():
     parser.add_argument("--qoder", action="store_true", default=os.getenv("QODER_ENABLED", "") == "1",
                         help="启用 Qoder provider（Qwen3.8-Max/Flash、DeepSeek、GLM、Kimi 等；"
                              "凭据跑 `buddy login qoder` 或设 QODER_TOKEN，"
-                             "用 QODER_REGION=cn|global 切区域）")
+                             "海外账号走独立通道 qoderintl；QODER_REGION 仅作默认区域回退）")
     parser.add_argument("--gemini", action="store_true", default=os.getenv("GEMINI_ENABLED", "") == "1",
                         help="启用 Gemini provider（Google Code Assist 免费通道，OAuth 登录；"
                              "凭据跑 `buddy login gemini`）")
@@ -308,6 +308,25 @@ def main():
         # 模型目录预热 + 周期刷新：目录是账号级分桶且纯内存（重启即丢），不预热
         # 的话启动后列表回落到本地兜底表、首次转发前 catalog 一直是空的。
         _install_qoder_model_warmup(qoder)
+
+        # 海外通道（有 global 区账号时启用）：qoder 的双区域机制本就完整，这里
+        # 只是把 global 钉成一个**独立 id** 的通道，让它与 CN 同时在线、各自
+        # 路由（``qoderintl/模型``）、/ui 各一张额度卡——CN 与海外的签到、目录、
+        # 计费互不混淆。条件注册见 qoder.intl_provider.intl_enabled()。
+        from buddy_proxy.qoder.intl_provider import QoderIntlProvider, intl_enabled
+        if qoder.region().key == "global":
+            # QODER_REGION=global 时主通道**已经**是海外版，再挂一个 qoderintl
+            # 就是两个同区域通道抢同一批账号（额度卡也会重复）。
+            print("[Qoder Intl] Skipped (主通道已是海外版：QODER_REGION=global)")
+        elif intl_enabled():
+            qoder_intl = QoderIntlProvider()
+            try:
+                qoder_intl.ensure_auth()
+            except HTTPException as exc:
+                logger.warning("qoderintl provider 认证未就绪: %s", exc.detail)
+            providers[qoder_intl.id] = qoder_intl
+            logger.info("Qoder 海外版 provider enabled")
+            print("[Qoder Intl] Enabled (qoderintl/*)")
     else:
         print("[Qoder] Disabled (pass --qoder or QODER_ENABLED=1 to enable)")
 
@@ -394,10 +413,22 @@ def main():
     if args.trae:
         from buddy_proxy.trae.provider import TraeProvider
 
-        trae = TraeProvider()
+        # 主通道钉死 CN：海外版由下面条件注册的 traeintl 独立承担（各自 id、
+        # 各自额度卡）。TRAE_REGION 只作 login / legacy 凭据的默认区域回退，
+        # 不再切换主通道——否则会与 traeintl 重复出两个海外通道。
+        trae = TraeProvider(region="cn")
         providers[trae.id] = trae
         logger.info("Trae provider enabled")
         print("[Trae] Enabled")
+
+        # 海外通道（有 global 区账号时启用）：chat 网关 / 模型目录 / 额度口径
+        # 全按 global，无签到。条件注册见 intl_provider.intl_enabled()。
+        from buddy_proxy.trae.intl_provider import TraeIntlProvider, intl_enabled
+        if intl_enabled():
+            trae_intl = TraeIntlProvider()
+            providers[trae_intl.id] = trae_intl
+            logger.info("Trae 海外版 provider enabled")
+            print("[Trae Intl] Enabled (traeintl/*)")
 
         # PAT 独立通道（配置了 TRAE_PAT_BEARER 时启用）：服务账号的扩展模型目录，
         # 与个人 trae 通道分开路由/计额（/ui 额度 Tab 各自展示）

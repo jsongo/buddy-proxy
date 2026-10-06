@@ -6,9 +6,12 @@
 **多账号**（2026-10，照 qoder/kimi 同款）::
 
     ~/.buddy-proxy/trae/
-    ├── index.json          # 账号清单：[{id, uid, nickname, priority, added_at}]
+    ├── index.json          # 账号清单：[{id, uid, nickname, priority, added_at, region}]
     ├── index.lock          # fcntl 跨进程锁
-    └── <account_id>.json   # 每账号一份 work cred（0600）
+    └── <account_id>.json   # 每账号一份 work cred（0600，含 region）
+
+``region``（``cn`` / ``global``）在登录时写入；缺失按 ``cn``（历史账号全是
+国内版）。两区账号互不通用，failover 只在同区内轮转。
 
 ``TRAE_WORK_STATE_DIR`` 可覆盖状态目录（测试隔离点）。首访问自动把历史单账号
 ``trae_work.json`` 迁移为账号 #1。``account_id`` 首选 uid（trae work 登录必带回）。
@@ -37,10 +40,12 @@ from fastapi import HTTPException
 
 from .auth_storage import _extract_auth_fields, find_auth_data
 from .config import (
+    TRAE_REGIONS,
     X_APP_ID,
     _TRAE_APP_VERSION,
     _TRAE_APP_VERSION_CODE,
     _TRAE_IDE_VERSION_CODE,
+    resolve_trae_region,
 )
 from ..core.paths import state_dir, state_file
 
@@ -68,7 +73,12 @@ class AuthError(RuntimeError):
 
 @dataclass(frozen=True)
 class AccountRef:
-    """账号清单条目（不含任何秘密，可直接进 UI/health）。"""
+    """账号清单条目（不含任何秘密，可直接进 UI/health）。
+
+    ``region`` 缺省 ``cn``：迁移前的历史账号全是国内版，索引里没有这个字段时
+    按 CN 处理，行为与改造前一致（``list_accounts`` / ``save_account_cred``
+    都兜这一层）。两区账号不通用——failover 只在同区间轮转（见 ``failover``）。
+    """
 
     id: str
     uid: str
@@ -78,6 +88,7 @@ class AccountRef:
     # 本地别名（管理页 ✎ 改）：只改显示名，cred 里的 nickname 不动；
     # 空串 = 未设置（显示回退 nickname/uid/id）。upsert/重登不碰它。
     alias: str = ""
+    region: str = "cn"
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +285,9 @@ def _migrate_legacy_unlocked() -> None:
     if isinstance(data, dict) and str(data.get("access_token") or "").strip():
         cred = dict(data)
         cred["source"] = "state"
+        # 历史单账号文件只可能出自 CN 登录（改造前没有区域概念），显式钉死
+        # cn——别让迁移那一刻碰巧设着的 TRAE_REGION=global 把它改判成海外。
+        cred.setdefault("region", "cn")
         _save_account_cred_unlocked(cred)
         log.info("trae: 已把历史单账号状态 %s 迁移为账号 %s",
                  path, cred.get("account_id"))
@@ -286,6 +300,20 @@ def _migrate_legacy_unlocked() -> None:
 # ---------------------------------------------------------------------------
 # account_id 派生
 # ---------------------------------------------------------------------------
+
+
+def _region_of(cred: dict[str, Any], fallback: str = "") -> str:
+    """cred 里的 region（登录时写入）；缺省/非法值归一到默认区域。
+
+    ``fallback`` 供「更新已有账号」时用：老索引里的 region 优先于默认值，
+    免得一次没带 region 的凭据刷新把海外账号改判成 CN。
+    """
+    raw = str(cred.get("region") or "").strip().lower()
+    if raw in TRAE_REGIONS:
+        return raw
+    if fallback and fallback in TRAE_REGIONS:
+        return fallback
+    return resolve_trae_region().key
 
 
 def derive_account_id(cred: dict[str, Any]) -> str:
@@ -339,6 +367,8 @@ def list_accounts() -> list[AccountRef]:
                 priority=int(e.get("priority") or 0),
                 added_at=int(e.get("added_at") or 0),
                 alias=str(e.get("alias") or ""),
+                # 索引缺 region（迁移前的老账号）按 CN——与 AccountRef 默认一致
+                region=str(e.get("region") or "cn"),
             ))
         if changed:
             _atomic_write_json(index_path(), _index_payload([asdict(a) for a in kept]))
@@ -413,16 +443,24 @@ def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
             nickname=str(cred.get("nickname") or ""),
             priority=max((int(e.get("priority") or 0) for e in entries), default=-1) + 1,
             added_at=int(time.time()),
+            region=_region_of(cred),
         )
         entries.append(asdict(ref))
         target = asdict(ref)
     target["uid"] = str(cred.get("uid") or target.get("uid") or "")
     target["nickname"] = str(cred.get("nickname") or target.get("nickname") or "")
+    # 重登同号：**已有账号的 region 优先**（别让一次没带 region 的刷新把
+    # 海外账号改判成 CN）；cred 显式带了才覆盖。
+    target["region"] = _region_of(cred, fallback=str(target.get("region") or ""))
     # alias 不在 upsert 覆写之列：它是用户手起的本地别名，重登不改
     ref = AccountRef(id=aid, uid=target["uid"], nickname=target["nickname"],
                      priority=int(target.get("priority") or 0),
                      added_at=int(target.get("added_at") or 0),
-                     alias=str(target.get("alias") or ""))
+                     alias=str(target.get("alias") or ""),
+                     region=target["region"])
+    # cred 文件也带 region：transport/native_tools 按「当前账号」构造请求，
+    # 读 cred 才能决定连哪个 chat 网关（index 只给枚举，不在请求路径上）。
+    cred["region"] = target["region"]
     _atomic_write_json(account_cred_path(ref.id), dict(cred))
     _atomic_write_json(index_path(), _index_payload(entries))
     return ref
@@ -517,8 +555,11 @@ def refresh_account_cred(cred: dict[str, Any]) -> dict[str, Any]:
             return fresh
         from buddy_proxy.auth.trae_work_login import exchange_token
 
+        # 刷新必须打该账号所属区域的 OAuth 域：CN/海外 ExchangeToken 端点不同，
+        # 拿海外 refresh_token 去连 CN 会 401。cred 落盘时写了 region（老 CN
+        # 账号缺字段 → _region_of 回退默认 cn，与改造前行为一致）。
         try:
-            result = exchange_token(rt)
+            result = exchange_token(rt, region=_region_of(cred))
         except Exception as exc:  # noqa: BLE001 - 换不动就报凭据失效
             raise AuthError(f"刷新失败: {exc}") from exc
         new_cred = dict(cred)

@@ -17,7 +17,9 @@ from .config import (
     _WORK_CHAT_MAX_ATTEMPTS,
     _WORK_FUNCTION_OVERRIDE,
     _debug_dump,
-    _map_model,
+    map_model_for,
+    resolve_trae_region,
+    resolve_trae_region_by_chat_base,
 )
 from .credentials import _auth, _build_headers, _load_work_cred, _work_headers
 from .text_protocol import _build_chat_body
@@ -41,12 +43,18 @@ def send_trae_chat(
         return _send_trae_work_chat(messages, model, stream, work)
 
     token, user_id = _auth()
-    trae_model = _map_model(model)
+    # legacy 单账号分支（TRAE_TOKEN / 本机登录态）没有账号级 region 字段，
+    # 以 base_url 为准反查区域——海外网关走海外模型表，避免把海外的 Claude/GPT
+    # 名拿去查 CN 的 GLM 映射表（查不到会原样透传，但分级/倍率会全错）。
+    region = resolve_trae_region_by_chat_base(base_url)
+    trae_model = map_model_for(region.key, model)
     body = _build_chat_body(messages, trae_model, stream)
     headers = _build_headers(token, user_id)
 
     last_error: Exception | None = None
     for endpoint in ENDPOINTS:
+        # URL 仍用调用方传入的 base_url（测试注入点/自定义网关原样生效）；
+        # region 只用来选模型映射表，不改这里的 host。
         url = base_url + endpoint
         req = urllib.request.Request(
             url,
@@ -81,9 +89,15 @@ def _send_trae_work_chat(
     参考 traework2api（Go）的 Work 通道实现：
     - headers 必须带 User-Agent: Trae/<ver> + X-Ide-Token 等 SOLO 专属头
       （缺 UA 会被服务端当异常客户端限流 4011）
-    - host 用 mchost.guru（AgentHost），签到/积分才用 api.trae.cn
+    - host 用 chat 网关（CN 是 mchost.guru），签到/额度才走 UG 域
+
+    网关按**账号自己的 region** 选（cred 落盘时写入，见 credentials.save_account_cred）：
+    两区账号不通用，failover 已保证这里拿到的是同区账号，所以直接用它的 region
+    就是对的——不需要调用方再传一次，也就不会出现「provider 说海外、请求打到
+    CN」这类两处分叉。
     """
-    trae_model = _map_model(model)
+    region = resolve_trae_region(work.get("region"))
+    trae_model = map_model_for(region.key, model)
     body = _build_chat_body(messages, trae_model, stream)
     # 绝大多数模型走 solo_work_lite；少数（glm-5.1 / Doubao-Seed-Code 等）
     # 在该 function 下 4001，需改走 chat_v3（实测）
@@ -94,9 +108,9 @@ def _send_trae_work_chat(
         "Accept": "text/event-stream" if stream else "application/json",
     }
 
-    # 聊天网关固定 BASE_URL_CN，**不要**改用凭证里的 work["api_host"]：
+    # 聊天网关走 chat_base，**不要**改用凭证里的 work["api_host"]：
     # 那是 OAuth 域，对该路径返回 404（2026-09 实测）。
-    url = f"{BASE_URL_CN}/api/agent/v3/llm_utils_chat"
+    url = f"{region.chat_base}/api/agent/v3/llm_utils_chat"
     # 上游断流多为瞬态（实测：长响应读到一半连接被关 → http.client.IncompleteRead，
     # 曾被流式层当正文吐成 "[Error: IncompleteRead(...)]"）。读失败后丢弃半截响应，
     # 同端点退避重试，避免一次网络抖动作废整轮长生成。

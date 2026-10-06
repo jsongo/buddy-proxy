@@ -336,7 +336,7 @@ function renderGroups() {
           + (ordMarks.length ? '；冷却中：' + ordMarks.map(k => k.target).join(', ') : '')
         : '';
       const ordTag = ord
-        ? `<span class="tag ${ordMarks.length ? 'bad' : 'ok'}" title="${esc(ordTitle)}">⇄ ${ord.targets.length}${ordMarks.length ? ' ⏸' + ordMarks.length : ''}</span>`
+        ? `<span class="tag ${ordMarks.length ? 'bad' : 'ok'}" title="${esc(ordTitle)}">⇄ ${ord.targets.length}${ordMarks.length ? ` <span style="cursor:pointer" title="冷却中，点击清除" onclick="clearOrderMarks('${esc(g.id)}','${esc(m.id)}')">⏸${ordMarks.length}</span>` : ''}</span>`
         : '';
       return `<tr>
         <td${dim}><span class="mono">${esc(m.id)}</span>

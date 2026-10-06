@@ -242,7 +242,7 @@ def test_trae_pack_remaining_uses_credits_amount_as_used(monkeypatch):
     """
     from buddy_proxy.trae import provider as trae_provider
 
-    monkeypatch.setattr(trae_provider, "fetch_ent_usage", lambda: {
+    monkeypatch.setattr(trae_provider, "fetch_ent_usage", lambda region="": {
         "usage_summary": {"total_amount": 9500.0, "consumed_amount": 6257.18,
                           "consumption_ratio": 0.66},
         "user_entitlement_pack_list": [
@@ -299,7 +299,7 @@ def test_trae_pack_dedup_keeps_same_named_packs(monkeypatch):
             },
             "usage": ({"credits_amount": used} if used is not None else {}),
         })
-    monkeypatch.setattr(trae_provider, "fetch_ent_usage", lambda: {
+    monkeypatch.setattr(trae_provider, "fetch_ent_usage", lambda region="": {
         "usage_summary": {"total_amount": 800.0, "consumed_amount": 400.0},
         "user_entitlement_pack_list": packs,
     })
@@ -324,7 +324,7 @@ def test_trae_pack_duplicate_rows_still_deduped(monkeypatch):
         },
         "usage": {"credits_amount": 100.0},
     }
-    monkeypatch.setattr(trae_provider, "fetch_ent_usage", lambda: {
+    monkeypatch.setattr(trae_provider, "fetch_ent_usage", lambda region="": {
         "usage_summary": {"total_amount": 4000.0, "consumed_amount": 100.0},
         "user_entitlement_pack_list": [row, dict(row)],
     })

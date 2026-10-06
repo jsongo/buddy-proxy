@@ -43,6 +43,50 @@ PROVIDER_ALIASES: dict[str, str] = {
 
 KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi")
 
+#: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
+_REGION_ALIASES = {
+    "cn": "cn", "china": "cn", "domestic": "cn", "guonei": "cn", "国内": "cn", "国内版": "cn",
+    "global": "global", "intl": "global", "international": "global", "oversea": "global",
+    "overseas": "global", "sg": "global", "海外": "global", "海外版": "global", "国际": "global",
+    "国际版": "global",
+}
+
+
+def _pick_region(provider_label: str, cli_region: str | None, *, default_key: str) -> str:
+    """决定登录哪个区域：``--region`` 显式 > 交互 prompt > 默认区域。
+
+    CN 与海外账号**互不通用**（连错域必 401），而区域一旦选错，登录会拿到
+    另一套 uid、额度/签到/chat 全打错域，事后很难察觉——所以交互 tty 下
+    宁可多问一句。非交互（管道/CI）时不阻塞，直接用默认区域。
+    """
+    if cli_region:
+        key = _REGION_ALIASES.get(cli_region.strip().lower(), cli_region.strip().lower())
+        if key not in ("cn", "global"):
+            print(f"[!] 未知区域 {cli_region!r}，按默认 {default_key} 处理", file=sys.stderr)
+            return default_key
+        return key
+    if not sys.stdin.isatty():
+        print(f"[{provider_label}] 区域: {default_key}（非交互终端，默认）")
+        return default_key
+    # default_key 可能是 cn 也可能是 global（qoder 的 QODER_REGION env），
+    # 提示与「直接回车」的落点都要跟着它，别把默认写死成 cn 误导用户。
+    cn_mark = "  ← 默认，直接回车即选它" if default_key == "cn" else ""
+    gl_mark = "  ← 默认，直接回车即选它" if default_key == "global" else ""
+    print(f"请选择 {provider_label} 登录区域（两区账号不通用）：")
+    print(f"  1) 国内版 (cn){cn_mark}")
+    print(f"  2) 海外版 (global){gl_mark}")
+    try:
+        answer = input("选择 [1]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default_key
+    if answer in ("2", "global", "海外", "海外版"):
+        return "global"
+    if answer in ("1", "cn", "国内", "国内版"):
+        return "cn"
+    # 直接回车或无法识别的输入 → 默认区域（而非硬编码 cn）
+    return default_key
+
 
 def _login_codebuddy(open_browser: bool = True) -> int:
     """CodeBuddy（copilot.tencent.com）浏览器 OAuth 登录。"""
@@ -89,7 +133,7 @@ def _login_codebuddy(open_browser: bool = True) -> int:
     return 0
 
 
-def _login_trae(open_browser: bool = True, **_kwargs) -> int:
+def _login_trae(open_browser: bool = True, region: str | None = None, **_kwargs) -> int:
     """Trae Work (SOLO) 一键登录：自动起本地回调服务 → 打开登录页 → 自动落盘退出。
 
     trae.cn 授权页（auth_type=local）要求本机 18080 回调服务在线，否则页面报
@@ -98,6 +142,10 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     当成功信号，那样任何失败（nonce 被冲掉 / 缺 refreshToken / 换 token 报错）
     都会让 CLI 干等到 15 分钟超时，浏览器那边却可能已经显示「登录成功」。
     手动粘贴模式保留：python3 -m buddy_proxy.auth.trae_work_login
+
+    ``region``（cn/global）决定授权页 host；交互 tty 下未显式给值会先问一句
+    （两区账号不通用，登错区拿到的是另一套 uid）。选定后写进共享 state，
+    回调服务据此换 token、选 chat 网关、给落盘账号打 region 标。
     """
     import json
     import socket
@@ -113,6 +161,9 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
         STATE_TTL,
         build_login_url,
     )
+    from buddy_proxy.trae.config import resolve_trae_region
+
+    reg = resolve_trae_region(_pick_region("Trae", region, default_key="cn"))
 
     def _port_busy() -> bool:
         with socket.socket() as s:
@@ -130,24 +181,24 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
     def _report_ok() -> int:
         try:
             from buddy_proxy.trae.credentials import list_accounts, load_account_cred
-            accounts = list_accounts()
+            accounts = [a for a in list_accounts() if a.region == reg.key] or list_accounts()
             if accounts:
                 cred = load_account_cred(accounts[0].id) or {}
                 expires = cred.get("expires_at", "")
                 expires = expires[:10] if isinstance(expires, str) else expires
                 n = len(accounts)
-                suffix = f"（共 {n} 个账号）" if n > 1 else ""
+                suffix = f"（{reg.label} · 共 {n} 个账号）" if n > 1 else f"（{reg.label}）"
                 print(
                     f"[OK] Trae Work 登录完成{suffix}：uid={cred.get('uid')} "
                     f"昵称={cred.get('nickname')} 有效期至={expires}"
                 )
             else:
-                print("[OK] Trae Work 登录完成")
+                print(f"[OK] Trae Work 登录完成（{reg.label}）")
         except Exception:
             print("[OK] Trae Work 登录完成")
         return 0
 
-    url, _machine_id, _device_id, _port = build_login_url()
+    url, _machine_id, _device_id, _port = build_login_url(region=reg.key)
     # 本次尝试的 nonce：只认跟它对得上的 RESULT，免得上一轮迟到的结果误杀本轮
     try:
         my_nonce = json.loads(STATE_PATH.read_text()).get("nonce") or ""
@@ -174,9 +225,9 @@ def _login_trae(open_browser: bool = True, **_kwargs) -> int:
             time.sleep(0.1)
 
     print("=" * 60)
-    print("Trae Work (SOLO) 一键登录")
+    print(f"Trae Work (SOLO) 一键登录 · {reg.label}")
     print("=" * 60)
-    print("浏览器将打开 trae.cn 授权页；完成登录后会自动回跳本机落盘凭证。")
+    print(f"浏览器将打开 {reg.auth_host} 授权页；完成登录后会自动回跳本机落盘凭证。")
     if open_browser:
         webbrowser.open(url)
     else:
@@ -358,17 +409,17 @@ def _login_mimo(open_browser: bool = True, **_kwargs) -> int:
     return 0
 
 
-def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
+def _login_qoder(open_browser: bool = True, region: str | None = None, **_kwargs) -> int:
     """Qoder 登录：官方 device flow（PKCE），全球版/CN 版通用。
 
     流程：打印（并尝试打开）授权链接 → 用户在浏览器里确认 → 轮询换回
     ``dt-`` device token，作为**新账号**落盘（按 email/refresh_token 命中
     时更新原账号顺位）。
 
-    区域由 ``QODER_REGION`` 决定（``cn`` 默认 / ``global``），CN 与全球版
-    账号不通用，连错域会 401。
+    区域：``--region cn|global`` 显式 > 交互 prompt > ``QODER_REGION`` env >
+    ``cn``。CN 与全球版账号不通用，连错域会 401，所以交互 tty 下会先问一句。
     """
-    from buddy_proxy.qoder.config import REGIONS, resolve_region
+    from buddy_proxy.qoder.config import REGIONS, default_region_key, resolve_region
     from buddy_proxy.qoder.credentials import (
         AuthError,
         account_cred_path,
@@ -379,9 +430,10 @@ def _login_qoder(open_browser: bool = True, **_kwargs) -> int:
         start_device_flow,
     )
 
-    region = resolve_region()
+    region_key = _pick_region("Qoder", region, default_key=default_region_key())
+    region = resolve_region(region_key)
     print(f"[Qoder] 区域: {region.label} ({region.key})  端点: {region.infer_base}")
-    print(f"        可用 QODER_REGION 切换区域：{', '.join(REGIONS)}")
+    print(f"        可用 --region 切换区域：{', '.join(REGIONS)}")
 
     flow = start_device_flow(region)
     print()
@@ -664,6 +716,9 @@ def main() -> int:
                         help="codebuddy(=workbuddy) / trae / zcode / doubao / mimo / qoder(=quoder) / gemini / antigravity / kimi，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi 登录不自动打开浏览器，只打印链接")
+    parser.add_argument("--region", default=None,
+                        help="trae/qoder 登录区域：cn（国内版）/ global（海外版）。"
+                             "不给且是交互终端时会问一句；两区账号不通用")
     args = parser.parse_args()
 
     provider = PROVIDER_ALIASES.get(args.provider.strip().lower(), args.provider.strip().lower())
@@ -671,7 +726,7 @@ def main() -> int:
     if handler is None:
         parser.error(f"未知 provider: {args.provider}（支持: {', '.join(KNOWN_PROVIDERS)}，"
                      f"workbuddy 是 codebuddy 的别名）")
-    return handler(open_browser=not args.no_browser)
+    return handler(open_browser=not args.no_browser, region=args.region)
 
 
 if __name__ == "__main__":

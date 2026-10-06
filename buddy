@@ -34,7 +34,7 @@ PROXY_SH="$BUDDY_HOME/proxy.sh"
 PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
 PROXY_PORT="${PROXY_PORT:-8787}"
 # 与 proxy.sh 默认参数保持一致（改这里记得同步 proxy.sh 的 EXTRA_ARGS，反之亦然）
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --mimo --qoder --antigravity --kimi --default-provider trae}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --zcode-start --mimo --qoder --antigravity --kimi --default-provider trae}"
 
 SERVICE_LABEL="com.buddy.proxy"
 PLIST="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
@@ -58,7 +58,32 @@ svc_loaded() {
     launchctl print "gui/$UID/$SERVICE_LABEL" >/dev/null 2>&1
 }
 
+#: 端口上的「野实例」清场：proxy.sh nohup 起的、或上次 bootout 没死透的孤儿。
+#:
+#: 2026-10-06 实测的「经常挂」根因就是它：野实例占着 ${PROXY_PORT}，launchd
+#: KeepAlive 拉起的新进程永远 errno 48 绑不上（service.log 里 388 次 spawn 全灭），
+#: 而 wait_healthy 的 /health 探活打在野实例上显示「成功」——等野实例一死，
+#: 端口上就什么都没了，服务悄悄整段消失，只能靠手动重启「修复」，过几天又复发。
+#: 所以启动前先看端口：占用者是 buddy_proxy 但**不是本 job 的当前进程** → 干掉。
+evict_port_squatters() {
+    local holder job
+    holder="$(lsof -ti tcp:"$PROXY_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+    [[ -n "$holder" ]] || return 0
+    # [:space:] 而非字面 tab：tab 藏在源码里，编辑器一转空格就静默失配
+    job="$(launchctl print "gui/$UID/$SERVICE_LABEL" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}' || true)"
+    [[ "$holder" == "$job" ]] && return 0  # 就是本 job 的进程，交给 kickstart/bootout 流转
+    if ps -o command= -p "$holder" 2>/dev/null | grep -q "buddy_proxy"; then
+        log "清理占用 ${PROXY_PORT} 的野实例 pid=${holder}（非 launchd job 进程，留着必成 errno 48 死循环）"
+        kill -9 "$holder" 2>/dev/null || true
+        sleep 0.5
+    else
+        log "警告: 端口 ${PROXY_PORT} 被非 buddy_proxy 进程占用 pid=$holder:"
+        ps -o command= -p "$holder" 2>/dev/null | head -1 || true
+    fi
+}
+
 svc_start() {
+    evict_port_squatters
     if svc_loaded; then
         launchctl kickstart -k "gui/$UID/$SERVICE_LABEL"
     else

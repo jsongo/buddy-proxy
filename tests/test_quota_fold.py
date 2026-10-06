@@ -442,11 +442,11 @@ def test_all_three_panels_use_the_fold_helper():
     没变」，等于没修。kimi/qoder/trae 面板（复用 antigravity 的分组结构）也要跟上。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
     assert "quotaItemsHtml(q.items || [], p.id)" in text, "主额度列表没接上折叠"
-    # 面板段分布在拆出去的文件（pat/ag/kimi/qoder）——trae 通道在 main 上已
-    # 移除面板（其 models 走 trae 账号体系，不再有独立 trae 额度面板）。
+    # 面板段分布在拆出去的文件（pat/ag/kimi/qoder/trae）——trae 面板 2026-10-06
+    # 加回（额度挪到底部专属面板，用户反馈「额度面板看不到」）。
     panels = "".join(p.read_text(encoding="utf-8") for p in PANELS_JS)
     calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", panels)
-    assert sorted(calls) == ["ag", "kimi", "pat", "qoder"], f"各面板没接上折叠: {calls}"
+    assert sorted(calls) == ["ag", "kimi", "pat", "qoder", "trae"], f"各面板没接上折叠: {calls}"
 
 
 def test_render_benefits_syncs_after_rebuild():

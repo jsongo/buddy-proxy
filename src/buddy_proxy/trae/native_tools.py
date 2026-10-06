@@ -19,11 +19,11 @@ from typing import Any
 from fastapi import HTTPException
 
 from .config import (
-    BASE_URL_CN,
     _NATIVE_FUNCTION,
     _WORK_CHAT_MAX_ATTEMPTS,
-    _map_model,
     TRAE_NONSTREAM_MAX_S,
+    map_model_for,
+    resolve_trae_region,
 )
 from .credentials import _auth, _build_headers, _load_work_cred, _work_headers
 from .sse import _parse_sse
@@ -191,9 +191,14 @@ def _send_native_chat(
     """
     # PAT provider 在 TraePatProvider._send_native_request 中显式分流；这里始终是
     # 个人 Work/IDE 通道。不能只按模型名判断，否则两套目录重叠时会串账号。
-    trae_model = _map_model(model)
-    body = _build_native_body(native_msgs, trae_model, stream, tools)
+    #
+    # 先取凭证再解析模型名：区域由**账号自己的 region** 决定（cred 落盘时写入），
+    # 海外账号要用海外模型表——两区目录几乎不重叠（CN 是 GLM/Doubao/Qwen，海外是
+    # Claude/GPT/Gemini 系），拿错表会把模型名映射到另一区不存在的 config_name。
     work = _load_work_cred()
+    region = resolve_trae_region(work.get("region") if work else None)
+    trae_model = map_model_for(region.key, model)
+    body = _build_native_body(native_msgs, trae_model, stream, tools)
     if work and work.get("access_token"):
         headers = _work_headers(work)
     else:
@@ -203,9 +208,9 @@ def _send_native_chat(
         **headers,
         "Accept": "text/event-stream" if stream else "application/json",
     }
-    # 聊天网关固定 BASE_URL_CN。**不要**改用凭证里的 work["api_host"]：
+    # 聊天网关按区域取 chat_base，**不要**改用凭证里的 work["api_host"]：
     # 那是 OAuth 域，对该路径返回 404（2026-09 实测）。
-    url = f"{BASE_URL_CN}/api/agent/v3/llm_utils_chat"
+    url = f"{region.chat_base}/api/agent/v3/llm_utils_chat"
     payload = json.dumps(body).encode("utf-8")
     last_error: Exception | None = None
     for attempt in range(1, _WORK_CHAT_MAX_ATTEMPTS + 1):

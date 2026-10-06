@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from buddy_proxy.trae import failover
+from buddy_proxy.trae import failover, provider
 from buddy_proxy.trae.credentials import save_account_cred
 from buddy_proxy.trae.provider import TraeProvider
 
@@ -36,7 +36,7 @@ def test_status_multi_account_reports_each(monkeypatch):
     _seed("u1", "u2")
     monkeypatch.setattr(failover, "_cooldowns", {})
 
-    def _fetch(token="", account_id=""):
+    def _fetch(token="", account_id="", region=""):
         if account_id == "u2":
             return {"checked_in": False, "enable": True, "message": ""}
         return {"checked_in": True, "enable": True, "message": "success"}
@@ -74,7 +74,7 @@ def test_status_marks_failed_accounts(monkeypatch):
     _seed("u1", "u2")
     monkeypatch.setattr(failover, "_cooldowns", {})
 
-    def _fetch(token="", account_id=""):
+    def _fetch(token="", account_id="", region=""):
         if account_id == "u2":
             raise RuntimeError("token 刷新失败")
         return {"checked_in": True, "enable": True, "message": "success"}
@@ -96,7 +96,7 @@ def test_status_single_account_has_no_accounts_list(monkeypatch):
     monkeypatch.setattr(failover, "_cooldowns", {})
     monkeypatch.setattr(
         "buddy_proxy.trae.provider.fetch_checkin_status",
-        lambda token="", account_id="": {"checked_in": True, "enable": True})
+        lambda token="", account_id="", region="": {"checked_in": True, "enable": True})
     st = TraeProvider().checkin_status()
     assert "accounts" not in st
 
@@ -108,7 +108,7 @@ def test_claim_multi_account_reports_each(monkeypatch):
     _seed("u1", "u2")
     monkeypatch.setattr(failover, "_cooldowns", {})
 
-    def _claim(token="", account_id=""):
+    def _claim(token="", account_id="", region=""):
         if account_id == "u1":
             return {"code": 0, "credits_granted": 100, "message": "OK"}
         return {"code": 1, "message": "already signed"}
@@ -127,7 +127,7 @@ def test_claim_failure_still_carries_account_detail(monkeypatch):
     _seed("u1", "u2")
     monkeypatch.setattr(failover, "_cooldowns", {})
 
-    def _claim(token="", account_id=""):
+    def _claim(token="", account_id="", region=""):
         if account_id == "u2":
             raise RuntimeError("网络超时")
         return {"code": 0, "credits_granted": 100, "message": "OK"}
@@ -145,6 +145,78 @@ def test_claim_single_account_has_no_accounts_list(monkeypatch):
     monkeypatch.setattr(failover, "_cooldowns", {})
     monkeypatch.setattr(
         "buddy_proxy.trae.provider.claim_checkin_credits",
-        lambda token="", account_id="": {"code": 0, "credits_granted": 100})
+        lambda token="", account_id="", region="": {"code": 0, "credits_granted": 100})
     st = TraeProvider().checkin_claim()
     assert "accounts" not in st
+
+
+# -- 串行节流 + 限流退避（2026-10-06「当前参与用户太多」实测） --------------------
+
+
+def test_claim_throttles_between_accounts(monkeypatch):
+    """多账号串行节流：第 2 个账号起必须先 sleep 再打（上游短窗口频控）。"""
+    _seed("u1", "u2")
+    monkeypatch.setattr(failover, "_cooldowns", {})
+    sleeps: list[float] = []
+    monkeypatch.setattr("buddy_proxy.trae.provider.time.sleep",
+                        lambda s: sleeps.append(s))
+    calls: list[str] = []
+
+    def _claim(token="", account_id="", region=""):
+        calls.append(account_id)
+        return {"code": 0, "credits_granted": 50, "message": "OK"}
+
+    monkeypatch.setattr("buddy_proxy.trae.provider.claim_checkin_credits", _claim)
+    st = TraeProvider().checkin_claim()
+
+    assert calls == ["u1", "u2"], "按 failover 顺位串行打"
+    assert sleeps, "多账号之间必须有节流 sleep"
+    # 只有账号间节流、无限流重试：#1 前不等，#2 前等一次
+    assert sleeps == [provider._CHECKIN_THROTTLE_S]
+    assert st["accounts"][1]["ok"] is True
+
+
+def test_claim_rate_limited_retries_then_succeeds(monkeypatch):
+    """命中「参与用户太多」按退避表重试，重试成功则该账号照常计入已领。"""
+    _seed("u1", "u2")
+    monkeypatch.setattr(failover, "_cooldowns", {})
+    monkeypatch.setattr("buddy_proxy.trae.provider.time.sleep", lambda s: None)
+    attempts: list[str] = []
+
+    def _claim(token="", account_id="", region=""):
+        if account_id == "u2":
+            attempts.append(account_id)
+            if len(attempts) < 2:  # 首发限流，退避后成功
+                return {"code": 1, "message": "当前参与用户太多，请稍后再试"}
+        return {"code": 0, "credits_granted": 30, "message": "OK"}
+
+    monkeypatch.setattr("buddy_proxy.trae.provider.claim_checkin_credits", _claim)
+    st = TraeProvider().checkin_claim()
+
+    a2 = st["accounts"][1]
+    assert a2["ok"] is True and a2["credits"] == 30, "重试成功要算已领"
+    assert len(attempts) == 2, "限流后正好多打一发"
+
+
+def test_claim_rate_limited_exhausted_keeps_upstream_message(monkeypatch):
+    """重试耗尽仍限流：ok=False、message 保留上游原话（「稍后再试」可手动补领）。"""
+    _seed("u1", "u2")
+    monkeypatch.setattr(failover, "_cooldowns", {})
+    monkeypatch.setattr("buddy_proxy.trae.provider.time.sleep", lambda s: None)
+    n = {"u2": 0}
+
+    def _claim(token="", account_id="", region=""):
+        if account_id == "u2":
+            n["u2"] += 1
+            return {"code": 1, "message": "当前参与用户太多，请稍后再试"}
+        return {"code": 0, "credits_granted": 30, "message": "OK"}
+
+    monkeypatch.setattr("buddy_proxy.trae.provider.claim_checkin_credits", _claim)
+    st = TraeProvider().checkin_claim()
+
+    a2 = st["accounts"][1]
+    assert a2["ok"] is False
+    assert "参与用户太多" in a2["message"], "失败原因保留上游文案"
+    assert n["u2"] == len(provider._CHECKIN_RETRY_DELAYS) + 1, "按退避表打满重试次数"
+    # #1 成功不受影响（单账号失败不阻塞其它账号的原语义）
+    assert st["accounts"][0]["ok"] is True

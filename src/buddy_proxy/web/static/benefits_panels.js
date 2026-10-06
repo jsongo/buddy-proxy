@@ -581,3 +581,204 @@ async function loadQoderAccounts() {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
   }
 }
+
+
+// ---- TRAE WORK 面板（qoder 同款布局：每账号一块，标题=账号名、副标题=区域/冷却，
+//      ▲▼ 顺位 / ✕ 删除 / ✎ 改名 / ↻ 刷新）----
+// 数据两路：额度走 /ui/api/benefits 里 trae 条目（label 带「Trae #N · 」前缀），
+// 账号状态走 /ui/api/trae/accounts（纯本地不触网，failover.accounts_status）。
+// trae 与 qoder 的结构差异：总额度条是 head_only（各权益包的合计），明细列表
+// **不能相加**（权益包是总额度的拆分，sum 会重复计算）——合计行改用 head_only
+// 那条自己的数字（quotaHeadSum 非 sum_items 分支正好「取第一条有数的」）。
+// 签到仍在上方「各通道签到」卡里（supports_checkin=True），本面板只管额度。
+let TRAE_ACCTS = null;   // 最近一次 accounts 快照；render 先用它，避免每 30s 闪回「Trae #N」
+let TRAE_MOVING = false; // 面板账号操作（重排/删除）在途：期间忽略新的点按
+
+function _trae_acct_for(idx) {
+  // idx=null（单账号组名无 Trae #N 前缀）只在恰有一个账号时能对上
+  if (!TRAE_ACCTS) return null;
+  if (idx == null) return TRAE_ACCTS.length === 1 ? TRAE_ACCTS[0] : null;
+  return TRAE_ACCTS.find(a => a.index === idx) || null;
+}
+
+function _trae_sub_html(a) {
+  // 副标题：区域 / 冷却（acctSubHtml 公共件；trae 无通道特有 bit）
+  return acctSubHtml(a, null, 'data-trae-sub');
+}
+
+function _trae_move_btns(idx, n, id) {
+  return acctMoveButtons('trae', idx, n, id);
+}
+
+function traeConfirmDelete(id) {
+  const a = (TRAE_ACCTS || []).find(x => x.id === id);
+  const name = (a && (a.alias || a.nickname || a.id)) || id;
+  return confirmAccountDelete({
+    title: '删除 Trae 账号',
+    name,
+    extra: '该账号的凭据文件一并移除，转发不再使用它。不再使用或凭据失效' +
+      '（转发持续 401）的账号删掉后即不再白耗一轮 failover。',
+  });
+}
+
+async function traeMoveAccount(idx, delta, id) {
+  if (TRAE_MOVING) return;
+  TRAE_MOVING = true;
+  try {
+    if (!TRAE_ACCTS) {  // 按钮随额度数据先到、账号状态可能还没回：补一次快照
+      const r0 = await api('/ui/api/trae/accounts');
+      TRAE_ACCTS = r0.accounts || [];
+    }
+    const accts = TRAE_ACCTS;
+    if (id) {  // 按 id 校正到快照里的真实位次（面板重绘滞后时 idx 会过期）
+      const at = accts.findIndex(a => a.id === id);
+      if (at < 0) return;
+      idx = at + 1;
+    }
+    const to = idx + delta;
+    if (to < 1 || to > accts.length) return;
+    const ids = accts.map(a => a.id);
+    const [moved] = ids.splice(idx - 1, 1);
+    ids.splice(to - 1, 0, moved);
+    const r = await api('/ui/api/trae/accounts/order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids})});
+    TRAE_ACCTS = r.accounts || [];
+    const movedName = (accts.find(a => a.id === moved) || {}).nickname || moved;
+    toast(`${movedName} 已移到顺位 #${to}`);
+    refreshAll();
+  } catch (e) { toast('调整失败: ' + e.message, true); }
+  finally { TRAE_MOVING = false; }
+}
+
+async function traeDeleteAccount(id) {
+  if (TRAE_MOVING) return;
+  if (!(await traeConfirmDelete(id))) return;
+  const a = (TRAE_ACCTS || []).find(x => x.id === id);
+  const name = (a && (a.alias || a.nickname || a.id)) || id;
+  TRAE_MOVING = true;
+  try {
+    const r = await api('/ui/api/trae/accounts/delete', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id})});
+    TRAE_ACCTS = r.accounts || [];
+    toast(`${name} 已删除`);
+    refreshAll();
+  } catch (e) { toast('删除失败: ' + e.message, true); }
+  finally {
+    TRAE_MOVING = false;
+    ACCT_CONFIRM_OPEN = false;
+  }
+}
+
+function renderTraePanel() {
+  const panel = document.getElementById('trae-panel');
+  if (!panel) return;
+  const trae = (BENEFITS.providers || []).find(p => p.id === 'trae');
+  // 通道未注册（没加 --trae）或海外的 traeintl（独立 id）：整块不渲染
+  if (!trae) { panel.innerHTML = ''; return; }
+
+  // 按「Trae #N」分组（label 形如「Trae #1 · 总额度」）。qoder 同款切法，
+  // 两点差异：
+  // - head_only 条（「总额度」= 各权益包合计）不进明细列表，但**要**用作
+  //   合计行数字——quotaItemsHtml 跳过它、quotaHeadSum 非 sum_items 分支取
+  //   「第一条有数的」正好是它（items[0]，后端按总额度在前排列）。
+  // - 未登录说明条（remaining 是文案、无 percent/used）进 notices 横贯全宽，
+  //   与 qoder 的 groupAccountsByPrefix 同判据。
+  const groups = new Map();
+  const notices = [];
+  for (const it of (trae.quota && trae.quota.supported ? trae.quota.items : []) || []) {
+    if (it.query_failed || (it.percent == null && it.used == null)) { notices.push(it); continue; }
+    if (it.head_only) {
+      // head_only 条挂到「它前缀对应的组」的合计位；组还没出现就先攒着，
+      // 循环结束后按 grp 补进去（后端顺序保证它在该组条目最前）
+      const cut = it.label.indexOf(' · ');
+      const grp = cut >= 0 ? it.label.slice(0, cut) : 'Trae';
+      if (!groups.has(grp)) groups.set(grp, []);
+      groups.get(grp).unshift(Object.assign({}, it, {
+        label: cut >= 0 ? it.label.slice(cut + 3) : it.label}));
+      continue;
+    }
+    const idx = it.label.indexOf(' · ');
+    const grp = idx >= 0 ? it.label.slice(0, idx) : 'Trae';
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  const n = Math.max(...[...groups.keys()]
+    .map(g => g.match(/^Trae #(\d+)$/)).filter(Boolean).map(mm => Number(mm[1])), 1);
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => {
+    const m = grp.match(/^Trae #(\d+)$/);
+    const idx = m ? Number(m[1]) : null;
+    const acct = _trae_acct_for(idx);
+    const moveBtns = (m && n > 1) ? _trae_move_btns(idx, n, acct && acct.id) : '';
+    const delBtn = acct
+      ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
+        `onclick="traeDeleteAccount('${acct.id}')">✕</button>` : '';
+    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
+      `onclick="refreshProviderQuota('trae', this)">↻</button>`;
+    const renameBtn = acctRenameButton('trae', acct);
+    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
+    // 合计行：总额度那条（head_only，unshift 到组首）单独供数——各权益包是
+    // 它的明细不能相加，quotaHeadSum 走非 sum_items 分支取第一条有数的。
+    const headSum = quotaHeadSum({items: its});
+    return `
+    <div class="pat-pkg">
+      <span class="pat-pkg-name"${m ? ` data-trae-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.nickname || acct.id) : grp)}</span>
+      ${_trae_sub_html(acct)}
+      ${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}
+      ${quotaItemsHtml(its, 'trae:' + grp)}
+      ${rowBtns}
+    </div>`;
+  }).join('');
+  const noticeHtml = notices.map(quotaItemHtml).join('');
+  const multi = n > 1;
+
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head">
+        <span class="name">Trae</span>
+        <span class="tag">${multi ? '多账号 · 自动切换' : 'Trae Work'}</span>
+        <span class="grow"></span>
+        <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
+      </div>
+      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
+      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login trae</span>）</div>'}
+    </div>`;
+  loadTraeAccounts();
+}
+
+async function loadTraeAccounts() {
+  try {
+    const r = await api('/ui/api/trae/accounts');
+    if (!r.enabled) { TRAE_ACCTS = []; return; }
+    const accts = r.accounts || [];
+    // 数据没变就不动 DOM——renderTraePanel 已用同一份快照渲染过
+    if (JSON.stringify(accts) === JSON.stringify(TRAE_ACCTS)) return;
+    const snapshotMissing = !TRAE_ACCTS || !TRAE_ACCTS.length;
+    TRAE_ACCTS = accts;
+    if (!accts.length) return;
+    if (snapshotMissing) {
+      renderTraePanel();
+      syncQuotaFold();
+      return;
+    }
+    // 就地回填：组名换成账号名、组名后插副标题（qoder 同款）
+    for (const a of accts) {
+      const el = (accts.length === 1)
+        ? document.querySelector('#trae-panel .pat-pkg-name')
+        : document.querySelector(`#trae-panel [data-trae-idx="${a.index}"]`);
+      if (!el) continue;
+      el.textContent = a.alias || a.nickname || a.id;
+      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-trae-sub')) {
+        el.nextElementSibling.remove();
+      }
+      const sub = _trae_sub_html(a);
+      if (sub) el.insertAdjacentHTML('afterend', sub);
+    }
+    syncQuotaFold();
+  } catch (e) {
+    // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
+  }
+}
