@@ -239,6 +239,14 @@ function renderBenefits() {
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
   // traepat/antigravity/kimi/qoder/trae/dumate 的额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
   const qps = (BENEFITS.providers || []).filter(p => p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'trae' && p.id !== 'dumate');
+  // zcode / zcode-start 是同一家产品的两档套餐，卡片排一起好对照——providers
+  // 默认按通道注册顺序排，zcode-start 落在队尾、和 zcode 中间隔着 glm/mimo 的卡
+  const zcIdx = qps.findIndex(p => p.id === 'zcode');
+  const zcsIdx = qps.findIndex(p => p.id === 'zcode-start');
+  if (zcIdx >= 0 && zcsIdx > zcIdx + 1) {
+    const [zcs] = qps.splice(zcsIdx, 1);
+    qps.splice(zcIdx + 1, 0, zcs);
+  }
   document.getElementById('quota-list').innerHTML = qps.length ? qps.map(p => {
     const q = p.quota;
     const items = quotaItemsHtml(q.items || [], p.id);
