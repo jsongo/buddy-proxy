@@ -62,6 +62,7 @@ from .credentials import (
 )
 from .errors import _last_user_text, _sse_error, _upstream_error
 from .quota import _expire_ts, _pkg_active, _pkg_label, _used_percent
+from .umid import machine_identity
 
 log = logging.getLogger(__name__)
 
@@ -325,7 +326,10 @@ class QoderProvider(BaseProvider):
         _, cred_dict = await asyncio.to_thread(ensure_account_token, account.id)
         cred = cred_to_credential(cred_dict)
         reg = with_cached_endpoints(resolve_region(cred.region))
-        return CampaignClient(reg, cred)
+        # 全球区活动面按机器指纹定向发放签到活动；指纹在事件循环外生成。
+        identity = await asyncio.to_thread(
+            machine_identity, reg.key, cred.uid or account.id)
+        return CampaignClient(reg, cred, identity)
 
     async def _campaign_status(self, campaigns: list[Any]) -> dict[str, Any]:
         """把一个账号的活动列表映射为签到状态。"""

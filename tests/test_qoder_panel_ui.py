@@ -196,3 +196,73 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
     assert "已用 75%" in html
     # 单条不出「N 项合计」角标
     assert "项合计" not in html
+
+
+def test_qoder_sub_wraps_all_rows_in_single_data_qoder_sub():
+    """副标题整体（区域/冷却/模型受限）包在唯一一个 data-qoder-sub 容器里。
+
+    就地回填按这个属性「删旧插新」——模型受限行以前不带标记，回填时删不掉，
+    状态每变一次就积一行（真机实报「模型受限」重复两遍）。锁：整个副标题块
+    只出现一次 data-qoder-sub，且容器里含模型受限行。
+    """
+    out = _run_js("""
+const a = {region: 'cn', cooling: [], models_limited: ['glm-5.3', 'kimi-k3']};
+const withLim = _qoder_sub_html(a);
+const withoutLim = _qoder_sub_html({region: 'cn', cooling: []});
+console.log(JSON.stringify({withLim, withoutLim}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["withLim"].count("data-qoder-sub") == 1, "副标题块必须只有一层容器"
+    assert 'data-qoder-sub><div' in data["withLim"], "容器应包住全部小字行"
+    assert "模型受限" in data["withLim"]
+    assert data["withoutLim"].count("data-qoder-sub") == 1
+
+
+def test_qoder_acct_matching_is_region_scoped():
+    """「Qoder #N」是区内顺位：全球账号排在前面也不能把 CN 顺位对错人。"""
+    out = _run_js("""
+QODER_ACCTS = [
+  {index: 1, id: 'g1', alias: '海外号', region: 'global', cooling: []},
+  {index: 2, id: 'c1', alias: 'CN 一号', region: 'cn', cooling: []},
+];
+const cn1 = _qoder_acct_for(1, 'cn');
+const g1 = _qoder_acct_for(1, 'global');
+console.log(JSON.stringify({cn1: cn1 && cn1.id, g1: g1 && g1.id}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["cn1"] == "c1", "区内 #1 应匹配 CN 账号，而不是全列表 index=1 的全球账号"
+    assert data["g1"] == "g1"
+
+
+def test_qoder_intl_panel_titles_accounts_and_drops_region_row():
+    """海外卡标题=账号名（alias 优先）；副标题不重复「Global 区」；区里顺位对上。"""
+    out = _run_js("""
+BENEFITS.providers = [{id: 'qoderintl', name: 'Qoder 海外版', quota: {supported: true, items: [
+  {label: 'Qoder #1 · Subscription', remaining: 75, total: 100, percent: 25, used: 25},
+]}}];
+globalThis.__ACCTS = [
+  {index: 3, id: 'g1', alias: '海外主力', region: 'global',
+   cooling: [{kind: 'quota', minutes_left: 3.2}], models_limited: []},
+];
+INTL_ACCTS = globalThis.__ACCTS.filter(a => a.region === 'global');
+renderQoderIntlPanel();
+console.log(JSON.stringify({html: INTL_PANEL.innerHTML}));
+""")
+    html = json.loads(out.strip().splitlines()[-1])["html"]
+    assert "海外主力" in html, "海外卡标题应是账号名"
+    assert "额度冷却" in html, "冷却状态应进海外卡副标题"
+    assert "Global 区" not in html, "面板头已有 Global 标识，副标题不重复区域"
+    assert "模型受限" not in html, "无受限模型的账号不该出现受限行"
+
+
+def test_qoder_intl_panel_falls_back_to_global_label_without_accounts():
+    out = _run_js("""
+BENEFITS.providers = [{id: 'qoderintl', name: 'Qoder 海外版', quota: {supported: true, items: [
+  {label: 'Qoder #1 · Subscription', remaining: 75, total: 100, percent: 25, used: 25},
+]}}];
+globalThis.__ACCTS = [];
+renderQoderIntlPanel();
+console.log(JSON.stringify({html: INTL_PANEL.innerHTML}));
+""")
+    html = json.loads(out.strip().splitlines()[-1])["html"]
+    assert "Global #1" in html, "账号数据没到时回落组名，标题不能空"

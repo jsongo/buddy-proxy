@@ -12,7 +12,10 @@ failover），``QoderProvider`` 全部按 ``self._region`` 取址；本类只把
 签到（每日活动权益）**保留** ``supports_checkin=True``：海外活动由上游
 ``/sash/.../campaigns`` 决定。没有任何活动时返回 ``inactive``；若有
 ``VIEW_DETAILS`` 等活动但无可领签到奖励，则状态标为 ``unavailable``，UI 显示
-「有活动，暂无可领签到奖励」，自动打卡不会对非奖励活动发送 claim。
+「有活动，暂无可领签到奖励」，自动打卡不会对非奖励活动发送 claim。注意
+签到活动按**机器指纹**定向发放（CN/全球一致），活动请求会带桌面端
+``runtime-info`` 同款 ``Cosy-Machine*`` 指纹头（见 ``umid.py``），指纹不可用
+时回退静态头——此时上游可能不发签到条目，状态会误报「无可领签到奖励」。
 
 ``forward()`` 继承父类的同区严格语义：海外通道只轮转 ``region=global`` 的
 账号，一个都没有时报 401「无该区域可用账号」，**不**兜底捞 CN 账号。
