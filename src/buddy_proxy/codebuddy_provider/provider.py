@@ -42,6 +42,11 @@ from .pipeline import desensitize_body
 
 log = logging.getLogger(__name__)
 
+#: 多账号签到领取的账号间强制间隔（照 trae 同款）：上游活动接口对短窗口连打
+#: 有频控（trae 实测零间隔必中「参与用户太多」），多账号逐个领时从第 2 个
+#: 账号起先歇一拍，节奏像「人在操作」。
+_CHECKIN_THROTTLE_S = 4.0
+
 
 def get_state():
     """经包命名空间转发 ``state.get_state``。
@@ -336,7 +341,9 @@ class CodeBuddyProvider(BaseProvider):
         """领取今日签到积分。多账号**每个都领**（用户决策），逐个尝试、
         各自容错：单个账号失败（网络/token/已领过）不阻塞其它账号。汇总
         ``extra_credits`` 为各账号实领之和，``message`` 据实说明每个账号结果。
-        本方法经 benefits 层 ``asyncio.to_thread`` 跑，串行 sleep 不阻塞事件循环。
+        多账号之间强制间隔 ``_CHECKIN_THROTTLE_S``（上游活动接口对短窗口连打
+        有频控，照 trae 同款）。本方法经 benefits 层 ``asyncio.to_thread`` 跑，
+        sleep 不阻塞事件循环。
         """
         accounts = self._accounts_for_benefits()
         if not accounts:
@@ -364,6 +371,11 @@ class CodeBuddyProvider(BaseProvider):
             i = didx.get(acct.id, pos)
             name = acct.alias or acct.nickname or acct.uid or acct.id
             tag = f"#{i}"
+            # 串行节流：从第 2 个账号起先等一段再打（照 trae 同款——上游活动
+            # 接口对短窗口连打有频控）。异常路径同样等：哪怕上一个账号失败，
+            # 下一个也照常歇一拍，节奏一致才像「人在操作」。
+            if pos > 1:
+                time.sleep(_CHECKIN_THROTTLE_S)
             try:
                 payload = creds.api_post_as(acct.id, "/v2/billing/meter/daily-checkin")
             except Exception as e:  # noqa: BLE001 — 单账号失败不阻塞其它账号

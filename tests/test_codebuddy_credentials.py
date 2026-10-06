@@ -280,34 +280,39 @@ def test_ensure_token_refreshes_when_expired(monkeypatch):
 
 
 def test_ensure_token_concurrent_single_refresh(monkeypatch):
-    """并发同时发现过期：等锁的直接复用别人刚刷完的 token，不发第二次请求。"""
+    """两线程同时发现过期：只有一个去打刷新接口，另一个等锁后经
+    _reload_if_rotated 复用盘上新 token——不发第二次刷新请求（重放会被
+    上游判重）。"""
+    import threading
+
     save_account_cred(_cred("u1", expires_at_ms=int(time.time() * 1000) - 1000))
-    calls = []
-    real_post = credentials.httpx.post
+    calls: list[str] = []
 
     def _post(url, **kw):
         calls.append(url)
-        # 刷新落盘前模拟「另一个线程已经刷完落盘」——返回体照常给
+        time.sleep(0.05)  # 拉长刷新窗口，让另一线程稳定撞上「已有人在刷」
         return _FakeResp({"data": {"accessToken": "at-new", "refreshToken": "rt-new"}})
 
     monkeypatch.setattr(credentials.httpx, "post", _post)
-    import threading
+    start = threading.Barrier(2)
+    out: list[str] = []
+    errors: list[Exception] = []
 
-    out = []
-    # 线程 A 正常刷新；线程 B 等 A 落盘后进锁，_reload_if_rotated 应复用
     def _run():
-        out.append(ensure_account_token("u1")[0])
+        try:
+            start.wait()
+            out.append(ensure_account_token("u1")[0])
+        except Exception as exc:  # noqa: BLE001 - 收进 errors 让断言报
+            errors.append(exc)
 
-    # 直接顺序调用验证双检路径：第一次刷新落盘后，手动把过期 cred 再喂进去
-    token1, _ = ensure_account_token("u1")
-    assert token1 == "at-new"
-    n = len(calls)
-    # 拿旧 cred 再 ensure——内存里旧 token != 盘上新 token → 复用不刷新
-    stale = _cred("u1")  # token=at-u1，盘上是 at-new
-    from buddy_proxy.codebuddy_provider.credentials import refresh_account_cred
-    reused = refresh_account_cred(stale)
-    assert reused["token"] == "at-new"
-    assert len(calls) == n, "盘上 token 已换且未过期 → 复用，不再打刷新接口"
+    threads = [threading.Thread(target=_run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert out == ["at-new", "at-new"]
+    assert len(calls) == 1, "并发同时发现过期只允许打一次刷新接口"
 
 
 def test_refresh_discards_write_when_account_deleted(monkeypatch):
