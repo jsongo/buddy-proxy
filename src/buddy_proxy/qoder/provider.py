@@ -404,25 +404,45 @@ class QoderProvider(BaseProvider):
         # 多账号查询并发，避免每个账号的上游超时串行累加成几十秒的管理页等待。
         results = await asyncio.gather(*(_status_one(acct) for acct in accounts))
 
-        if len(results) == 1:
-            return results[0][1]
+        def _detail_rows() -> list[dict[str, Any]]:
+            """逐账号明细行（前端第二行起，一行一个账号）。
 
-        details = []
+            活动信息（``daily_credit``/``activity_name`` 等）也要跟着进行——
+            之前只拷了状态五键，顶层聚合又没回填，多账号通道的卡片永远缺
+            「每日 +100.00」，单账号通道却有，用户看到的就是这种不一致。
+            """
+            rows = []
+            for acct, status in results:
+                i = didx.get(acct.id, acct.priority + 1)
+                row: dict[str, Any] = {"id": acct.id, "index": i,
+                                       "name": acct.alias or acct.name or acct.email or acct.id}
+                if status.get("error"):
+                    row["error"] = status["error"]
+                else:
+                    row.update({k: status.get(k) for k in
+                                ("checked_in", "claimable", "inactive", "unavailable",
+                                 "message", "daily_credit", "benefit_kind",
+                                 "activity_name")})
+                rows.append(row)
+            return rows
+
+        if len(results) == 1:
+            # 单账号也要带 accounts 明细：qoderintl 只有一个号，之前走这条
+            # 原样返回，卡片上没有第二行账号，和多账号通道版式对不上。
+            status = results[0][1]
+            if not status.get("error"):
+                status["accounts"] = _detail_rows()
+            return status
+
         valid = [status for _, status in results if not status.get("error")]
         claimable = [s for s in valid if s.get("claimable")]
         claimed = [s for s in valid if s.get("checked_in")]
         any_activity = any(not s.get("inactive") for s in valid)
-        for acct, status in results:
-            i = didx.get(acct.id, acct.priority + 1)
-            row = {"id": acct.id, "index": i,
-                   "name": acct.alias or acct.name or acct.email or acct.id}
-            if status.get("error"):
-                row["error"] = status["error"]
-            else:
-                row.update({k: status.get(k) for k in
-                            ("checked_in", "claimable", "inactive", "unavailable", "message")})
-            details.append(row)
+        details = _detail_rows()
         failures = [s["error"] for _, s in results if s.get("error")]
+        # 顶层也回填活动信息（chips 用）：同区域各账号的活动一般相同，
+        # 取第一个带 daily_credit 的；没有就保持缺省，不硬造。
+        activity = next((s for s in valid if s.get("daily_credit") is not None), None)
         return {
             "checked_in": bool(claimed) and not claimable and not failures,
             "claimable": bool(claimable),
@@ -435,6 +455,10 @@ class QoderProvider(BaseProvider):
                         "部分账号查询失败，签到状态不完整" if failures else
                         "今日已领取" if claimed else
                         "有活动，但当前没有可领取的签到奖励" if any_activity else ""),
+            **({"daily_credit": activity["daily_credit"],
+                "benefit_kind": activity["benefit_kind"],
+                "activity_name": activity["activity_name"]}
+               if activity else {}),
         }
 
     async def checkin_claim(self) -> dict[str, Any] | None:

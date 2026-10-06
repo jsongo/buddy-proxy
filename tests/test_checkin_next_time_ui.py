@@ -130,6 +130,19 @@ console.log(JSON.stringify({
     assert data["empty"] == ""
 
 
+def test_countdown_tail_is_not_rendered():
+    """「21 小时 33 分后」的倒计时尾巴不再出现在卡上——用户反馈第一行太挤，
+    绝对时刻（明天 00:00）已够用。fmtCountdown 本身保留（存量元素更新路径）。"""
+    out = _run_js("""
+const now = Math.floor(Date.now() / 1000);
+console.log(nextTimeHtml({next_ts: now + 3600 * 21 + 33 * 60,
+                          next_ts_source: 'upstream', done_today: true}));
+""")
+    assert "data-next-cd" not in out, "倒计时尾巴已按反馈移除，别又渲染回来"
+    assert "小时" not in out and "分后" not in out, f"相对时长不该出现: {out}"
+    assert "data-next-clock" in out, "绝对时刻仍要保留"
+
+
 def test_upstream_source_never_reaches_the_dom():
     """``next_ts_source`` 只被当**判据**用，绝不整串拼进 HTML。
 

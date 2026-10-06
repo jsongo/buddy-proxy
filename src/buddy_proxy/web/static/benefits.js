@@ -32,11 +32,11 @@ function nextTimeHtml(c) {
     : '时刻来自上游返回的时间窗';
   // 推断值用虚线框 + 斜体表示「不确定」，替掉原先贴在「分后」后面的「≈」：
   // 那个位置读着像错字，而且它只区分了来源，没说清「哪里不确定」。
-  // data-next-* 三件套保持不变（renderNextTimes 与测试都依赖）。
+  // 倒计时尾巴（「21 小时 33 分后」）按用户反馈撤了——第一行太挤，绝对时刻
+  // 已够用；fmtCountdown 保留给 renderNextTimes 的存量元素更新路径。
   return `<span class="br-next${inferred ? ' inferred' : ''}" title="${esc(tip)}" data-next-ts="${c.next_ts}">` +
     `<span class="lbl">${verb}</span>` +
-    `<b class="at" data-next-clock>${esc(fmtNextClock(c.next_ts))}</b>` +
-    `<span class="cd" data-next-cd>${esc(fmtCountdown(c.next_ts))}</span></span>`;
+    `<b class="at" data-next-clock>${esc(fmtNextClock(c.next_ts))}</b></span>`;
 }
 // 倒计时每秒走一格（纯本地计算，不打上游）；只在打卡页可见且真有元素时跑。
 let NEXT_TIME_TIMER = null;

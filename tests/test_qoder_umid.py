@@ -154,6 +154,10 @@ def test_machine_identity_logs_when_binary_missing(monkeypatch, caplog):
     monkeypatch.setattr(umid, "_find_binary", lambda region: None)
     import logging
 
+    # 全量跑时别的测试会调 setup_logging（把 buddy_proxy 的 propagate 关掉），
+    # 记录走到 buddy_proxy 那层就停了，caplog 的 handler 在 root 上收不到——
+    # 单跑不复现。恢复的是 buddy_proxy 那层的传播，改 umid 自己没用。
+    monkeypatch.setattr(logging.getLogger("buddy_proxy"), "propagate", True)
     with caplog.at_level(logging.DEBUG, logger="buddy_proxy.qoder.umid"):
         assert machine_identity("global", "u1") is None
     assert any("回退静态指纹" in r.message for r in caplog.records)
