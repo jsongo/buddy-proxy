@@ -101,6 +101,34 @@ def test_zcode_guide_survives_appended_file_documented_case(tmp_path, monkeypatc
     assert zcode._load_secret_file() == "NEWKEY_PART1.PART2"
 
 
+def test_codebuddy_login_cli_accepts_region_dispatch_keyword(monkeypatch):
+    """main 给所有登录 handler 统一传 region，CodeBuddy 国内版忽略即可。"""
+    called = {}
+
+    def fake_login(open_browser=True, **kwargs):
+        called["open_browser"] = open_browser
+        called.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(auth_login, "_login_codebuddy", fake_login)
+    monkeypatch.setattr(auth_login, "_DISPATCH", {"codebuddy": auth_login._login_codebuddy})
+    monkeypatch.setattr(auth_login.sys, "argv", ["buddy login", "codebuddy"])
+
+    assert auth_login.main() == 0
+    assert called == {"open_browser": True, "region": None}
+
+
+def test_every_login_handler_accepts_common_dispatch_arguments():
+    """main 给每个 handler 统一传 open_browser 和 region。"""
+    import inspect
+
+    for provider, handler in auth_login._DISPATCH.items():
+        try:
+            inspect.signature(handler).bind(open_browser=True, region=None)
+        except TypeError as exc:
+            pytest.fail(f"{provider} 登录 handler 不接受统一参数: {exc}")
+
+
 def test_every_known_channel_has_enable_hint():
     """每个认得的通道都要有「怎么开启」的说明，且不能推出不存在的开关。
 
