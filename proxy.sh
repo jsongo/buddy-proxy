@@ -9,7 +9,7 @@
 #   ./proxy.sh logs                              # 跟踪日志
 #   ./proxy.sh ui                                # 确保在跑并打开管理页 http://127.0.0.1:8787/ui
 #   ./proxy.sh login    [provider] [--no-browser] [--region cn|global] # 登录上游账号（默认 codebuddy；
-#                                                # provider: codebuddy(=workbuddy)/trae/zcode/glm/doubao/mimo/qoder/gemini/antigravity）
+#                                                # provider: codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity）
 #                                                # --region 仅 trae/qoder 生效（两区账号不通用；交互终端不给会问一句）
 #                                                # 登录成功后若网关在运行，需 restart 生效
 #
@@ -262,7 +262,7 @@ cmd_login() {
     local extra=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|trae|zcode|glm|doubao|dumate|mimo|qoder|gemini|gemini-cli|antigravity|kimi)
+            codebuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|gemini|gemini-cli|antigravity|kimi)
                 provider="$1" ;;
             workbuddy)
                 # workbuddy 是 codebuddy 的别名（登录模块内同样会归一）
