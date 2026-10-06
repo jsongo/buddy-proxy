@@ -244,7 +244,7 @@ async function kimiImportSubmit() {
 function renderKimiPanel() {
   const panel = document.getElementById('kimi-panel');
   if (!panel) return;
-  const kimi = (BENEFITS.providers || []).find(p => p.id === 'kimi');
+  const kimi = (BENEFITS.providers || []).find(p => p.id === 'kimi' && !p.disabled);
   if (!kimi) { panel.innerHTML = ''; return; }  // 通道未注册（没加 --kimi）：整块不渲染
 
   // 按「Kimi #N」分组（label 形如「Kimi #1 · 5 小时窗口」），antigravity 同款切法。

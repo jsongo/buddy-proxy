@@ -115,7 +115,7 @@ async def ui_benefits(request: Request):
     if manager is None:
         return {"providers": [], "calendar": [], "auto_checkin": False,
                 "checkin_time": "09:30", "checkin_enabled_providers": []}
-    return await manager.snapshot()
+    return await manager.snapshot(getattr(state, "disabled_providers", set()) or set())
 
 
 @app.post("/ui/api/benefits/refresh")

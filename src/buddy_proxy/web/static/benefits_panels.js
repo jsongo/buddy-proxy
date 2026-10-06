@@ -4,7 +4,7 @@
 function renderTraepatPanel() {
   const panel = document.getElementById('traepat-panel');
   if (!panel) return;
-  const pat = (BENEFITS.providers || []).find(p => p.id === 'traepat' && p.quota && p.quota.supported);
+  const pat = (BENEFITS.providers || []).find(p => p.id === 'traepat' && !p.disabled && p.quota && p.quota.supported);
   if (!pat) { panel.innerHTML = ''; return; }
 
   // 日包/周包按「PAT #N」分组（label 形如「PAT #1 · 周包（通用额度）」）
@@ -260,7 +260,7 @@ async function refreshProviderQuota(pid, btn) {
 function renderAntigravityPanel() {
   const panel = document.getElementById('antigravity-panel');
   if (!panel) return;
-  const ag = (BENEFITS.providers || []).find(p => p.id === 'antigravity' && p.quota && p.quota.supported);
+  const ag = (BENEFITS.providers || []).find(p => p.id === 'antigravity' && !p.disabled && p.quota && p.quota.supported);
   if (!ag) { panel.innerHTML = ''; return; }
 
   // 按「AG #N」分组（label 形如「AG #1 · Gemini 组（…）」），与 trae 的 PAT #N 同款切法；
@@ -489,7 +489,7 @@ async function qoderDeleteAccount(id) {
 function renderQoderPanel() {
   const panel = document.getElementById('qoder-panel');
   if (!panel) return;
-  const qoder = (BENEFITS.providers || []).find(p => p.id === 'qoder');
+  const qoder = (BENEFITS.providers || []).find(p => p.id === 'qoder' && !p.disabled);
   if (!qoder) { panel.innerHTML = ''; return; }  // 通道未注册（没加 --qoder）：整块不渲染
 
   // 按「Qoder #N」分组（label 形如「Qoder #1 · 订阅额度」），kimi 同款切法。
@@ -674,7 +674,7 @@ async function traeDeleteAccount(id) {
 function renderTraePanel() {
   const panel = document.getElementById('trae-panel');
   if (!panel) return;
-  const trae = (BENEFITS.providers || []).find(p => p.id === 'trae');
+  const trae = (BENEFITS.providers || []).find(p => p.id === 'trae' && !p.disabled);
   // 通道未注册（没加 --trae）或海外的 traeintl（独立 id）：整块不渲染
   if (!trae) { panel.innerHTML = ''; return; }
 

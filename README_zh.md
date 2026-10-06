@@ -9,7 +9,7 @@
 ## 特性
 
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
-- **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。按页签懒加载，首屏不会卡在最慢的日志接口上
+- **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；配置持久化在 `settings.json` 的 `disabled_providers`。按页签懒加载，首屏不会卡在最慢的日志接口上
 - **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）
 - **脱敏**（`--desensitize`）— 向 system 消息里的合规关键词插入零宽空格，避免后端关键词审核误拦
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
@@ -33,7 +33,7 @@ uv run python -m buddy_proxy --desensitize
 
 首次运行会自动创建状态目录 `~/.buddy-proxy/`（权限 `0700`，可用
 `BUDDY_PROXY_STATE_DIR` 整体覆盖）。机器本地的东西都在这里：`settings.json`
-（默认模型、已停用模型、限时窗口）、Trae Work 凭证 `trae_work.json`、PAT token
+（默认模型、已停用模型/通道、限时窗口）、Trae Work 凭证 `trae_work.json`、PAT token
 缓存 `trae_pat_token.json`、客户端名映射 `buddy_client_names.json`。目录内含凭证，
 注意别被备份或版本控制带走。启动时会以 `[State] ...` 打印实际路径。
 

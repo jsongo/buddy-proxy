@@ -621,3 +621,41 @@ def test_refresh_api_requires_provider(monkeypatch):
     monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
     r = TestClient(m.app).post("/ui/api/benefits/refresh", json={})
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# snapshot(disabled_providers)：整通道停用的呈现（2026-10-06 模型页开关）
+# ---------------------------------------------------------------------------
+def test_snapshot_marks_disabled_providers_and_filters_alerts(tmp_path, monkeypatch):
+    """停用通道：entry 带 disabled 标记、不再上告警横幅；额度数据仍照带——
+    前端只是隐藏展示，开关一开原样回来，不用重查上游。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from buddy_proxy.benefits import BenefitsManager
+
+    monkeypatch.setenv("BUDDY_PROXY_SETTINGS", str(tmp_path / "settings.json"))
+
+    class P:
+        id = "p1"
+        name = "P1"
+        supports_checkin = False
+
+        def quota(self):
+            return {"supported": True, "items": [
+                {"label": "P1 · 总额度", "used": 800, "total": 1000, "remaining": 200,
+                 "percent": 80, "unit": "credit"}]}
+
+    mgr = BenefitsManager(tmp_path / "checkin.jsonl",
+                          SimpleNamespace(providers={"p1": P()}))
+    snap = asyncio.run(mgr.snapshot({"p1"}))
+    # _providers() 会把 codebuddy 塞在首位，按 id 取目标条目
+    entry = next(e for e in snap["providers"] if e["id"] == "p1")
+    assert entry["disabled"] is True
+    assert entry["quota"]["supported"] is True, "数据照带"
+    assert snap["low_quota"] == [] and snap["expiring"] == [], "停用通道不上告警"
+
+    snap2 = asyncio.run(mgr.snapshot(set()))
+    entry2 = next(e for e in snap2["providers"] if e["id"] == "p1")
+    assert entry2["disabled"] is False
+    assert len(snap2["low_quota"]) == 1, "未停用时 200 < 300 照常告警"

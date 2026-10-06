@@ -130,7 +130,11 @@ async def list_models():
     # 合并其它 provider 的模型（如豆包/Trae）。
     # provider 字段标识该模型由哪个上游通道提供（codebuddy/trae/doubao），
     # 与 owned_by（上游厂牌，如 zhipu）区分，便于客户端辨识。
+    # 整通道停用的直接不列：客户端选了也只会 403，列表里就该当它不存在。
+    disabled_providers = getattr(state, "disabled_providers", set()) or set()
     for provider in getattr(state, "providers", {}).values():
+        if provider.id in disabled_providers:
+            continue
         for m in provider.models():
             data.append({
                 "id": m.get("id"),

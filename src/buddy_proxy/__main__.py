@@ -505,6 +505,16 @@ def main():
     if disabled_models:
         print(f"[Disabled Models] {len(disabled_models)} 个已停用: {', '.join(sorted(disabled_models))}")
 
+    # 整通道停用：settings.json 的 provider id 列表，命中通道转发 403、/ui 各处
+    # 隐藏或置灰（模型页开关写入，用户 2026-10-06 需求）
+    disabled_providers = {
+        k.strip() for k in (saved_settings.get("disabled_providers") or [])
+        if isinstance(k, str) and k.strip()
+    }
+    if disabled_providers:
+        print(f"[Disabled Providers] {len(disabled_providers)} 个通道已停用: "
+              f"{', '.join(sorted(disabled_providers))}")
+
     # 限时可用模型：settings.json 的 {"provider/model": {"windows": [["HH:MM","HH:MM"],...]}}，
     # 窗口外拒绝转发。键规范化 + 窗口校验，非法窗口丢弃、空窗口不入表。
     model_schedules: dict[str, list] = {}
@@ -561,6 +571,7 @@ def main():
         default_provider=args.default_provider,
         default_model=default_model or None,
         disabled_models=disabled_models,
+        disabled_providers=disabled_providers,
         model_schedules=model_schedules,
         model_order=model_order,
         metrics=metrics,

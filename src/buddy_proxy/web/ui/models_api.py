@@ -97,6 +97,15 @@ def _model_groups(state: Any) -> list[dict[str, Any]]:
             "health": health,
             "models": _provider_models(p),
         })
+    # zcode / zcode-start 是同一家产品的两档套餐，组排一起好对照——providers
+    # 默认按通道注册顺序排，zcode-start 落在队尾、和 zcode 中间隔着别家（与
+    # 额度页 benefits.js 的同款处理一致，用户 2026-10-06 需求）。
+    zc_idx = next((i for i, g in enumerate(groups) if g["id"] == "zcode"), -1)
+    if zc_idx >= 0:
+        zcs = next((g for g in groups if g["id"] == "zcode-start"), None)
+        if zcs is not None and groups.index(zcs) > zc_idx + 1:
+            groups.remove(zcs)
+            groups.insert(zc_idx + 1, zcs)
     return groups
 
 
@@ -274,6 +283,10 @@ async def ui_models(request: Request):
     schedules = getattr(state, "model_schedules", {}) or {}
     order = getattr(state, "model_order", None) or {}
     for group in groups:
+        # 整通道停用标记（模型页 provider 开关）：前端整组置灰、顺序页对应模型
+        # 置灰、转发侧 403——数据照返回，开关还能再打开
+        group["disabled"] = group["id"] in (
+            getattr(state, "disabled_providers", set()) or set())
         for m in group["models"]:
             # 指标也用**裸名**查：埋点记的 model_id 来自转发链路，是剥了通道前缀的
             # 裸名（qoder 目录里的 id 是 `qoder/deepseek-v4.1-flash`，记的是
@@ -354,6 +367,44 @@ async def ui_model_toggle(request: Request):
     state.disabled_models = current
     settings_mod.save_settings({"disabled_models": sorted(current)})
     return {"ok": True, "model": key, "disabled": want_disabled}
+
+
+@app.post("/ui/api/provider-toggle")
+async def ui_provider_toggle(request: Request):
+    """整通道停用/启用（模型页 provider 标题栏的开关，用户 2026-10-06 需求）。
+
+    请求体：``{"provider": "zcode", "disabled": true}``；未带 disabled 按当前
+    状态取反（切换）。停用后：该通道转发 403、/v1/models 组置灰、额度页/告警
+    不再展示、顺序页对应模型置灰。持久化到 settings.json 并热更新运行态。
+
+    codebuddy 是默认兜底通道（裸模型名请求的最终归属），停了整个代理就没有
+    兜底了，明确拒绝停用。
+    """
+    _ensure_local(request)
+    state = get_state()
+    body = await request.json()
+    provider = (body.get("provider") or "").strip()
+    if not provider:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 provider"}})
+    if provider == "codebuddy":
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "codebuddy 是默认兜底通道，不能停用"}})
+    if provider not in (getattr(state, "providers", {}) or {}):
+        raise HTTPException(status_code=404, detail={"error": {"message": f"未知通道 {provider}"}})
+
+    current = getattr(state, "disabled_providers", set()) or set()
+    if not isinstance(current, set):
+        current = set(current)
+    want_disabled = bool(body["disabled"]) if "disabled" in body else provider not in current
+    if want_disabled:
+        current.add(provider)
+    else:
+        current.discard(provider)
+
+    state.disabled_providers = current
+    settings_mod.save_settings({"disabled_providers": sorted(current)})
+    return {"ok": True, "provider": provider, "disabled": want_disabled}
 
 
 @app.post("/ui/api/model-schedule")
