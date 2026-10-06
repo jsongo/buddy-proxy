@@ -996,6 +996,16 @@ def test_model_table_has_no_inline_order_entry(env):
     assert "clearOrderMarks" in ui, "「清冷却」按钮是这张表唯一的顺序相关操作，应保留"
 
 
+def test_order_page_cards_have_independent_model_test_button(env):
+    """模型顺序卡片可直接测试裸模型名，按钮点击不应触发展开/折叠。"""
+    ui = _ui_source(env.client)
+    start = ui.index("function orderPageCard(r)")
+    body = ui[start:ui.index("\n}", start)]
+    assert "class=\"primary order-test\" onclick=\"runTest('','${esc(key)}')\"" in body
+    assert '<div class="order-head-main" onclick="orderToggle(' in body
+    assert '<div class="order-head" onclick="orderToggle(' not in body
+
+
 def test_order_page_renders_pending_draft_cards(env):
     """顺序页的渲染源必须**包含**「还没保存过、正在编辑」的模型。
 

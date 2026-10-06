@@ -141,9 +141,12 @@
   input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.65); cursor: pointer; }
   /* ── 模型顺序页 ── */
   .order-card { margin-bottom: 10px; padding: 0; overflow: hidden; }
-  .order-head { display: flex; align-items: center; gap: 9px; cursor: pointer;
-                padding: 11px 14px; transition: background .15s; }
-  .order-head:hover { background: var(--card2); }
+  .order-head { display: flex; align-items: center; gap: 9px;
+                padding: 7px 14px 7px 0; transition: background .15s; }
+  .order-head-main { display: flex; align-items: center; gap: 9px; cursor: pointer;
+                     padding: 4px 0 4px 14px; min-width: 0; flex: 1; overflow: hidden; }
+  .order-head-main:hover { background: var(--card2); }
+  .order-test { flex: none; margin-right: 2px; }
   .order-title { font-weight: 600; font-size: 13px; }
   /* 归属通道做成标题后面的弱化小字，**不是徽标**：它是这张卡的身份，不是状态。
      早先写成 tag 时被读成「当前首选通道」，拖拽后它没变就以为出了 bug——换成

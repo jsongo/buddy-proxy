@@ -99,12 +99,30 @@ function rangeFromQuick(q) {
   const r = QUICK_RANGES.find(x => x.key === q);
   return r ? { start: dayOffsetStr(r.from), end: dayOffsetStr(r.to), q } : null;
 }
-let RANGE = rangeFromQuick('d14');
-try {
-  const s = JSON.parse(localStorage.getItem('bp-range') || 'null');
-  if (s && s.q) { const r = rangeFromQuick(s.q); if (r) RANGE = r; }
-  else if (s && s.start && s.end) RANGE = { start: s.start, end: s.end };
-} catch (e) {}
+function validDateParam(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
+  const d = new Date(value + 'T12:00:00');
+  return !Number.isNaN(d.getTime()) && ymd(d) === value;
+}
+function rangeFromUrl(params) {
+  const quick = params.get('range');
+  const quickRange = quick && rangeFromQuick(quick);
+  if (quickRange) return quickRange;
+  const start = params.get('start'), end = params.get('end');
+  if (!validDateParam(start) || !validDateParam(end) || start > end) return null;
+  return { start, end };
+}
+const INITIAL_URL_PARAMS = new URLSearchParams(location.search);
+const URL_RANGE = rangeFromUrl(INITIAL_URL_PARAMS);
+let RANGE = URL_RANGE || rangeFromQuick('d14');
+if (!URL_RANGE) {
+  try {
+    const s = JSON.parse(localStorage.getItem('bp-range') || 'null');
+    if (s && s.q) { const r = rangeFromQuick(s.q); if (r) RANGE = r; }
+    else if (s && validDateParam(s.start) && validDateParam(s.end) && s.start <= s.end)
+      RANGE = { start: s.start, end: s.end };
+  } catch (e) {}
+}
 function persistRange() {
   try {
     localStorage.setItem('bp-range',
@@ -127,14 +145,16 @@ function renderRangeQuick() {
 function rerenderRange() { if (STATS) render(); }
 document.getElementById('rb-quick').addEventListener('click', ev => {
   const b = ev.target.closest('.rb-btn'); if (!b) return;
-  RANGE = rangeFromQuick(b.dataset.q); persistRange(); RECENT_PAGE = 1; renderRangeQuick(); rerenderRange();
+  RANGE = rangeFromQuick(b.dataset.q); persistRange(); syncUrlFromState();
+  RECENT_PAGE = 1; renderRangeQuick(); rerenderRange();
 });
 function onDateInput() {
   let s = document.getElementById('rb-start').value, e = document.getElementById('rb-end').value;
   if (!s || !e) return;
   if (s > e) { const t = s; s = e; e = t; }
   RANGE = { start: s, end: e }; // 手改起止 → 脱离快捷选项
-  persistRange(); RECENT_PAGE = 1; renderRangeQuick(); rerenderRange();
+  persistRange(); syncUrlFromState();
+  RECENT_PAGE = 1; renderRangeQuick(); rerenderRange();
 }
 document.getElementById('rb-start').addEventListener('change', onDateInput);
 document.getElementById('rb-end').addEventListener('change', onDateInput);
@@ -143,7 +163,29 @@ document.getElementById('rb-end').addEventListener('change', onDateInput);
 // 点一次选中、再点取消；组内多选 = OR，组与组之间 = AND；全不选 = 不筛。
 // 通道/模型候选从当前日期范围有流量的数据动态生成（RANGE_MODELS）；
 // 客户端候选来自日志接口返回的 RANGE_CLIENTS（该维度统计里没有，只能从日志行收集）。
-const LOG_FILTERS = { provider: new Set(), model: new Set(), client: new Set() };
+const LOG_FILTERS = {
+  provider: new Set((INITIAL_URL_PARAMS.get('provider') || '').split(',').filter(Boolean)),
+  model: new Set((INITIAL_URL_PARAMS.get('model') || '').split(',').filter(Boolean)),
+  client: new Set((INITIAL_URL_PARAMS.get('client') || '').split(',').filter(Boolean)),
+};
+
+// 日期范围与请求日志筛选写进 query，刷新/复制链接后仍能恢复当前视图。
+// 保留其它 query 参数和 hash（tab 仍由现有 hash 机制管理）。
+function syncUrlFromState() {
+  const url = new URL(location.href);
+  for (const key of ['range', 'start', 'end']) url.searchParams.delete(key);
+  if (RANGE.q) url.searchParams.set('range', RANGE.q);
+  else {
+    url.searchParams.set('start', RANGE.start);
+    url.searchParams.set('end', RANGE.end);
+  }
+  for (const key of ['provider', 'model', 'client']) {
+    url.searchParams.delete(key);
+    if (LOG_FILTERS[key].size)
+      url.searchParams.set(key, [...LOG_FILTERS[key]].sort().join(','));
+  }
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
 
 function renderLogFilters() {
   const el = document.getElementById('log-filters');
@@ -167,6 +209,7 @@ document.getElementById('log-filters').addEventListener('click', ev => {
   const set = LOG_FILTERS[b.dataset.kind];
   const v = b.dataset.val;
   if (set.has(v)) set.delete(v); else set.add(v);
+  syncUrlFromState();
   RECENT_PAGE = 1;
   renderLogFilters();
   renderRecent();
@@ -452,7 +495,9 @@ function switchTab(name) {
     && document.querySelector('#page-' + name + ' .range-slot');
   if (slot) { slot.appendChild(rb); rb.classList.add('show'); }
   else { rb.classList.remove('show'); }
-  history.replaceState(null, '', '#' + name);
+  const url = new URL(location.href);
+  url.hash = name;
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
   try { localStorage.setItem('bp-tab', name); } catch (e) {}
   refreshStickyVars();
   if (typeof syncPatStatusAuto === 'function') syncPatStatusAuto();  // 进/离额度页 → 起停模型负载自动刷新
@@ -690,13 +735,16 @@ function orderPageCard(r) {
   const chain = items.filter(i => i.model).map(i => i.provider).join(' → ');
 
   return `<div class="card order-card" data-key="${esc(key)}">
-    <div class="order-head" onclick="orderToggle('${esc(key)}')">
-      <span class="chev" style="transform:rotate(${open ? 0 : -90}deg)">▾</span>
-      <span class="mono order-title">${esc(r.m)}</span>
-      <span class="tag order-count">${orderCount(items)} 档</span>
-      ${markCount ? `<span class="tag bad" style="cursor:pointer" title="有目标处于冷却中，点击清除全部冷却，立即重试" onclick="clearOrderMarks('${esc(key)}','${esc(key)}')">⏸ ${markCount}</span>` : ''}
-      <span class="tag bad order-dirty" title="有未保存的修改" style="${orderIsDirty(key) ? '' : 'display:none'}">未保存</span>
-      <span class="order-chain mono">${esc(chain)}</span>
+    <div class="order-head">
+      <div class="order-head-main" onclick="orderToggle('${esc(key)}')">
+        <span class="chev" style="transform:rotate(${open ? 0 : -90}deg)">▾</span>
+        <span class="mono order-title">${esc(r.m)}</span>
+        <span class="tag order-count">${orderCount(items)} 档</span>
+        ${markCount ? `<span class="tag bad" style="cursor:pointer" title="有目标处于冷却中，点击清除全部冷却，立即重试" onclick="event.stopPropagation();clearOrderMarks('${esc(key)}','${esc(key)}')">⏸ ${markCount}</span>` : ''}
+        <span class="tag bad order-dirty" title="有未保存的修改" style="${orderIsDirty(key) ? '' : 'display:none'}">未保存</span>
+        <span class="order-chain mono">${esc(chain)}</span>
+      </div>
+      <button class="primary order-test" onclick="runTest('','${esc(key)}')">测试</button>
     </div>
     ${open ? `<div class="order-body">
       <div class="order-rows" data-key="${esc(key)}"></div>
