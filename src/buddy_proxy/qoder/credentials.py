@@ -851,8 +851,10 @@ def ensure_account_credential(account_id: str, *, force_refresh: bool = False) -
 # userinfo：账号身份（name/email）回填
 # ---------------------------------------------------------------------------
 
-#: userinfo 回填互斥锁（per 进程）：同一账号并发懒回填只打一次上游。
+#: userinfo 回填互斥锁（per 进程）：只保护 done 标记的读写，网络往返在锁外。
 _userinfo_lock = threading.Lock()
+#: 本进程内已回填过身份的账号（并发去重；重启后重查一次也无害）。
+_userinfo_done: set[str] = set()
 
 
 def fetch_userinfo(account_id: str) -> dict[str, Any]:
@@ -891,28 +893,38 @@ def backfill_identity(account_id: str, *, only_if_missing: bool = True) -> dict[
     ``only_if_missing``：已有 name 或 email 的账号不动（避免每次查询都打
     上游；改名走 alias，原始字段回填一次就够）。返回回填的身份 dict，
     已有身份/查询失败返回 None（失败只 log——身份回填不值得让签到/额度
-    查询跟着失败）。进程内每账号只成功打一次（锁内双检）。
+    查询跟着失败）。
+
+    互斥锁只包「已回填？」的 check-and-mark（`_userinfo_done` 进程内标记），
+    网络往返在锁外——多账号并发懒回填时各自独立打上游，不串行排队
+    （一次 20s 超时 × N 个号叠在锁里会把整轮快照拖到分钟级）。
     """
     with _userinfo_lock:
+        if account_id in _userinfo_done and only_if_missing:
+            return None
         cred = load_account_cred(account_id)
         if cred is None:
             return None
         if only_if_missing and (str(cred.get("name") or "") or str(cred.get("email") or "")):
+            _userinfo_done.add(account_id)
             return None
-        try:
-            info = fetch_userinfo(account_id)
-        except AuthError as exc:
-            log.debug("qoder userinfo 回填跳过（%s）: %s", account_id, exc)
-            return None
-        name, email = info.get("name") or "", info.get("email") or ""
-        if not name and not email:
-            return None
-        fresh = load_account_cred(account_id) or cred
+    try:
+        info = fetch_userinfo(account_id)
+    except AuthError as exc:
+        log.debug("qoder userinfo 回填跳过（%s）: %s", account_id, exc)
+        return None
+    name, email = info.get("name") or "", info.get("email") or ""
+    if not name and not email:
+        return None
+    fresh = load_account_cred(account_id)
+    if fresh is not None:
         fresh["name"] = name or str(fresh.get("name") or "")
         fresh["email"] = email or str(fresh.get("email") or "")
         save_account_cred(fresh)
-        log.info("qoder 账号 %s 身份已回填: name=%s", account_id[:8], name or "(空)")
-        return info
+    log.info("qoder 账号 %s 身份已回填: name=%s", account_id[:8], name or "(空)")
+    with _userinfo_lock:
+        _userinfo_done.add(account_id)
+    return info
 
 
 # ---------------------------------------------------------------------------
