@@ -35,9 +35,11 @@ def _clear_trae_cooldowns():
 
     failover._cooldowns.clear()
     trae_provider._stream_reject_until.clear()
+    trae_provider._last_reject_at.clear()
     yield
     failover._cooldowns.clear()
     trae_provider._stream_reject_until.clear()
+    trae_provider._last_reject_at.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +159,7 @@ def native_env(monkeypatch):
             return SSE_NATIVE_REJECTED
         return getattr(state, "_legacy_sse", None) or SSE_LEGACY_TOOL_CALL
 
-    # 4001 兜底链会退避 sleep(_REJECT_BACKOFF_S)：记录调用并跳过真实等待
+    # 4001 兜底链节流时会 time.sleep 等到惩罚窗外：记录调用并跳过真实等待
     sleeps: list[float] = []
     state._sleeps = sleeps
     monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
@@ -293,6 +295,14 @@ def test_native_tools_payload_string_params(client, native_env):
 # ---------------------------------------------------------------------------
 # 4001 → 自动回落文本协议
 # ---------------------------------------------------------------------------
+def _assert_paced(native_env, n: int) -> None:
+    """断言发生 n 次节流等待：每次安静睡到 15s 窗外（略小于 15.0，扣掉了耗时）。"""
+    state = native_env[0]
+    quiet = tp_impl._REJECT_QUIET_S
+    assert len(state._sleeps) == n
+    assert all(14.0 < s <= quiet for s in state._sleeps), state._sleeps
+
+
 def test_native_4001_falls_back_to_legacy(client, native_env):
     state, native_calls, legacy_calls = native_env
     state._native_sse = SSE_NATIVE_REJECTED
@@ -303,9 +313,9 @@ def test_native_4001_falls_back_to_legacy(client, native_env):
     # 文本协议路径解析出同样的调用
     assert ch["finish_reason"] == "tool_calls"
     assert ch["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
-    # 非流式先安静重试一次，两次都拒才落文本协议
+    # 非流式先节流重试一次，两次都拒才落文本协议
     assert len(native_calls) == 2 and len(legacy_calls) == 1
-    assert state._sleeps == [4.0, 4.0]
+    _assert_paced(native_env, 2)
 
 
 def test_native_4001_stream_retries_native_nonstream(client, native_env):
@@ -323,8 +333,8 @@ def test_native_4001_stream_retries_native_nonstream(client, native_env):
     # 两次 native 调用：流式被拒 → 非流式成功；文本协议未动用
     assert [c["stream"] for c in native_calls] == [True, False]
     assert legacy_calls == []
-    # 重试前有退避（上游对刚失败的账号有快速重试惩罚）
-    assert state._sleeps == [4.0]
+    # 重试前先节流（上游对刚失败的账号有快速重试惩罚）
+    _assert_paced(native_env, 1)
 
 
 def test_native_4001_stream_skip_ttl_second_request(client, native_env):
@@ -345,7 +355,8 @@ def test_native_4001_stream_skip_ttl_second_request(client, native_env):
     finish = [d.get("choices", [{}])[0].get("finish_reason")
               for ev, d in events if isinstance(d, dict) and d.get("choices")]
     assert "tool_calls" in finish
-    # 第二次：跳过流式尝试，仅一次非流式 native 调用，无退避、无文本协议
+    # 第二次：跳过流式尝试，仅一次非流式 native 调用；r1 的非流式成功已清掉
+    # 节流时间戳（门是开的），所以不再陪等安静窗，无文本协议
     assert [c["stream"] for c in native_calls] == [False]
     assert legacy_calls == []
     assert state._sleeps == []
@@ -366,8 +377,8 @@ def test_native_4001_stream_full_fallback_to_legacy(client, native_env):
     assert "tool_calls" in finish
     assert [c["stream"] for c in native_calls] == [True, False, False]
     assert len(legacy_calls) == 1 and legacy_calls[0]["stream"] is False
-    # 三级兜底各退避一次：流式→非流式→安静重试→文本
-    assert state._sleeps == [4.0, 4.0, 4.0]
+    # 三级兜底各节流一次：流式→非流式→安静重试→文本
+    _assert_paced(native_env, 3)
 
 
 def test_native_4001_nonstream_quiet_retry_recovers(client, native_env):
@@ -381,10 +392,10 @@ def test_native_4001_nonstream_quiet_retry_recovers(client, native_env):
     finish = [d.get("choices", [{}])[0].get("finish_reason")
               for ev, d in events if isinstance(d, dict) and d.get("choices")]
     assert "tool_calls" in finish
-    # 流式被拒 → 非流式(窗内被拒) → 安静重试成功；文本协议未动用
+    # 流式被拒 → 非流式(窗内被拒) → 节流后原路重试成功；文本协议未动用
     assert [c["stream"] for c in native_calls] == [True, False, False]
     assert legacy_calls == []
-    assert state._sleeps == [4.0, 4.0]
+    _assert_paced(native_env, 2)
 
 
 # ---------------------------------------------------------------------------
