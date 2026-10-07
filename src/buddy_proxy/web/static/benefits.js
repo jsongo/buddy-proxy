@@ -193,7 +193,12 @@ function renderBenefits() {
     // 那种情况明细行也全是「查询失败」，徽标的 error title 是唯一线索。
     const badge = (c.accounts && c.accounts.length && !c.error) ? '' : st;
     const chips = [];
-    if (c.daily_credit > 0) chips.push(`每日 +${fmtCredit(c.daily_credit)}`);
+    // daily_credit 是多账号总和（后端聚合），带（N账号）说明口径，免得和
+    // 单账号通道并排时看着数字莫名翻倍
+    if (c.daily_credit > 0) {
+      const n = (c.accounts || []).length;
+      chips.push(`每日 +${fmtCredit(c.daily_credit)}${n > 1 ? `（${n}账号）` : ''}`);
+    }
     if (c.streak_days >= 2) chips.push(`连续 ${c.streak_days} 天`);
     // activity_name（上游 campaign key，如 act-20260930-551）不再展示：对用户
     // 纯粹是噪音，用户反馈「看得更迷糊」；字段后端仍下发，排查日志时有用。

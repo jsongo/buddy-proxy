@@ -53,9 +53,43 @@ def test_status_multi_account_reports_each(monkeypatch):
     assert a1["id"] == "u1" and a2["id"] == "u2"
     # 聚合态不受影响：任一可领 → 整体可领
     assert st["claimable"] is True and st["checked_in"] is False
-    # 「每日 +X」chip：上游 credits 要穿透聚合（顶层 + 逐行），不能只在单账号分支有
-    assert st["daily_credit"] == 100
+    # 「每日 +X」chip：多账号显示**总和**（前端带「（N账号）」），逐行是各账号的
+    assert st["daily_credit"] == 200
     assert a1["daily_credit"] == 100 and a2["daily_credit"] == 100
+
+
+def test_status_daily_credit_sums_base_and_extra(monkeypatch):
+    """每日可得 = credits + extra_credits（实测各 100 → 每账号 200）。
+
+    单看哪个字段都只有一半——用户对双账号卡的预期是日入 400，对上了。
+    """
+    _seed("u1", "u2")
+    monkeypatch.setattr(failover, "_cooldowns", {})
+
+    def _fetch(token="", account_id="", region=""):
+        return {"checked_in": True, "enable": True, "message": "",
+                "credits": 100, "extra_credits": 100}
+
+    monkeypatch.setattr("buddy_proxy.trae.provider.fetch_checkin_status", _fetch)
+    st = TraeProvider().checkin_status()
+    assert st["daily_credit"] == 400
+    assert all(a["daily_credit"] == 200 for a in st["accounts"])
+
+
+def test_claim_replay_without_amounts_records_none(monkeypatch):
+    """已领过的 replay 上游不给金额：extra_credits 必须是 None，别记成 0。
+
+    日历聚合保留最大非零，记录里一个 0.0 就能把当天真实领取糊成 +0
+    （2026-10-07 用户看到的 trae +0 就是这么来的）。
+    """
+    _seed("u1", "u2")
+    monkeypatch.setattr(failover, "_cooldowns", {})
+    monkeypatch.setattr("buddy_proxy.trae.provider.claim_checkin_credits",
+                        lambda token="", account_id="", region="":
+                        {"code": 0, "message": "already signed"})
+    st = TraeProvider().checkin_claim()
+    assert st["checked_in"] is True
+    assert st["extra_credits"] is None
 
 
 def test_status_name_prefers_alias(monkeypatch):

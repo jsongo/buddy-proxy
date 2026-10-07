@@ -293,7 +293,7 @@ class TraeProvider(BaseProvider):
         failed_accts: list[str] = []
         acct_details: list[dict[str, Any]] = []
         enabled_any = False
-        first_daily = None  # 「每日 +X」chip 用；同档期各账号金额一致，取首个非零
+        total_daily = 0.0  # 「每日 +X」chip 用：多账号显示总和（前端带「（N账号）」）
         # 展示序号一律取 failover.display_index()（与 /ui 账号快照同源）。
         # 不能用 enumerate 的位置：accounts 是「本区 + 未冷却」子集，位次与
         # 快照对不上，前端会把签到行对到别的账号上（✎ 改名改错人）。
@@ -311,8 +311,8 @@ class TraeProvider(BaseProvider):
                 continue
             if not st.get("inactive"):
                 enabled_any = True
-            if not first_daily and st.get("daily_credit"):
-                first_daily = st["daily_credit"]
+            if isinstance(st.get("daily_credit"), (int, float)):
+                total_daily += st["daily_credit"]
             if st.get("claimable"):
                 claimable_accts.append(f"#{i}")
             elif st.get("checked_in"):
@@ -340,8 +340,8 @@ class TraeProvider(BaseProvider):
         if failed_accts:
             status["message"] = (status["message"] + " " if status["message"] else "") + \
                 f"（{len(failed_accts)}/{len(accounts)} 个账号查询失败）"
-        if first_daily:
-            status["daily_credit"] = first_daily
+        if total_daily:
+            status["daily_credit"] = total_daily
         if enabled_any:
             status["next_ts"] = next_daily_reset()
             status["next_ts_source"] = SOURCE_INFERRED
@@ -372,11 +372,10 @@ class TraeProvider(BaseProvider):
             "claimable": enabled and not checked_in,
             "inactive": not enabled,
             "message": data.get("message", ""),
-            # 上游给的是「每日可得」的 credits 数（签到卡「每日 +X」chip 用）。
-            # 语义实测（2026-10-07）：checked_in=true 时 credits 与 extra_credits
-            # 同为 100 = 已知每日签到额——若哪天 chip 数字变大，先怀疑上游把
-            # 这个字段改成了累计余额。
-            "daily_credit": data.get("credits"),
+            # 每日可得 = credits + extra_credits（语义实测 2026-10-07：双账号
+            # 卡用户期望日入 400 → 每账号 200 = 两字段各 100 的和；单看哪个
+            # 都只有一半）。若哪天 chip 数字对不上账，先怀疑上游改了字段口径。
+            "daily_credit": (data.get("credits") or 0) + (data.get("extra_credits") or 0),
         }
         # trae 的 ``/ug/checkin_credits/status`` 返回里**没有任何时间字段**
         # （实测只有 checked_in / enable / credits / message），连档期都不给。
@@ -434,6 +433,7 @@ class TraeProvider(BaseProvider):
 
         total_credits: float = 0.0
         any_claimed = False
+        any_granted = False  # replay（已领过）拿不到金额：别把「未知」记成 0
         messages: list[str] = []
         acct_details: list[dict[str, Any]] = []
         # 展示序号取 failover.display_index()（与 /ui 账号快照同源，理由同
@@ -495,6 +495,7 @@ class TraeProvider(BaseProvider):
                 any_claimed = True
                 if granted is not None:
                     total_credits += granted
+                    any_granted = True
                 messages.append(f"{tag} 已领 {granted or ''}".strip())
                 acct_details.append({
                     "index": i, "id": acct.id, "name": name, "ok": True,
@@ -517,7 +518,7 @@ class TraeProvider(BaseProvider):
                                      "ok": False, "message": msg})
         return {
             "checked_in": any_claimed,
-            "extra_credits": total_credits if any_claimed else None,
+            "extra_credits": total_credits if any_granted else None,
             "message": "；".join(messages) or "没有可领取的账号",
             "accounts": acct_details,
         }

@@ -57,7 +57,8 @@ def test_status_multi_account_forwards_daily_credit(two_accounts):
     a, b, _ = two_accounts
     st = CodeBuddyProvider().checkin_status()
 
-    assert st["daily_credit"] == 100
+    # 「每日 +X」是多账号**总和**（前端带「（N账号）」），逐行是各账号的
+    assert st["daily_credit"] == 200
     assert len(st["accounts"]) == 2
     for row in st["accounts"]:
         assert row["daily_credit"] == 100

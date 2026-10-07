@@ -27,3 +27,9 @@ def test_activity_name_chip_is_gone():
     text = BENEFITS_JS.read_text(encoding="utf-8")
     assert "chips.push(c.activity_name)" not in text, \
         "上游 campaign key 不再上卡（用户反馈看不懂）"
+
+
+def test_daily_credit_chip_carries_account_count():
+    """多账号的「每日 +X」是总和，带（N账号）说明口径（用户 2026-10-07 要求）。"""
+    text = BENEFITS_JS.read_text(encoding="utf-8")
+    assert "（${n}账号）" in text, "总和 chip 要带账号数后缀"

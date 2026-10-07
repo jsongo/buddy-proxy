@@ -1642,6 +1642,35 @@ def test_checkin_history_and_manager(tmp_path):
     assert entry["quota"]["items"][0]["remaining"] == 70
 
 
+def test_checkin_calendar_keeps_max_nonzero_credits(tmp_path):
+    """同日多笔记录（自动轮询的 replay 拿不到金额）不能把真实领取糊成 +0。
+
+    2026-10-07 用户 hover 日历看到 trae +0：后到的 replay 记录 credits=0.0
+    把早前真实金额覆盖了。聚合保留最大非零值。
+    """
+    state, manager = _benefits_state(tmp_path, {"fakecheckin": FakeCheckinProvider()})
+    asyncio.run(manager.claim_now("fakecheckin"))                   # 实领 50
+    manager.history.append("fakecheckin", ok=True, credits=0.0)     # replay 0
+    manager.history.append("fakecheckin", ok=True, credits=None)    # replay 未知
+    cal = CheckinHistory(tmp_path / "checkin.jsonl").calendar(7)
+    assert cal[-1]["credits"] == {"fakecheckin": 50}
+
+
+def test_checkin_record_falls_back_to_daily_credit(tmp_path):
+    """上游不报实领金额（dumate 只有每日额均值口径）时退回 daily_credit。"""
+
+    class AvgOnlyProvider(FakeCheckinProvider):
+        id = "fakeavgcheckin"
+
+        def checkin_claim(self):
+            return {"checked_in": True, "message": "ok", "daily_credit": 120}
+
+    state, manager = _benefits_state(tmp_path, {"fakeavgcheckin": AvgOnlyProvider()})
+    asyncio.run(manager.claim_now("fakeavgcheckin"))
+    cal = CheckinHistory(tmp_path / "checkin.jsonl").calendar(7)
+    assert cal[-1]["credits"] == {"fakeavgcheckin": 120}
+
+
 def test_checkin_claim_upstream_error_recorded(tmp_path):
     class ErrCheckinProvider(FakeCheckinProvider):
         id = "fakeerrcheckin"
