@@ -40,7 +40,7 @@ def _cb_status(monkeypatch, data: dict) -> dict:
     envelope = {"code": 0, "msg": "OK", "data": data}
     acct = cbp.creds.AccountRef(id="uid-1", uid="uid-1", nickname="tester",
                                 priority=0, added_at=1000)
-    monkeypatch.setattr(cbp.failover, "list_accounts", lambda: [acct])
+    monkeypatch.setattr(cbp.creds, "list_accounts", lambda: [acct])
     monkeypatch.setattr(cbp.creds, "api_post_as",
                         lambda aid, path, body=None, **kw: dict(envelope))
     return cbp.CodeBuddyProvider().checkin_status()
@@ -304,7 +304,7 @@ def test_codebuddy_claim_throttles_between_accounts(monkeypatch):
     accts = [cbp.creds.AccountRef(id=f"uid-{n}", uid=f"uid-{n}", nickname=n,
                                   priority=i, added_at=1000 + i)
              for i, n in enumerate(("u1", "u2"))]
-    monkeypatch.setattr(cbp.failover, "list_accounts", lambda: accts)
+    monkeypatch.setattr(cbp.creds, "list_accounts", lambda: accts)
     calls: list[str] = []
     monkeypatch.setattr(cbp.creds, "api_post_as",
                         lambda aid, path, body=None, **kw:
