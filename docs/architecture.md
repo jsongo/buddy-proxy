@@ -340,6 +340,14 @@ silent:
   carries the moment it stops being true. Bounded by `FLIP_GRACE_S` (1 h) so an
   upstream that keeps returning a long-past timestamp cannot render the cache
   permanently useless and hammer the upstream on every poll.
+- **Force refresh is per-scope, not a blanket invalidation.** The check-in
+  card's 强刷 button (`benefits_checkin.js refreshCheckin`) posts
+  `/ui/api/benefits/refresh` with `checkin: true`, which drops the provider's
+  `checkin:{pid}` snapshot (`BenefitsManager.invalidate_checkin`) before
+  re-querying — for multi-account channels that means re-hitting the upstream
+  once per account. The quota card's ↻ button posts the same endpoint *without*
+  the flag and therefore must not drop the check-in cache; the two scopes are
+  separate methods so a quota refresh can never carry that per-account cost.
 - **Expiry and reset are different things and live in different fields.** A
   quota item carries `expire_ts` (the allowance is voided — plans, packs,
   check-in credits) and `reset_ts` (it refills on a cycle — ZCode's 5-hour

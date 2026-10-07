@@ -226,6 +226,7 @@ function renderBenefits() {
         </div>
         <div class="br-meta">${badge}${meta}${nextTimeHtml(c)}</div>
         <div class="br-act">
+          <button onclick="refreshCheckin('${esc(p.id)}', this)" title="绕过缓存，真打上游重查该通道签到状态">强刷</button>
           <button class="primary" ${(c.done_today || c.inactive || c.unavailable) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)">立即打卡</button>
         </div>
       </div>

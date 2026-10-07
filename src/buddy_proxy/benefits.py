@@ -538,6 +538,14 @@ class BenefitsManager:
             del self._cache[k]
         return len(stale)
 
+    def invalidate_checkin(self, provider_id: str) -> None:
+        """作废某通道的签到状态缓存（管理页「强刷」按钮的后端）。
+
+        与 :meth:`invalidate_quota` 分开：额度刷新不该连带打上游查签到
+        （多账号通道是逐号真查），只有签到卡上的强刷明确要这个副作用。
+        """
+        self._cache.pop(f"checkin:{provider_id}", None)
+
     # ------------------------------------------------------------------
     # 手动 / 自动打卡
     # ------------------------------------------------------------------
