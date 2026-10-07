@@ -224,8 +224,9 @@ buddy start
   错误会以友好中文文案透传
 - **海外版（`traeintl`，2026-10 起）**：`buddy login trae --region global` 登录海外账号后
   自动启用独立通道（`traeintl/<model>` 寻址、额度卡单独一张、无签到——海外上游没有签到端点）。
-  模型池与 CN 是**两套**（2026-10-06 probe 实测收录 10 个）：`gpt-6-sol`、`gpt-6-luna`、
-  `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`kimi-k3`、`gpt-5.4`、`gpt-5.2`、
+  模型池与 CN 是**两套**（2026-10-06 probe 实测收录；`gpt-5.2` 2026-10-07
+  用户点名移除，现为 9 个）：`gpt-6-sol`、`gpt-6-luna`、`gpt-5.6-sol`、
+  `gpt-5.6-terra`、`gpt-5.6-luna`、`kimi-k3`、`gpt-5.4`、
   `glm-5.2`、`minimax-m3`。协议与 CN 两处不同：`messages[].content` 必须是内容块数组
   （纯字符串上游 400 反序列化错）；function 绑定按区分表——gpt-5.6 系 / `glm-5.2` /
   `minimax-m3` 在默认 `solo_work_lite` 下 4001，自动改走 `chat_v3`。IDE 下拉里有但实测

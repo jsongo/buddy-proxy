@@ -420,11 +420,12 @@ def work_function_override(region_key: str) -> dict[str, str]:
 # 上游对该端点的 model 名**精确匹配**（大小写/变体全 4001），与 CN 一致。
 #
 # 实测通但**用户决定不收录**（2026-10-06：模型太老）：`kimi-k2.7-code` /
-# `kimi-k2.5` / `minimax-m2.7`（三者 chat_v3 均实测出流）。别当漏收补回来。
+# `kimi-k2.5` / `minimax-m2.7`（三者 chat_v3 均实测出流）；`gpt-5.2`（2026-10-07
+# 用户点名移除：GPT-6/5.6 系在场没啥用）。别当漏收补回来。
 MODEL_MAP_INTL: dict[str, str] = {}
 MODEL_IDS_INTL: list[str] = [
     "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
-    "gpt-5.6-luna", "kimi-k3", "gpt-5.4", "gpt-5.2", "glm-5.2",
+    "gpt-5.6-luna", "kimi-k3", "gpt-5.4", "glm-5.2",
     "minimax-m3",
 ]
 # 海外是**次数制**（Premium 快速请求 N 次/月 + Basic 美元额度），没有 CN 的
