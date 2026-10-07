@@ -11,8 +11,11 @@
 
 codebuddy 的上游错误：401（token 失效）与 429（单账号额度耗尽，如 code 14018）。
 
-**没有 region**：codebuddy 只有腾讯云一套端点（copilot.tencent.com），全部账号
-同域，failover 在全量账号间轮转即可——qoder/trae 的分区过滤在这里没有意义。
+region 维度（2026-10 海外版上线）：CN（copilot.tencent.com）与海外版
+（www.codebuddy.ai）账号同存一个 index.json，但**绝不互捞**——海外通道只轮转
+region=global 的账号（协议同构、账号体系独立，拿 CN 账号打海外端点必 401）。
+``available_accounts`` / ``display_index`` / ``accounts_status`` 都带 region
+参数，缺省 None = 全量（历史调用方行为不变）。
 """
 
 from __future__ import annotations
@@ -56,12 +59,15 @@ def cooldown_left(account_id: str) -> tuple[float, str]:
     return _tracker.left(account_id)
 
 
-def available_accounts() -> list[AccountRef]:
-    """当前可用的账号（按 failover 顺位）：全部账号剔除冷却中的。
+def available_accounts(region: str | None = None) -> list[AccountRef]:
+    """当前可用的账号（按 failover 顺位）：剔除冷却中的。
 
-    无 region 参数——codebuddy 全部账号同域（见模块 docstring）。
+    ``region`` 给定时只返回该区账号（cn/global，海外版通道与 CN 互不混用）；
+    ``None`` = 全量（历史行为）。
     """
-    return [a for a in list_accounts() if cooldown_left(a.id)[0] <= 0]
+    return [a for a in list_accounts()
+            if cooldown_left(a.id)[0] <= 0
+            and (region is None or a.region == region)]
 
 
 def cooldown_report() -> str:
@@ -69,8 +75,12 @@ def cooldown_report() -> str:
     return _tracker.report([a.id for a in list_accounts()])
 
 
-def display_index() -> dict[str, int]:
-    """账号 id → 管理页展示序号（1-based，**全量**列表位次）。
+def display_index(region: str | None = None) -> dict[str, int]:
+    """账号 id → 管理页展示序号（1-based）。
+
+    ``region=None`` 是全量列表位次（历史行为）；``region`` 给定时是该区**区内**
+    位次——CN 与海外版的额度标签（``CodeBuddy #N``）各自编号，与各自面板的
+    账号快照（也按区过滤）对得上。
 
     这是「序号」的唯一权威：``accounts_status()`` 的 ``index`` 与 provider 的
     额度/签到标签（``CodeBuddy #N · ``）都必须由它产生。前端按序号把额度块对上
@@ -82,12 +92,21 @@ def display_index() -> dict[str, int]:
     空洞（0,2,3），``priority+1`` 与快照位次对不上；位次是排序后的实际位置，
     与 ``accounts_status`` 的 ``enumerate`` 天然同源。
     """
-    return {a.id: i + 1 for i, a in enumerate(list_accounts())}
+    accts = list_accounts()
+    if region is not None:
+        accts = [a for a in accts if a.region == region]
+    return {a.id: i + 1 for i, a in enumerate(accts)}
 
 
-def accounts_status() -> dict[str, Any]:
-    """UI 账号状态面板数据（纯本地，不触网、不含秘密）。"""
+def accounts_status(region: str | None = None) -> dict[str, Any]:
+    """UI 账号状态面板数据（纯本地，不触网、不含秘密）。
+
+    ``region`` 给定时只下发该区账号，``index`` 也按区内位次计（与
+    ``display_index(region)`` 同源）——CN 面板与海外版面板各看各的。
+    """
     accounts = list_accounts()
+    if region is not None:
+        accounts = [a for a in accounts if a.region == region]
     items: list[dict[str, Any]] = []
     for i, a in enumerate(accounts):
         cred = load_account_cred(a.id) or {}
@@ -100,6 +119,7 @@ def accounts_status() -> dict[str, Any]:
             "uid": a.uid,
             "nickname": a.alias or a.nickname or a.uid or a.id,
             "alias": a.alias,
+            "region": a.region,
             # 序号口径见 display_index()：额度标签必须用同一套，否则面板会把
             # 额度块对到别的账号上（✕ 删错人）。
             "index": i + 1,

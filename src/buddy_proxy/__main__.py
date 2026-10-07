@@ -471,6 +471,25 @@ def main():
     else:
         print("[Trae] Disabled (pass --trae or TRAE_ENABLED=1 to enable)")
 
+    # codebuddy 海外通道（有 global 区账号时启用）：与 CN 共用同一账号 store
+    #（账号落 region 标），只是换 host 登录/转发——www.codebuddy.ai 与
+    # copilot.tencent.com 的 /v2/plugin 协议逐字节同构。条件注册见
+    # codebuddy_provider.intl_provider.intl_enabled()。codebuddy 主通道
+    # 常开（默认 provider），故这里无条件尝试检测，不挂在某个 flag 下。
+    from buddy_proxy.codebuddy_provider.intl_provider import (
+        CodeBuddyIntlProvider,
+        intl_enabled as _cb_intl_enabled,
+    )
+    if _cb_intl_enabled():
+        cb_intl = CodeBuddyIntlProvider()
+        try:
+            cb_intl.ensure_auth()  # 同 qoderintl/traeintl：认证未就绪只告警不拦注册
+        except HTTPException as exc:
+            logger.warning("codebuddyintl provider 认证未就绪: %s", exc.detail)
+        providers[cb_intl.id] = cb_intl
+        logger.info("CodeBuddy 海外版 provider enabled")
+        print("[CodeBuddy Intl] Enabled (codebuddyintl/*)")
+
     # 管理页设置文件里的兜底通道优先于 CLI/环境变量（UI 改动跨重启生效）
     saved_settings = settings_mod.load_settings()
     if saved_settings.get("default_provider"):

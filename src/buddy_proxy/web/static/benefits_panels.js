@@ -1080,3 +1080,87 @@ async function loadCodebuddyAccounts() {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
   }
 }
+
+// ---- CODEBUDDY INTL 面板（额度 + ✎ 改名 + ↻ 刷新；▲▼/✕ 仍在 CodeBuddy 主卡
+//      ——主卡只管 CN 账号，海外卡照 qoderintl 先例只做展示与改名；
+//      rename 走 codebuddy 的共享端点，见 acctRenameSubmit 的 pid 映射）----
+let CODEBUDDY_INTL_ACCTS = null;  // 最近一次 accounts 快照（global 区）；render 先用，防 30s 闪回
+
+function renderCodebuddyIntlPanel() {
+  const panel = document.getElementById('codebuddyintl-panel');
+  if (!panel) return;
+  const provider = (BENEFITS.providers || []).find(p => p.id === 'codebuddyintl' && !p.disabled);
+  if (!provider) { panel.innerHTML = ''; return; }
+
+  // 按「CodeBuddy 海外版 #N」分组（label 形如「CodeBuddy 海外版 #1 · 订阅套餐」），
+  // CN 卡同款切法；组名兜底（单账号无前缀）用「CodeBuddy 海外版」。
+  const groups = new Map();
+  const notices = [];
+  for (const it of (provider.quota && provider.quota.supported ? provider.quota.items : []) || []) {
+    if (it.query_failed || (it.percent == null && it.used == null)) { notices.push(it); continue; }
+    const idx = it.label.indexOf(' · ');
+    const grp = idx >= 0 ? it.label.slice(0, idx) : 'CodeBuddy 海外版';
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => {
+    const m = grp.match(/^CodeBuddy 海外版 #(\d+)$/);
+    const inRegion = (CODEBUDDY_INTL_ACCTS || []);
+    const acct = m ? inRegion.find(a => a && a.index === Number(m[1])) || null
+      : (inRegion.length === 1 ? inRegion[0] : null);
+    const title = acct ? (acct.alias || acct.nickname || acct.id) : grp;
+    const headSum = quotaHeadSum({items: its, sum_items: true});
+    return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-codebuddyintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>` +
+      `${acctSubHtml(acct, null, 'data-codebuddyintl-sub')}` +
+      `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
+      `${quotaItemsHtml(its, 'codebuddyintl:' + grp)}` +
+      `${acct ? `<span class="ag-move">${acctRenameButton('codebuddyintl', acct)}</span>` : ''}</div>`;
+  }).join('');
+  const noticeHtml = notices.map(quotaItemHtml).join('');
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head"><span class="name">CodeBuddy 海外版</span>
+        <span class="tag">Global · 额度与签到</span><span class="grow"></span>
+        <button class="ghost" title="刷新本通道额度（绕过缓存重查）" onclick="refreshProviderQuota('codebuddyintl', this)">↻</button>
+      </div>
+      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
+      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（<span class="mono">buddy login codebuddy --region global</span> 后重启 Buddy）</div>'}
+    </div>`;
+  loadCodebuddyIntlAccounts();
+}
+
+async function loadCodebuddyIntlAccounts() {
+  try {
+    const r = await api('/ui/api/codebuddyintl/accounts');
+    if (!r.enabled) { CODEBUDDY_INTL_ACCTS = []; return; }
+    const accts = r.accounts || [];
+    // 数据没变就不动 DOM——renderCodebuddyIntlPanel 已用同一份快照渲染过
+    if (JSON.stringify(accts) === JSON.stringify(CODEBUDDY_INTL_ACCTS)) return;
+    const snapshotMissing = !CODEBUDDY_INTL_ACCTS || !CODEBUDDY_INTL_ACCTS.length;
+    CODEBUDDY_INTL_ACCTS = accts;
+    if (!accts.length) return;
+    if (snapshotMissing) {
+      renderCodebuddyIntlPanel();
+      syncQuotaFold();
+      return;
+    }
+    // 就地回填：组名换成账号名、组名后插副标题（CN 卡同款）
+    for (const a of accts) {
+      const el = (accts.length === 1)
+        ? document.querySelector('#codebuddyintl-panel .pat-pkg-name')
+        : document.querySelector(`#codebuddyintl-panel [data-codebuddyintl-idx="${a.index}"]`);
+      if (!el) continue;
+      el.textContent = a.alias || a.nickname || a.id;
+      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-codebuddyintl-sub')) {
+        el.nextElementSibling.remove();
+      }
+      const sub = acctSubHtml(a, null, 'data-codebuddyintl-sub');
+      if (sub) el.insertAdjacentHTML('afterend', sub);
+    }
+    syncQuotaFold();
+  } catch (e) {
+    // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
+  }
+}

@@ -83,7 +83,7 @@ function acctSubHtml(a, subExtra, dataAttr) {
 function acctRenameButton(pid, acct) {
   // 共用账号池的通道在按钮层就映射到实际 rename 端点（qoderintl 与 qoder
   // 同池同端点）——按钮 → 弹窗 → 提交整条链路只认端点 pid，不必每处特判。
-  const ep = pid === 'qoderintl' ? 'qoder' : pid;
+  const ep = pid === 'qoderintl' ? 'qoder' : (pid === 'codebuddyintl' ? 'codebuddy' : pid);
   return acct
     ? `<button class="ghost" title="重命名该账号（只改显示名，凭据不动）" ` +
       `onclick="acctRenamePrompt('${ep}','${acct.id}')">✎</button>` : '';
@@ -100,6 +100,7 @@ function acctRenamePrompt(pid, id, current) {
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : []) || [],
       (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : []) || [],
       (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : []) || [],
+      (typeof CODEBUDDY_INTL_ACCTS !== 'undefined' ? CODEBUDDY_INTL_ACCTS : []) || [],
       (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : []) || [],
       // 签到明细行（各通道 checkin.accounts[].name，后端按 alias 链下发）兜底——
       // 快照数组未到位（首屏）时从这里也能拿到显示名
@@ -143,6 +144,7 @@ async function acctRenameSubmit(pid, id) {
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : null),
       (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : null),
       (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : null),
+      (typeof CODEBUDDY_INTL_ACCTS !== 'undefined' ? CODEBUDDY_INTL_ACCTS : null),
       (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : null),
     ];
     for (const arr of snaps) {
@@ -168,6 +170,7 @@ async function acctRenameSubmit(pid, id) {
     if (typeof renderQoderIntlPanel === 'function') renderQoderIntlPanel();
     if (typeof renderTraePanel === 'function') renderTraePanel();
     if (typeof renderCodebuddyPanel === 'function') renderCodebuddyPanel();
+    if (typeof renderCodebuddyIntlPanel === 'function') renderCodebuddyIntlPanel();
     if (typeof renderBenefits === 'function') renderBenefits();
     closeModal();
     toast(alias ? `已重命名为「${alias}」` : '已恢复默认名');

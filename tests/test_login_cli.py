@@ -180,7 +180,7 @@ def test_alias_table_is_pinned():
         # 通道 id（海外版 provider）接进登录入口：海外版没有独立账号体系，
         # 别名落到主 provider 并隐含 --region global（_resolve_provider_region）。
         # 用户实测「buddy login traeintl」报未知参数才补的——不是顺手加的拼写变体。
-        "traeintl", "qoderintl",
+        "traeintl", "qoderintl", "codebuddyintl",
     }
     for alias, target in auth_login.PROVIDER_ALIASES.items():
         assert target in auth_login.KNOWN_PROVIDERS, f"{alias} 指向了未知通道"

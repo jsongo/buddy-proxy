@@ -112,6 +112,7 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 - **每日签到** —— 逐账号活动签到（连签积分），管理页聚合展示、逐账号明细；领取时把每个可领的账号都领一遍。
 - **积分** —— 逐账号资源包汇总（管理页按 `CodeBuddy #N · …` 分组），另有按请求粒度的消耗流水（`/ui/api/codebuddy/usage-records`）。
 - 账号管理：`GET /ui/api/codebuddy/accounts` 及 `order` / `rename` / `delete` 端点；管理面板支持逐账号 ▲▼ 顺位、✎ 改名、✕ 删除。
+- **海外版（`codebuddyintl`）** —— 同上游家族、换 host：`https://www.codebuddy.ai`（桌面端自带 product-ide.json / product-ide-cn.json 两份产品配置，唯一差异就是这个 host；2026-10 实测两边 `/v2/plugin` 协议逐字节同构）。登录：`buddy login codebuddy --region global`（别名 `codebuddyintl`）；海外账号在同一账号 store 里落 `region` 标，与 CN 账号互不混用。有海外账号后重启 Buddy 自动注册通道——模型用 `codebuddyintl/<模型>` 前缀显式路由，管理页单独一张「CodeBuddy 海外版」额度卡（额度 + ✎ 改名；▲▼/✕ 仍在 CN 卡）。海外登录态写在 `~/.codebuddy-session-global.json`（绝不写 CN 的历史 session 路径，避免 legacy 迁移把海外号并进 CN 区）。签到/额度端点在海外站按原样调用，若海外版未提供对应活动，逐账号行显示查询失败、不影响整页。
 
 ### 豆包 Provider（可选）
 
