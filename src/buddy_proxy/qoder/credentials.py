@@ -848,6 +848,74 @@ def ensure_account_credential(account_id: str, *, force_refresh: bool = False) -
 
 
 # ---------------------------------------------------------------------------
+# userinfo：账号身份（name/email）回填
+# ---------------------------------------------------------------------------
+
+#: userinfo 回填互斥锁（per 进程）：同一账号并发懒回填只打一次上游。
+_userinfo_lock = threading.Lock()
+
+
+def fetch_userinfo(account_id: str) -> dict[str, Any]:
+    """查该账号的 userinfo（``/api/v1/userinfo``），返回脱敏后的身份字段。
+
+    deviceToken 各端点的回包里**没有** name/email（实测 2026-10-08），登录链
+    路因此一直拿不到账号身份——config 里早定义的 userinfo 端点从没人调用。
+    返回 ``{"name": ..., "email": ..., "username": ...}``；HTTP/解析失败抛
+    AuthError，调用方决定吞还是记。
+    """
+    reg = with_cached_endpoints(resolve_region())
+    token, _ = ensure_account_token(account_id)
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        resp = httpx.get(reg.userinfo_url(), headers=headers, timeout=20)
+    except httpx.HTTPError as exc:
+        raise AuthError(f"userinfo 查询失败: {exc}") from exc
+    if resp.status_code != 200:
+        raise AuthError(f"userinfo 查询失败 HTTP {resp.status_code}: {resp.text[:160]}")
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise AuthError("userinfo 响应不是 JSON") from exc
+    if not isinstance(body, dict):
+        raise AuthError("userinfo 响应结构异常")
+    return {
+        "name": str(body.get("name") or ""),
+        "email": str(body.get("email") or ""),
+        "username": str(body.get("username") or ""),
+    }
+
+
+def backfill_identity(account_id: str, *, only_if_missing: bool = True) -> dict[str, Any] | None:
+    """拉 userinfo 并回填该账号的 ``name``/``email``（索引 + cred 文件）。
+
+    ``only_if_missing``：已有 name 或 email 的账号不动（避免每次查询都打
+    上游；改名走 alias，原始字段回填一次就够）。返回回填的身份 dict，
+    已有身份/查询失败返回 None（失败只 log——身份回填不值得让签到/额度
+    查询跟着失败）。进程内每账号只成功打一次（锁内双检）。
+    """
+    with _userinfo_lock:
+        cred = load_account_cred(account_id)
+        if cred is None:
+            return None
+        if only_if_missing and (str(cred.get("name") or "") or str(cred.get("email") or "")):
+            return None
+        try:
+            info = fetch_userinfo(account_id)
+        except AuthError as exc:
+            log.debug("qoder userinfo 回填跳过（%s）: %s", account_id, exc)
+            return None
+        name, email = info.get("name") or "", info.get("email") or ""
+        if not name and not email:
+            return None
+        fresh = load_account_cred(account_id) or cred
+        fresh["name"] = name or str(fresh.get("name") or "")
+        fresh["email"] = email or str(fresh.get("email") or "")
+        save_account_cred(fresh)
+        log.info("qoder 账号 %s 身份已回填: name=%s", account_id[:8], name or "(空)")
+        return info
+
+
+# ---------------------------------------------------------------------------
 # 登录（device flow / PKCE）
 # ---------------------------------------------------------------------------
 
