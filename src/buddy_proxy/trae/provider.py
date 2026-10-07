@@ -90,8 +90,7 @@ def _note_native_ok(model: str) -> None:
 #: 探测本身会毒化安静窗（见上），TTL 别设太短——一次探测税 = 探测失败 + 兜底链
 #: 的 3-4 次节流重试，窗内该模型请求全部变慢甚至报错，实测累积失败后毒窗可到
 #: 分钟级。默认 30 分钟：流式门控若真要恢复，最多晚 30 分钟发现，换来的稳态是
-#: 探测税不再周期性打断正常流量。
-# 下界 60s：TTL 太短会频繁放流式探测，每次探测税 ~1-2 分钟全模型变慢
+#: 探测税不再周期性打断正常流量。下界 60s：设得更小等于频繁放探测、反复交税。
 _STREAM_REJECT_SKIP_S = max(60.0, float(os.environ.get("WB_TRAE_STREAM_REJECT_TTL_S", "1800")))
 _stream_reject_until: dict[str, float] = {}
 
