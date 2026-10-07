@@ -39,6 +39,9 @@ where = ["src"]
 dev = [
     "pytest>=7.4.0",
     "ruff>=0.12.0",
+    # uv.lock 不进 git，CI 每次 uv sync 现场解析；tomli 2.5.0 只发 cp311+ wheel，
+    # py3.10 job 会装不上（pytest 在 py<3.11 才拉 tomli），按 marker 压住上界
+    "tomli>=2,<2.5 ; python_full_version < '3.11'",
 ]
 
 [tool.ruff]
