@@ -284,8 +284,17 @@ benefits, and unrelated model routes in the same process.
 Check-in ("打卡") is per-provider: a provider opts in with
 `supports_checkin = True` and implements `checkin_status` / `checkin_claim` /
 `quota`. `benefits.BenefitsManager` aggregates them for the admin UI and runs
-the auto-claim loop. Two invariants matter because getting them wrong is
+the auto-claim loop. Three invariants matter because getting them wrong is
 silent:
+
+- **Check-in enumeration ignores quota cooldown.** `checkin_status` /
+  `checkin_claim` walk the full (region-filtered) account list, *not*
+  `available_accounts()`: cooldown guards model forwarding, and filtering by
+  it silently hid a cooling account from the check-in card — with two
+  CodeBuddy accounts and one cooling, the card showed a single-account view
+  and summed half the daily credit (user report 2026-10-07, fixed on
+  CodeBuddy/Trae/Qoder alike; the quota/forward paths keep their cooldown
+  filter).
 
 - **A provider's rotation period is not necessarily a calendar day.** Qoder's
   campaign window is `10:00 → 09:59` next day (verified 2026-09), while

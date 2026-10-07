@@ -289,7 +289,7 @@ def test_single_account_status_also_carries_account_rows(monkeypatch):
     from types import SimpleNamespace
     from buddy_proxy.qoder import provider as qoder_provider
 
-    only = SimpleNamespace(id="a9", priority=0, alias="G1", name="G1", email="g@test", region="global")
+    only = SimpleNamespace(id="a9", priority=0, alias="G1", name="G1", email="g@test", region="cn")
     monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [only])
     monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [only])
     p = QoderProvider()
@@ -380,6 +380,7 @@ def test_claim_scans_later_account_for_claimable_campaign(monkeypatch):
     first = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
     second = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
     monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [first, second])
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [first, second])
     no_checkin = {"campaigns": [{
         "campaignId": "view-1", "campaignKey": "act-view",
         "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED",
@@ -491,6 +492,7 @@ def test_claim_reports_partial_failure_instead_of_false_success(monkeypatch):
     failed = SimpleNamespace(id="a1", priority=0, alias="", name="First", email="first@test", region="cn")
     claimed = SimpleNamespace(id="a2", priority=1, alias="Second", name="Second", email="second@test", region="cn")
     monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: [failed, claimed])
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: [failed, claimed])
 
     async def client_for(self, account=None):
         if account.id == "a1":

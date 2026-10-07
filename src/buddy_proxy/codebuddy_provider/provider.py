@@ -218,8 +218,15 @@ class CodeBuddyProvider(BaseProvider):
     _quota_tag = "CodeBuddy"
 
     def _accounts_for_benefits(self) -> list[Any]:
-        """签到/额度遍历的账号列表（按 failover 顺位，剔除冷却中的）。"""
-        return failover.available_accounts(self._region)
+        """签到/额度遍历的账号列表：**本区全量**，不剔除冷却中的。
+
+        冷却挡的是模型转发（quota/限流退避），签到的 billing 面与它无关；
+        按冷却过滤会把在冷却的账号整条从签到卡里藏掉（2026-10-07 用户实报：
+        双号只显示一个、「每日」只算一半）。全量枚举后位次天然与账号快照
+        一致，display_index 的对位问题也随之消失。
+        海外版（region=global）只取本区账号，与 CN 互不混用（#131）。
+        """
+        return [a for a in creds.list_accounts() if a.region == self._region]
 
     def _checkin_status_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """把上游 checkin-activity-status envelope 收拢成统一签到状态。"""
@@ -278,7 +285,7 @@ class CodeBuddyProvider(BaseProvider):
         accounts = self._accounts_for_benefits()
         if not accounts:
             return {"checked_in": False, "claimable": False, "inactive": False,
-                    "message": f"所有账号均在冷却中（{failover.cooldown_report()}）；稍后自动恢复"}
+                    "message": "暂无已登录账号；先在账号面板登录"}
         if len(accounts) == 1:
             # 单账号直通：不带 accounts 明细（徽标本身就是它的状态，逐账号
             # 展开纯属噪音；与 trae 单账号分支对称）
@@ -298,8 +305,9 @@ class CodeBuddyProvider(BaseProvider):
         enabled_any = False
         total_daily = 0.0  # 「每日 +X」chip 用：多账号显示总和（前端带「（N账号）」）
         # 展示序号一律取 failover.display_index(self._region)（与 /ui 账号
-        # 快照同源）。不能用 enumerate 的位置：accounts 是「未冷却」子集，位次
-        # 与快照对不上，前端会把签到行对到别的账号上（✎ 改名改错人）。
+        # 快照同源；区内编号）。accounts 已是本区全量列表、与区内快照位次
+        # 一致，但序号仍从同一来源取——别处的子集过滤（历史教训）不能再把
+        # 位次对歪。
         didx = failover.display_index(self._region)
         for pos, acct in enumerate(accounts, 1):
             i = didx.get(acct.id, pos)
@@ -360,7 +368,8 @@ class CodeBuddyProvider(BaseProvider):
         """
         accounts = self._accounts_for_benefits()
         if not accounts:
-            raise RuntimeError(f"所有账号均在冷却中（{failover.cooldown_report()}）；稍后再试")
+            # 枚举不剔除冷却，空列表=真没有账号，别把用户往冷却排查上带
+            raise RuntimeError("暂无已登录账号；先在账号面板登录再打卡")
         if len(accounts) == 1:
             # 单账号直通：不带 accounts 明细（与 checkin_status 的单账号分支对称）
             acct = accounts[0]
@@ -432,7 +441,7 @@ class CodeBuddyProvider(BaseProvider):
         """
         accounts = self._accounts_for_benefits()
         if not accounts:
-            log.warning("codebuddy 额度查询失败: 所有账号均在冷却中")
+            log.warning("codebuddy 额度查询失败: 无本区账号")
             return None
         multi = len(accounts) > 1
         # 展示序号取 failover.display_index(self._region)（与 /ui 账号快照

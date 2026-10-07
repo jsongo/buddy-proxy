@@ -277,12 +277,25 @@ class TraeProvider(BaseProvider):
         # PAT 子类的 region 恒为 cn（见 pat/chat.py 注释），过滤对它无影响。
         return failover.available_accounts(self._region.key)
 
+    def _checkin_accounts(self) -> list[Any]:
+        """签到遍历的账号列表：与 :meth:`_work_accounts` 唯一差别是**不剔除冷却**。
+
+        冷却挡的是模型转发（quota/限流退避），签到的 billing 面与它无关；
+        按冷却过滤会把在冷却的账号整条从签到卡里藏掉（2026-10-07 用户实报
+        codebuddy 同病：双号只显示一个、「每日」只算一半）。同区过滤保留
+        （CN/海外账号不通用）；PAT 子类照旧走各自的 checkin 覆写，不经这里。
+        """
+        if self._is_pat_variant():
+            return []
+        region = self._region.key
+        return [a for a in list_accounts() if getattr(a, "region", None) == region]
+
     def checkin_status(self) -> dict[str, Any] | None:
         """查今日签到状态。多账号**都查**，聚合：任一账号可领→可领；
         全部已签→已签；个别账号失败只在日志记、不阻塞整页（与 qoder 一致）。"""
-        accounts = self._work_accounts()
+        accounts = self._checkin_accounts()
         if not accounts:
-            # 单账号（legacy 迁移前 / PAT 兜底）或全部在冷却：走首个可用账号
+            # 单账号（legacy 迁移前 / PAT 兜底）：走首个可用账号
             try:
                 data = fetch_checkin_status(region=self._region.key)
             except Exception as e:  # noqa: BLE001 — 状态查询失败不该让整页 500
@@ -407,7 +420,7 @@ class TraeProvider(BaseProvider):
         ``asyncio.to_thread`` 跑（``_call``），``time.sleep`` 不阻塞事件循环；
         手动点击的 HTTP 响应最坏多等约 15s（两次重试），前端 fetch 无超时，可接受。
         """
-        accounts = self._work_accounts()
+        accounts = self._checkin_accounts()
         if not accounts:
             # 单账号 legacy 兜底（PAT 由 supports_checkin=False 挡住 UI 调度，
             # 走不到这里；即便走到也退回原单账号语义）
