@@ -7,6 +7,7 @@ import concurrent.futures
 import contextvars
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -53,11 +54,13 @@ from .transport import send_trae_chat
 log = logging.getLogger(__name__)
 
 #: 4001 后的安静节流窗口：上游对**刚失败**的账号有快速重试惩罚（2026-10-07
-#: 实测：失败后 ~0.2s 紧接的重试照样 4001「param is invalid」，隔 1s 即恢复；
-#: 且窗口随连续失败次数拉长——累积多次失败后实测 ~15-20s 才恢复）。策略不是
+#: 实测：流式探测 4001 会把该模型「毒」~30-60s，期间**连非流式也一并 4001**，
+#: 且窗口随连续失败次数拉长——密集失败后实测可到数分钟才衰减）。策略不是
 #: 固定退避而是**节流**：记住该模型最近一次 4001 时刻，此后的上游尝试先安静
-#: 等到窗外再发——等待本身不产生失败，窗口不会被越喂越长。
-_REJECT_QUIET_S = 15.0
+#: 等到窗外再发——等待本身不产生失败，窗口不会被越喂越长。默认 25s 的依据：
+#: 同日对照实验中 +15s 的重试 3/3 仍落在窗内、+31s 起 2/2 成功，25s 让第一跳
+#: 直接跳过必败的 +15s 区。
+_REJECT_QUIET_S = float(os.environ.get("WB_TRAE_REJECT_QUIET_S", "25"))
 _last_reject_at: dict[str, float] = {}
 
 
@@ -83,7 +86,9 @@ def _note_native_ok(model: str) -> None:
 #: 跳过必败的流式尝试、straight to 非流式缓冲——既省一次注定失败的往返，也避免
 #: 每个流式请求都喂养一次惩罚窗口（实测惩罚窗会随连续失败拉长，02:31 时 ~1s、
 #: 02:42 已漂到 ~5s+）。TTL 过后放一次流式探测，上游恢复流式即自动回到直通。
-_STREAM_REJECT_SKIP_S = 300.0
+#: 探测本身会毒化安静窗（见上），TTL 别设太短——一次探测税 = 后续 ~1-2 分钟
+#: 内该模型的请求全部变慢。
+_STREAM_REJECT_SKIP_S = float(os.environ.get("WB_TRAE_STREAM_REJECT_TTL_S", "300"))
 _stream_reject_until: dict[str, float] = {}
 
 
