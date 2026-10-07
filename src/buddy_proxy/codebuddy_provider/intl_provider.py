@@ -55,10 +55,12 @@ class CodeBuddyIntlProvider(CodeBuddyProvider):
 
         父类走 state.ensure_auth（只看「有没有账号」）——只有 CN 账号时也会
         放行，海外通道拿 CN 账号打 www.codebuddy.ai 必 401，故自己查。
+        口径与 ``intl_enabled()`` 对齐：只看索引不看冷却——账号全冷却时通道
+        照样注册，让转发侧 429 快速失败，而不是误报「没登过海外账号」。
         """
-        from . import failover
+        from .credentials import list_accounts
 
-        if not failover.available_accounts("global"):
+        if not any(a.region == "global" for a in list_accounts()):
             raise HTTPException(
                 status_code=401,
                 detail=("codebuddyintl 无海外版账号：请先 "

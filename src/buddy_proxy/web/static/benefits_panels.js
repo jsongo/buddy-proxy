@@ -956,7 +956,9 @@ async function codebuddyMoveAccount(idx, delta, id) {
     ids.splice(to - 1, 0, moved);
     const r = await api('/ui/api/codebuddy/accounts/order', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ids})});
+      // region=cn：主卡快照只含 CN 子集，须走后端「区内重排」契约——
+      // 不带的话 region=None 按全量校验，有海外账号时必然 400。
+      body: JSON.stringify({ids, region: 'cn'})});
     CODEBUDDY_ACCTS = r.accounts || [];
     const a0 = accts.find(a => a.id === moved) || {};
     const movedName = a0.alias || a0.nickname || moved;
