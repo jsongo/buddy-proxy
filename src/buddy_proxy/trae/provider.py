@@ -372,7 +372,10 @@ class TraeProvider(BaseProvider):
             "claimable": enabled and not checked_in,
             "inactive": not enabled,
             "message": data.get("message", ""),
-            # 上游给的是「每日可得」的 credits 数（签到卡「每日 +X」chip 用）
+            # 上游给的是「每日可得」的 credits 数（签到卡「每日 +X」chip 用）。
+            # 语义实测（2026-10-07）：checked_in=true 时 credits 与 extra_credits
+            # 同为 100 = 已知每日签到额——若哪天 chip 数字变大，先怀疑上游把
+            # 这个字段改成了累计余额。
             "daily_credit": data.get("credits"),
         }
         # trae 的 ``/ug/checkin_credits/status`` 返回里**没有任何时间字段**
