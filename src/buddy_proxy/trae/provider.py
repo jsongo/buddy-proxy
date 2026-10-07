@@ -60,7 +60,8 @@ log = logging.getLogger(__name__)
 #: 等到窗外再发——等待本身不产生失败，窗口不会被越喂越长。默认 25s 的依据：
 #: 同日对照实验中 +15s 的重试 3/3 仍落在窗内、+31s 起 2/2 成功，25s 让第一跳
 #: 直接跳过必败的 +15s 区。
-_REJECT_QUIET_S = float(os.environ.get("WB_TRAE_REJECT_QUIET_S", "25"))
+# 下界 5s：设 0/负数等于关掉节流，退回窗内连环开火的老路
+_REJECT_QUIET_S = max(5.0, float(os.environ.get("WB_TRAE_REJECT_QUIET_S", "25")))
 _last_reject_at: dict[str, float] = {}
 
 
@@ -88,7 +89,8 @@ def _note_native_ok(model: str) -> None:
 #: 02:42 已漂到 ~5s+）。TTL 过后放一次流式探测，上游恢复流式即自动回到直通。
 #: 探测本身会毒化安静窗（见上），TTL 别设太短——一次探测税 = 后续 ~1-2 分钟
 #: 内该模型的请求全部变慢。
-_STREAM_REJECT_SKIP_S = float(os.environ.get("WB_TRAE_STREAM_REJECT_TTL_S", "300"))
+# 下界 60s：TTL 太短会频繁放流式探测，每次探测税 ~1-2 分钟全模型变慢
+_STREAM_REJECT_SKIP_S = max(60.0, float(os.environ.get("WB_TRAE_STREAM_REJECT_TTL_S", "300")))
 _stream_reject_until: dict[str, float] = {}
 
 
