@@ -289,6 +289,7 @@ class CodeBuddyProvider(BaseProvider):
         failed_accts: list[str] = []
         acct_details: list[dict[str, Any]] = []
         enabled_any = False
+        total_daily = 0.0  # 「每日 +X」chip 用：多账号显示总和（前端带「（N账号）」）
         # 展示序号一律取 failover.display_index()（与 /ui 账号快照同源）。
         # 不能用 enumerate 的位置：accounts 是「未冷却」子集，位次与快照对不上，
         # 前端会把签到行对到别的账号上（✎ 改名改错人）。
@@ -306,6 +307,8 @@ class CodeBuddyProvider(BaseProvider):
                 continue
             if not st.get("inactive"):
                 enabled_any = True
+            if isinstance(st.get("daily_credit"), (int, float)):
+                total_daily += st["daily_credit"]
             if st.get("claimable"):
                 claimable_accts.append(f"#{i}")
             elif st.get("checked_in"):
@@ -317,6 +320,7 @@ class CodeBuddyProvider(BaseProvider):
                 "checked_in": bool(st.get("checked_in")),
                 "claimable": bool(st.get("claimable")),
                 "inactive": bool(st.get("inactive")),
+                "daily_credit": st.get("daily_credit"),
             })
         status: dict[str, Any] = {
             "checked_in": bool(signed_accts) and not claimable_accts,
@@ -332,6 +336,8 @@ class CodeBuddyProvider(BaseProvider):
         if failed_accts:
             status["message"] = (status["message"] + " " if status["message"] else "") + \
                 f"（{len(failed_accts)}/{len(accounts)} 个账号查询失败）"
+        if total_daily:
+            status["daily_credit"] = total_daily
         if enabled_any:
             status["next_ts"] = next_daily_reset()
             status["next_ts_source"] = SOURCE_INFERRED

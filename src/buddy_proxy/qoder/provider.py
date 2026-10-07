@@ -440,9 +440,12 @@ class QoderProvider(BaseProvider):
         any_activity = any(not s.get("inactive") for s in valid)
         details = _detail_rows()
         failures = [s["error"] for _, s in results if s.get("error")]
-        # 顶层也回填活动信息（chips 用）：同区域各账号的活动一般相同，
-        # 取第一个带 daily_credit 的；没有就保持缺省，不硬造。
-        activity = next((s for s in valid if s.get("daily_credit") is not None), None)
+        # 顶层也回填活动信息（chips 用）。「每日 +X」是多账号**总和**（用户
+        # 2026-10-07 要求，前端带「（N账号）」后缀）；活动 key 同区域一般相同，
+        # 取第一个带 activity_name 的；没有就保持缺省，不硬造。
+        daily_sum = sum(s["daily_credit"] for s in valid
+                        if isinstance(s.get("daily_credit"), (int, float)))
+        activity = next((s for s in valid if s.get("activity_name")), None)
         return {
             "checked_in": bool(claimed) and not claimable and not failures,
             "claimable": bool(claimable),
@@ -455,8 +458,8 @@ class QoderProvider(BaseProvider):
                         "部分账号查询失败，签到状态不完整" if failures else
                         "今日已领取" if claimed else
                         "有活动，但当前没有可领取的签到奖励" if any_activity else ""),
-            **({"daily_credit": activity["daily_credit"],
-                "benefit_kind": activity["benefit_kind"],
+            **({"daily_credit": daily_sum} if daily_sum else {}),
+            **({"benefit_kind": activity["benefit_kind"],
                 "activity_name": activity["activity_name"]}
                if activity else {}),
         }

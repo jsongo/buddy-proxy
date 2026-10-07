@@ -362,8 +362,13 @@ class CheckinHistory:
             pid = rec.get("provider", "")
             if pid not in info["providers"]:
                 info["providers"].append(pid)
-            if rec.get("credits") is not None:
-                info["credits"][pid] = rec["credits"]
+            # 同日同通道有多条记录（自动轮询的 replay 每次都会落一行）：保留
+            # 最大非零值——replay 拿不到金额（None/0），后到的 0 不能把当天
+            # 真实领到的数糊成 +0。
+            credit = rec.get("credits")
+            if credit:
+                prev = info["credits"].get(pid)
+                info["credits"][pid] = max(prev or 0, credit)
         today = datetime.now().date()
         out = []
         for offset in range(days - 1, -1, -1):
@@ -555,9 +560,17 @@ class BenefitsManager:
             already = ("已签" in message) or ("already" in message.lower())
             self.history.append(provider_id, ok=already, message=message)
             return {"ok": already, "already": already, "message": message}
+        # 金额取值链：实领（extra_credits）→ 上游回告（credits）→ 每日额
+        # （daily_credit，dumate 是均值口径）。replay（重复轮询已领过）拿不到
+        # 金额时保持 None——别把「未知」记成 0，日历会被 +0 糊掉真实值。
+        credits = status.get("extra_credits")
+        if credits is None:
+            credits = status.get("credits")
+        if credits is None:
+            credits = status.get("daily_credit")
         self.history.append(provider_id, ok=True,
                             message=status.get("message", ""),
-                            credits=status.get("extra_credits", status.get("credits")))
+                            credits=credits)
         return {"ok": True, **(status or {})}
 
     # ------------------------------------------------------------------

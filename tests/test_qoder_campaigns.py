@@ -271,7 +271,8 @@ def test_status_aggregation_carries_daily_credit_top_and_per_account(monkeypatch
 
     monkeypatch.setattr(QoderProvider, "_campaigns", client_for)
     st = asyncio.run(QoderProvider().checkin_status())
-    assert st["daily_credit"] == 100
+    # 「每日 +X」是多账号**总和**（前端带「（N账号）」）
+    assert st["daily_credit"] == 200
     assert st["benefit_kind"] == "CREDITS"
     assert st["activity_name"] == "act-20260923-556"
     for row in st["accounts"]:

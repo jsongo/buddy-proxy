@@ -312,7 +312,18 @@ silent:
   a single-account channel like qoderintl rendering a differently-shaped card.
   The aggregation also forwards `daily_credit`/`benefit_kind`/`activity_name`
   (top level and per row) — dropping them made the “每日 +100.00” chip appear
-  on single-account channels only.
+  on single-account channels only. Codebuddy and Trae had the same disease in
+  their own aggregations (2026-10-07): both now forward `daily_credit` from
+  their per-account payloads (`today_credit` / `credits`) through the
+  aggregated rows and top level too.
+- **The check-in card declutters (2026-10-07).** When per-account rows are
+  present, the top-level state badge is dropped — one badge per account row
+  already tells the story, and the aggregate badge next to the channel name
+  repeated it (kept when the aggregate query itself failed: there the badge's
+  error tooltip is the only lead). The upstream campaign key
+  (`activity_name`, e.g. `act-20260930-551`) is no longer rendered as a chip:
+  opaque to users, who found it confusing; the field is still delivered for
+  log digging.
 - **Activity presence is not the same as a claimable check-in.** Qoder's
   campaign list may contain `VIEW_DETAILS` entries alongside, or instead of,
   `CLAIM_BENEFIT`. Only the latter with `CLAIMABLE` is sent to the claim API.
