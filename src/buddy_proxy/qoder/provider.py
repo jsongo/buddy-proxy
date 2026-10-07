@@ -55,6 +55,7 @@ from .credentials import (
     AccountRef,
     AuthError,
     Credential,
+    backfill_identity,
     cred_to_credential,
     ensure_account_token,
     list_accounts,
@@ -394,6 +395,16 @@ class QoderProvider(BaseProvider):
                         "error": str(exc)[:200], "message": str(exc)[:200]}
 
         didx = {a.id: a.priority + 1 for a in list_accounts()}
+        # 无名账号（登录时 deviceToken 回包不带身份）懒回填 name/email：
+        # 本区一旦出现无名号就查一次 userinfo（进程内每号只成功一次），
+        # 下轮快照起明细行/额度面板都显示真名而不是 UUID。
+        nameless = [a.id for a in accounts if not (a.alias or a.name or a.email)]
+        if nameless:
+            await asyncio.to_thread(
+                lambda: [backfill_identity(aid) for aid in nameless])
+            accounts = [a for a in list_accounts()
+                        if getattr(a, "region", None) == region]
+            didx = {a.id: a.priority + 1 for a in list_accounts()}
 
         async def _status_one(acct: AccountRef) -> tuple[AccountRef, dict[str, Any]]:
             try:
@@ -617,6 +628,10 @@ class QoderProvider(BaseProvider):
 
         同步 httpx 直接跑在常驻线程池里（kimi 同款：fetch 本来就是同步调用）。
         """
+        # 无名账号懒回填身份（与 checkin_status 同款；每号进程内只成功一次），
+        # 否则额度面板组标题一直是「Qoder #N」对不上真名。
+        if not (acct.alias or acct.name or acct.email):
+            backfill_identity(acct.id)
         try:
             token, cred_dict = ensure_account_token(acct.id)
         except AuthError:

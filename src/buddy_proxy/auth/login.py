@@ -541,6 +541,15 @@ def _login_qoder(open_browser: bool = True, region: str | None = None, **_kwargs
         return 1
 
     ref = save_account_cred(credential_to_cred(cred))
+    # deviceToken 回包没有身份字段（实测）：登录后拉一次 userinfo 回填
+    # name/email，UI 各处才能直接显示账号名而不是 UUID。
+    from buddy_proxy.qoder.credentials import (
+        backfill_identity,
+        cred_to_credential,
+        load_account_cred,
+    )
+    backfill_identity(ref.id, only_if_missing=False)
+    cred = cred_to_credential(load_account_cred(ref.id) or {})
     print()
     who = cred.email or cred.name or ref.id
     print(f"[OK] Qoder 登录成功：{who}（{cred.describe()}）")

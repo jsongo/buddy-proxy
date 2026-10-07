@@ -148,6 +148,20 @@ renders a separate provider row because check-in rows are provider-driven.
 Adding a Global login while the server is already running still requires a
 restart for registration.
 
+**Qoder account identity comes from `/api/v1/userinfo`, never from the
+token exchange.** None of the deviceToken endpoints (poll / refresh / PAT
+exchange) return `name`/`email` — verified live 2026-10-08 — so accounts
+logged in before identity backfill existed show up as bare UUIDs in
+check-in detail rows and quota panel titles. `credentials.fetch_userinfo`
+queries the (previously dead) `userinfo_url` config entry;
+`backfill_identity` fills `name`/`email` into index + cred file (alias
+untouched), runs once at login (`only_if_missing=False`) and lazily from
+`checkin_status`/`_quota_one` when a nameless account appears (per-process
+once per account; failures are swallowed — identity is cosmetic). Other
+channels were swept for the same disease and are clean: trae/codebuddy/kimi
+persist upstream nicknames at login, antigravity uses email as the account
+id, and the single-account channels have no per-account rows at all.
+
 Campaign check-in (`/sash/**`) is **fingerprint-targeted** (CN and Global
 alike): the upstream only returns the daily `CLAIM_BENEFIT` entry to device
 identities it recognizes. Requests therefore carry the desktop app's
