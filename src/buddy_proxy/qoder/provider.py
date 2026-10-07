@@ -377,11 +377,14 @@ class QoderProvider(BaseProvider):
         ``claimable``；账号的活动权益彼此独立，逐号查询并聚合，避免顺位首号
         没有签到奖励时掩盖后续账号的活动。
         """
-        accounts = failover.available_accounts(self._region.key)
+        # 签到与额度冷却无关（冷却挡的是模型转发）：全量枚举本区账号，
+        # 否则在冷却的账号会整条从签到卡里消失（2026-10-07 codebuddy 同病实报）。
+        region = self._region.key
+        accounts = [a for a in list_accounts() if getattr(a, "region", None) == region]
         if not accounts:
             if list_accounts():
                 return {"checked_in": False, "claimable": False, "error":
-                        "qoder 没有可用账号（未登录或全部冷却中）"}
+                        "qoder 本区没有已登录账号"}
             try:
                 client = await self._campaigns()
                 return await self._campaign_status(await client.list())
@@ -481,7 +484,9 @@ class QoderProvider(BaseProvider):
         但每次点击仍只领取一个账号的奖励；对已领过的活动再 POST 会重放，故
         ``replayed`` 仍用于区分是否真的新发 Credits。
         """
-        accounts = failover.available_accounts(self._region.key)
+        # 与 checkin_status 同口径：不剔除冷却账号（冷却挡转发不挡签到）
+        region = self._region.key
+        accounts = [a for a in list_accounts() if getattr(a, "region", None) == region]
         if not accounts:
             accounts = [None]
         found_claimable = None
