@@ -34,9 +34,11 @@ def seeded(tmp_path, monkeypatch):
     return None
 
 
-def test_fetch_userinfo_parses_identity(monkeypatch):
+def test_fetch_userinfo_parses_identity(tmp_path, monkeypatch):
     from buddy_proxy.qoder.credentials import fetch_userinfo
 
+    monkeypatch.setenv("QODER_STATE_DIR", str(tmp_path / "qoder"))
+    qc.save_account_cred(_cred("a1"))
     monkeypatch.setattr(qc, "ensure_account_token", lambda aid: ("tok", {}))
     class _Resp:
         status_code = 200
@@ -195,3 +197,16 @@ def test_login_flow_calls_backfill(tmp_path, monkeypatch):
     src = (pytest.importorskip("pathlib").Path(__file__).resolve().parents[1]
            / "src" / "buddy_proxy" / "auth" / "login.py").read_text(encoding="utf-8")
     assert "backfill_identity(ref.id, only_if_missing=False)" in src
+
+
+def test_fetch_userinfo_raises_on_missing_region(tmp_path, monkeypatch):
+    """region 为空显式抛错，不静默落默认区（否则又是一种查不到的 401）。
+
+    save_account_cred 落盘时空 region 会被归一成 "cn"，真实存量到不了这个
+    分支（只有 cred 文件被手工改坏才可能）——直接桩 load_account_cred。
+    """
+    monkeypatch.setattr(qc, "load_account_cred", lambda aid: {"account_id": "b1", "region": ""})
+    from buddy_proxy.qoder.credentials import AuthError
+
+    with pytest.raises(AuthError, match="没有 region 字段"):
+        qc.fetch_userinfo("b1")
