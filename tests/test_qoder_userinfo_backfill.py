@@ -34,9 +34,11 @@ def seeded(tmp_path, monkeypatch):
     return None
 
 
-def test_fetch_userinfo_parses_identity(monkeypatch):
+def test_fetch_userinfo_parses_identity(tmp_path, monkeypatch):
     from buddy_proxy.qoder.credentials import fetch_userinfo
 
+    monkeypatch.setenv("QODER_STATE_DIR", str(tmp_path / "qoder"))
+    qc.save_account_cred(_cred("a1"))
     monkeypatch.setattr(qc, "ensure_account_token", lambda aid: ("tok", {}))
     class _Resp:
         status_code = 200
@@ -45,6 +47,34 @@ def test_fetch_userinfo_parses_identity(monkeypatch):
     monkeypatch.setattr(qc.httpx, "get", lambda *a, **k: _Resp())
     info = fetch_userinfo("a1")
     assert info == {"name": "ethan", "email": "e@x.com", "username": "u1"}
+
+
+def test_fetch_userinfo_uses_account_region(tmp_path, monkeypatch):
+    """端点必须按**账号自己的 region** 解析（#132 真机回归）。
+
+    resolve_region() 不带参落默认区 CN，海外号 token 打 CN 域 401
+    TOKEN_EXPIRE——token 有效、域不对，回填对所有 global 账号静默失效。
+    """
+    monkeypatch.setenv("QODER_STATE_DIR", str(tmp_path / "qoder"))
+    qc.save_account_cred(_cred("g1", region="global"))
+    seen = {}
+    real_resolve = qc.resolve_region
+
+    def spy_resolve(key=None):
+        seen["key"] = key
+        return real_resolve(key)
+
+    monkeypatch.setattr(qc, "resolve_region", spy_resolve)
+    monkeypatch.setattr(qc, "ensure_account_token", lambda aid: ("tok", {}))
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"name": "n", "email": "e", "username": "u"}
+
+    monkeypatch.setattr(qc.httpx, "get", lambda *a, **k: _Resp())
+    qc.backfill_identity("g1")
+    assert seen["key"] == "global", "userinfo 端点必须用账号的 region，不能落默认区"
 
 
 def test_fetch_userinfo_raises_on_http_error(monkeypatch):
@@ -167,3 +197,16 @@ def test_login_flow_calls_backfill(tmp_path, monkeypatch):
     src = (pytest.importorskip("pathlib").Path(__file__).resolve().parents[1]
            / "src" / "buddy_proxy" / "auth" / "login.py").read_text(encoding="utf-8")
     assert "backfill_identity(ref.id, only_if_missing=False)" in src
+
+
+def test_fetch_userinfo_raises_on_missing_region(tmp_path, monkeypatch):
+    """region 为空显式抛错，不静默落默认区（否则又是一种查不到的 401）。
+
+    save_account_cred 落盘时空 region 会被归一成 "cn"，真实存量到不了这个
+    分支（只有 cred 文件被手工改坏才可能）——直接桩 load_account_cred。
+    """
+    monkeypatch.setattr(qc, "load_account_cred", lambda aid: {"account_id": "b1", "region": ""})
+    from buddy_proxy.qoder.credentials import AuthError
+
+    with pytest.raises(AuthError, match="没有 region 字段"):
+        qc.fetch_userinfo("b1")

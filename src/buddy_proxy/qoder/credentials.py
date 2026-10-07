@@ -864,8 +864,20 @@ def fetch_userinfo(account_id: str) -> dict[str, Any]:
     路因此一直拿不到账号身份——config 里早定义的 userinfo 端点从没人调用。
     返回 ``{"name": ..., "email": ..., "username": ...}``；HTTP/解析失败抛
     AuthError，调用方决定吞还是记。
+
+    端点按**账号自己的 region** 解析：resolve_region() 不带参落默认区（CN），
+    海外账号的 token 打到 CN 域 401 TOKEN_EXPIRE——token 有效，域不对
+    （#132 合并后真机验证暴露）。
     """
-    reg = with_cached_endpoints(resolve_region())
+    raw = load_account_cred(account_id) or {}
+    # 从**原始 dict** 判空：cred_to_credential 会把空 region 归一成 "cn"，
+    # 经它转一手就永远看不见空值了。
+    region = str(raw.get("region") or "").strip()
+    if not region:
+        # 不静默回退默认区：region 为空多半是凭据损坏，按默认区打只会
+        # 换一种 401，排查时还被误导。显式抛错，日志里能看出是哪个号。
+        raise AuthError(f"qoder 账号 {account_id[:8]} 没有 region 字段，userinfo 无法定位端点")
+    reg = with_cached_endpoints(resolve_region(region))
     token, _ = ensure_account_token(account_id)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
