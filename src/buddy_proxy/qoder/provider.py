@@ -446,6 +446,15 @@ class QoderProvider(BaseProvider):
         daily_sum = sum(s["daily_credit"] for s in valid
                         if isinstance(s.get("daily_credit"), (int, float)))
         activity = next((s for s in valid if s.get("activity_name")), None)
+        # 「下次/截止」也要聚合下发，否则多账号通道的卡片没有时间 chip（单账号
+        # 分支原样返回带着，又是一种不一致）。有可领账号时各号截止不同，取
+        # **最早**的——那是用户此刻该关心的时间点。
+        nexts = [(s["next_ts"], s.get("next_ts_source")) for s in valid
+                 if isinstance(s.get("next_ts"), (int, float))]
+        next_ts_out: dict[str, Any] = {}
+        if nexts:
+            ts, src = min(nexts)
+            next_ts_out = {"next_ts": int(ts), "next_ts_source": src}
         return {
             "checked_in": bool(claimed) and not claimable and not failures,
             "claimable": bool(claimable),
@@ -462,6 +471,7 @@ class QoderProvider(BaseProvider):
             **({"benefit_kind": activity["benefit_kind"],
                 "activity_name": activity["activity_name"]}
                if activity else {}),
+            **next_ts_out,
         }
 
     async def checkin_claim(self) -> dict[str, Any] | None:
