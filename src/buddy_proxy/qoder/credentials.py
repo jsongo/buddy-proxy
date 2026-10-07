@@ -864,8 +864,13 @@ def fetch_userinfo(account_id: str) -> dict[str, Any]:
     路因此一直拿不到账号身份——config 里早定义的 userinfo 端点从没人调用。
     返回 ``{"name": ..., "email": ..., "username": ...}``；HTTP/解析失败抛
     AuthError，调用方决定吞还是记。
+
+    端点按**账号自己的 region** 解析：resolve_region() 不带参落默认区（CN），
+    海外账号的 token 打到 CN 域 401 TOKEN_EXPIRE——token 有效，域不对
+    （#132 合并后真机验证暴露）。
     """
-    reg = with_cached_endpoints(resolve_region())
+    cred = cred_to_credential(load_account_cred(account_id) or {})
+    reg = with_cached_endpoints(resolve_region(cred.region or None))
     token, _ = ensure_account_token(account_id)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
