@@ -359,7 +359,8 @@ class CodeBuddyProvider(BaseProvider):
         """
         accounts = self._accounts_for_benefits()
         if not accounts:
-            raise RuntimeError(f"所有账号均在冷却中（{failover.cooldown_report()}）；稍后再试")
+            # 枚举不剔除冷却，空列表=真没有账号，别把用户往冷却排查上带
+            raise RuntimeError("暂无已登录账号；先在账号面板登录再打卡")
         if len(accounts) == 1:
             # 单账号直通：不带 accounts 明细（与 checkin_status 的单账号分支对称）
             acct = accounts[0]
