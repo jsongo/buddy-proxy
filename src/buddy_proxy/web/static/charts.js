@@ -479,7 +479,7 @@ async function renderRecent() {
     // 截 12 位，hover 看完整原始值。
     const shown = r.account_name || r.account;
     const acct = r.account
-      ? ` <span class="muted" title="${r.account_name ? '账号 id：' : '账号：'}${esc(r.account)}">(${esc(shown)})</span>`
+      ? ` <span class="muted acct-name" title="${r.account_name ? '账号 id：' : '账号：'}${esc(r.account)}">(${esc(shown)})</span>`
       : '';
     return `<tr>
       <td class="mono muted">${fmtTime(r.ts)}</td>
