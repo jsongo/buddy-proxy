@@ -38,8 +38,8 @@ def test_status_multi_account_reports_each(monkeypatch):
 
     def _fetch(token="", account_id="", region=""):
         if account_id == "u2":
-            return {"checked_in": False, "enable": True, "message": ""}
-        return {"checked_in": True, "enable": True, "message": "success"}
+            return {"checked_in": False, "enable": True, "message": "", "credits": 100}
+        return {"checked_in": True, "enable": True, "message": "success", "credits": 100}
 
     monkeypatch.setattr("buddy_proxy.trae.provider.fetch_checkin_status", _fetch)
     st = TraeProvider().checkin_status()
@@ -53,6 +53,9 @@ def test_status_multi_account_reports_each(monkeypatch):
     assert a1["id"] == "u1" and a2["id"] == "u2"
     # 聚合态不受影响：任一可领 → 整体可领
     assert st["claimable"] is True and st["checked_in"] is False
+    # 「每日 +X」chip：上游 credits 要穿透聚合（顶层 + 逐行），不能只在单账号分支有
+    assert st["daily_credit"] == 100
+    assert a1["daily_credit"] == 100 and a2["daily_credit"] == 100
 
 
 def test_status_name_prefers_alias(monkeypatch):

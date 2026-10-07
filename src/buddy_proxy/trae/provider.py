@@ -293,6 +293,7 @@ class TraeProvider(BaseProvider):
         failed_accts: list[str] = []
         acct_details: list[dict[str, Any]] = []
         enabled_any = False
+        first_daily = None  # 「每日 +X」chip 用；同档期各账号金额一致，取首个非零
         # 展示序号一律取 failover.display_index()（与 /ui 账号快照同源）。
         # 不能用 enumerate 的位置：accounts 是「本区 + 未冷却」子集，位次与
         # 快照对不上，前端会把签到行对到别的账号上（✎ 改名改错人）。
@@ -310,6 +311,8 @@ class TraeProvider(BaseProvider):
                 continue
             if not st.get("inactive"):
                 enabled_any = True
+            if not first_daily and st.get("daily_credit"):
+                first_daily = st["daily_credit"]
             if st.get("claimable"):
                 claimable_accts.append(f"#{i}")
             elif st.get("checked_in"):
@@ -321,6 +324,7 @@ class TraeProvider(BaseProvider):
                 "checked_in": bool(st.get("checked_in")),
                 "claimable": bool(st.get("claimable")),
                 "inactive": bool(st.get("inactive")),
+                "daily_credit": st.get("daily_credit"),
             })
         status: dict[str, Any] = {
             "checked_in": bool(signed_accts) and not claimable_accts,
@@ -336,6 +340,8 @@ class TraeProvider(BaseProvider):
         if failed_accts:
             status["message"] = (status["message"] + " " if status["message"] else "") + \
                 f"（{len(failed_accts)}/{len(accounts)} 个账号查询失败）"
+        if first_daily:
+            status["daily_credit"] = first_daily
         if enabled_any:
             status["next_ts"] = next_daily_reset()
             status["next_ts_source"] = SOURCE_INFERRED
@@ -366,6 +372,8 @@ class TraeProvider(BaseProvider):
             "claimable": enabled and not checked_in,
             "inactive": not enabled,
             "message": data.get("message", ""),
+            # 上游给的是「每日可得」的 credits 数（签到卡「每日 +X」chip 用）
+            "daily_credit": data.get("credits"),
         }
         # trae 的 ``/ug/checkin_credits/status`` 返回里**没有任何时间字段**
         # （实测只有 checked_in / enable / credits / message），连档期都不给。

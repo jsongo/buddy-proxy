@@ -188,10 +188,15 @@ function renderBenefits() {
       : c.inactive ? '<span class="br-state">今日无签到活动</span>'
       : c.done_today ? '<span class="br-state ok">已签到</span>'
       : '<span class="br-state pending">未签到</span>';
+    // 有逐账号明细行时第一行不再放状态徽标：第二行一号一个状态，顶上再放
+    // 一个聚合态既重复又挤（用户反馈）。整体查询失败（状态未知）仍保留——
+    // 那种情况明细行也全是「查询失败」，徽标的 error title 是唯一线索。
+    const badge = (c.accounts && c.accounts.length && !c.error) ? '' : st;
     const chips = [];
     if (c.daily_credit > 0) chips.push(`每日 +${fmtCredit(c.daily_credit)}`);
     if (c.streak_days >= 2) chips.push(`连续 ${c.streak_days} 天`);
-    if (c.activity_name) chips.push(c.activity_name);
+    // activity_name（上游 campaign key，如 act-20260930-551）不再展示：对用户
+    // 纯粹是噪音，用户反馈「看得更迷糊」；字段后端仍下发，排查日志时有用。
     const meta = chips.map(t => `<span class="br-chip">${esc(t)}</span>`).join('');
     // 多账号通道的 per-account 明细（Trae/Qoder 下发的 accounts 列表）：一行一账号，
     // 徽标 + 失败原因。整体聚合态说不清「哪个号没签上」，用户反馈过这个盲点。
@@ -214,7 +219,7 @@ function renderBenefits() {
           <i class="br-dot" style="background:${pcolor(p.id)}"></i>
           <span class="br-name">${esc(p.id)}</span>
         </div>
-        <div class="br-meta">${st}${meta}${nextTimeHtml(c)}</div>
+        <div class="br-meta">${badge}${meta}${nextTimeHtml(c)}</div>
         <div class="br-act">
           <button class="primary" ${(c.done_today || c.inactive || c.unavailable) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)">立即打卡</button>
         </div>
