@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import time
 from typing import Any
 
@@ -102,8 +103,69 @@ async def ui_logs(request: Request, start: str = "", end: str = "",
     provs = [p.strip() for p in provider.split(",") if p.strip()] or None
     mds = [m.strip() for m in model.split(",") if m.strip()] or None
     cls = [c.strip() for c in client.split(",") if c.strip()] or None
-    return await asyncio.to_thread(
+    result = await asyncio.to_thread(
         metrics.query_logs, start or None, end or None, page, page_size, provs, mds, cls)
+    await _attach_account_names(result.get("rows") or [])
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 请求日志「通道」列的账号名解析（2026-10-07 用户：括号里放 id 看不出是谁）
+# ---------------------------------------------------------------------------
+
+#: 有多账号且往日志 account 字段写 id 的通道（各自的 ``failover.accounts_status``
+#: 是纯本地读取，不触网）。traepat 的 profile 行没有 alias，不列。
+_ACCOUNT_NAME_SOURCES = ("codebuddy_provider", "trae", "antigravity", "qoder", "kimi")
+
+_ACCT_NAME_TTL_S = 60.0
+_acct_name_cache: tuple[float, dict[str, str]] = (0.0, {})
+
+
+def _account_name_map() -> dict[str, str]:
+    """账号 id → 当前显示名（跨通道全局表；id 是 UUID/短 hex 不会跨通道撞）。
+
+    日志里落库的是稳定 id，名字在展示端解析——改名后所有历史日志行跟着用
+    新名字。显示名取各通道 ``accounts_status`` 的 alias 链（alias > nickname
+    > name > email > id）。解析不到的值原样透传：trae 历史行写的是**当时**
+    的 alias，无法映射回 id，如实显示旧名。
+    """
+    global _acct_name_cache
+    now = time.monotonic()
+    ts, cached = _acct_name_cache
+    if now - ts < _ACCT_NAME_TTL_S and cached:
+        return cached
+    out: dict[str, str] = {}
+    for mod_name in _ACCOUNT_NAME_SOURCES:
+        try:
+            mod = importlib.import_module(f"buddy_proxy.{mod_name}.failover")
+            status = mod.accounts_status()
+        except Exception:
+            continue
+        for a in (status or {}).get("accounts") or []:
+            if not isinstance(a, dict):
+                continue
+            aid = a.get("id")
+            display = (a.get("alias") or a.get("nickname") or a.get("name")
+                       or a.get("email") or "")
+            if aid and display and display != aid:
+                out[str(aid)] = str(display)
+    _acct_name_cache = (now, out)
+    return out
+
+
+def _reset_account_name_cache() -> None:
+    """测试用：清掉解析表缓存。"""
+    global _acct_name_cache
+    _acct_name_cache = (0.0, {})
+
+
+async def _attach_account_names(rows: list[dict[str, Any]]) -> None:
+    """给日志行补 ``account_name``（当前显示名）；解析不到就不加该字段。"""
+    nmap = await asyncio.to_thread(_account_name_map)
+    for r in rows:
+        name = nmap.get(str(r.get("account") or ""))
+        if name:
+            r["account_name"] = name
 
 
 @app.get("/ui/api/benefits")

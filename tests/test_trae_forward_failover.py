@@ -324,7 +324,8 @@ def test_forward_reports_used_account_to_metrics():
     """work 循环选定账号后写 ACCOUNT_META（/ui 请求日志「通道」列的账号后缀）。
 
     qoder/kimi/antigravity 同款：选号即写 ``meta["account"]``，failover 后被
-    覆盖为最终账号。值用 alias > nickname 链（用户认得的名字，不是 UUID）。
+    覆盖为最终账号。值统一是稳定 id——名字由 /ui/api/logs 展示端按当前
+    alias 链解析（改名后历史日志行跟着变），落库写死名字会冻结旧称。
     """
     from buddy_proxy.core.metrics import ACCOUNT_META
 
@@ -347,7 +348,7 @@ def test_forward_reports_used_account_to_metrics():
         ACCOUNT_META.reset(holder)
 
     assert resp.status_code == 200
-    assert meta["account"] == "U1"  # nickname（_seed_accounts 用 u1.title()）
+    assert meta["account"] == "u1"  # 稳定 id（展示端解析成 alias，不落名字）
 
 
 def test_failover_reports_final_account_to_metrics():
@@ -376,7 +377,7 @@ def test_failover_reports_final_account_to_metrics():
         ACCOUNT_META.reset(holder)
 
     assert resp.status_code == 200
-    assert meta["account"] == "U2"
+    assert meta["account"] == "u2"
 
 
 def test_forward_without_account_meta_holder_still_works():
