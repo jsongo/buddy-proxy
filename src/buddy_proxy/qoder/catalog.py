@@ -96,14 +96,15 @@ TIER_MODELS: tuple[dict[str, Any], ...] = (
 #: 隐藏 ≠ 停用：客户端直接点名仍可调用，只是 /v1/models 与管理页不列出来。
 #: 想恢复展示：把 key 从本集合里删掉即可。
 #:
-#: 2026-10-03 收缩：三方模型（gm51model/kmodel/cmodel/smodel 等）不再走
-#: 「隐藏」——它们被上游 ``enable=false`` 关掉了，由 :func:`is_enabled` 负责
-#: 摘除（上游恢复后自动回到列表，不需要动这里）；cmodel/smodel 已从目录
-#: 消失。这里只留仍可调、只是太旧不展示的 Qwen 3.7 三档。
+#: 2026-10-03 收缩：三方模型曾因上游 ``enable=false`` 由 :func:`is_enabled` 摘除；
+#: 上游恢复后会自动回到列表。这里仅隐藏仍可调用、但已过时的模型。
 HIDDEN_KEYS: frozenset[str] = frozenset({
     "qmodel_latest",   # Qwen3.7-Max
     "qmodel",          # Qwen3.7-Plus
     "q37fmodel",       # Qwen3.7-Flash
+    "gm51model",       # GLM-5.2
+    "kmodel",          # Kimi-K2.8-Preview
+    "mmodel",          # MiniMax-M2.7
 })
 #: 注意：``dfmodel``（上游显示名 ``DeepSeek-Flash``，即用户口中的 4.1-Flash）
 #: 曾因「名字看着旧但最常用」而不隐藏；2026-10-03 起它被上游停用，由

@@ -473,9 +473,11 @@ async function renderRecent() {
     // 实扣积分留 2 位展示；credits_map 那档本来就是 "×1.62" 这种字符串，原样带过
     const creditTxt = r.credit != null ? fmtCredit(r.credit)
                     : cmap[r.provider + '/' + r.model] || null;
-    // 多账号通道（traepat）：括号内展示账号缩略，hover 看完整 id；≤10 字符直接全显
+    // 多账号通道：括号内展示账号缩略，hover 看完整值。UUID 形态（qoder/kimi 等
+    // 写 acct.id 的通道）截前 6 位；展示名（trae 写 alias/nickname）≤10 字符全显、
+    // 更长的截 12 位——名字截 6 位基本不可读。
     const acct = r.account
-      ? ` <span class="muted" title="账号：${esc(r.account)}">(${esc(r.account.length > 10 ? r.account.slice(0, 6) + '…' : r.account)})</span>`
+      ? ` <span class="muted" title="账号：${esc(r.account)}">(${esc(r.account.length <= 10 ? r.account : (/^[0-9a-f]{8}-/i.test(r.account) ? r.account.slice(0, 6) : r.account.slice(0, 12)) + '…')})</span>`
       : '';
     return `<tr>
       <td class="mono muted">${fmtTime(r.ts)}</td>

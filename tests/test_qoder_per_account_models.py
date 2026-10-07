@@ -305,6 +305,27 @@ def test_refresh_models_union_across_accounts(monkeypatch, _override):
     assert prov.accepts_model("glm-5.3", aliases=False)
 
 
+def test_refresh_models_hides_retired_catalog_entries(monkeypatch, _override):
+    """动态上游目录里的旧模型也不应重新出现在模型列表。"""
+    _write_account("acct-a")
+    _patch_fetch(monkeypatch, {
+        "uid-acct-a": _QWEN_ONLY + [
+            {"key": "gm51model", "display_name": "GLM-5.2", "enable": True},
+            {"key": "kmodel", "display_name": "Kimi-K2.8-Preview", "enable": True},
+            {"key": "mmodel", "display_name": "MiniMax-M2.7", "enable": True},
+        ],
+    })
+    prov = QoderProvider()
+    ids = {m["id"] for m in asyncio.run(prov.refresh_models())}
+    assert {"qoder/qwen3.8-max", "qoder/qwen3.8-flash"} <= ids
+    assert not {"qoder/glm-5.2", "qoder/kimi-k2.8-preview", "qoder/minimax-m2.7"} & ids
+
+    catalog = prov._catalog_for(prov._region.key)
+    assert catalog.resolve_key("qoder/glm-5.2") == "gm51model"
+    assert catalog.resolve_key("qoder/kimi-k2.8-preview") == "kmodel"
+    assert catalog.resolve_key("qoder/minimax-m2.7") == "mmodel"
+
+
 def test_refresh_models_tolerates_single_account_failure(monkeypatch, _override):
     """单账号刷新失败只收缩并集，不拖垮整体；全失败回落兜底表。"""
     _write_account("acct-a")

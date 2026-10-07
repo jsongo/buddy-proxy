@@ -1,7 +1,7 @@
 """trae 通道 glm-5.3-flashx 接入回归测试（离线，不访问上游）。
 
 背景（2026-09-30 实测）：``glm-5.3-flashx`` 在 trae 通道**可用**，但 trae 的
-``MODEL_TIERS`` 目录里原先没有它——于是出现「能通却查不到」的隐状态：
+``MODEL_IDS`` 目录里原先没有它——于是出现「能通却查不到」的隐状态：
 用户不可能从 ``/v1/models`` 发现这个模型，只能靠口口相传。
 
 **最难的一步不是发现有响应，而是排除「别名模糊匹配」这个解释。**
@@ -28,8 +28,8 @@ from __future__ import annotations
 from buddy_proxy.core.credit_estimate import estimate_credit
 from buddy_proxy.trae.config import (
     MODEL_CREDITS,
+    MODEL_IDS,
     MODEL_MAP,
-    MODEL_TIERS,
     _map_model,
     _WORK_FUNCTION_OVERRIDE,
 )
@@ -48,11 +48,9 @@ def test_flashx_listed_by_trae_catalog():
     assert {"glm-5.3", "glm-5.3-flash"} <= set(ids)
 
 
-def test_flashx_is_t1():
-    """归 T1：与 glm-5.3 家族同档，前端按档位排序/展示时会用到。"""
-    assert "glm-5.3-flashx" in MODEL_TIERS["T1"]
-    tier = next(m["tier"] for m in TraeProvider().models() if m["id"] == "glm-5.3-flashx")
-    assert tier == "T1"
+def test_flashx_sits_with_glm_family_in_catalog():
+    """目录顺序沿用上游展示序：flashx 紧跟 glm-5.3-flash 之后（原 T1 档内）。"""
+    assert MODEL_IDS.index("glm-5.3-flashx") == MODEL_IDS.index("glm-5.3-flash") + 1
 
 
 def test_flashx_is_passed_through_verbatim():

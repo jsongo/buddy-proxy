@@ -924,19 +924,26 @@ def test_models_hide_legacy_but_keep_current():
     """列表只列当前模型；旧模型隐藏（隐藏 ≠ 停用，点名仍可调）。
 
     2026-10-05 复测三方模型恢复（账号级分桶），兜底目录重建后三方模型
-    回到列表；auto 档位仍停用（TIER_MODELS enable=False）、Qwen 3.7 三档
-    仍按 HIDDEN_KEYS 隐藏、cantus/sonus 目录里已消失。
+    回到列表；auto 档位仍停用（TIER_MODELS enable=False）。Qwen 3.7、GLM-5.2、
+    Kimi-K2.8-Preview 和 MiniMax-M2.7 按 HIDDEN_KEYS 隐藏，cantus/sonus 已消失。
     """
     ids = [m["id"] for m in _provider().models()]
     assert "qoder/qwen3.8-max" in ids
     assert "qoder/qwen3.8-flash" in ids
     assert "qoder/glm-5.3" in ids
     assert "qoder/kimi-k3" in ids
-    assert "qoder/glm-5.2" in ids
     # 隐藏/停用/消失的：不展示
     assert "qoder/auto" not in ids
     assert "qoder/qwen3.7-max" not in ids
+    assert "qoder/glm-5.2" not in ids
+    assert "qoder/kimi-k2.8-preview" not in ids
+    assert "qoder/minimax-m2.7" not in ids
     assert "qoder/cantus" not in ids
+    # 隐藏只影响目录展示，已有客户端仍可按别名解析到上游 key。
+    catalog = Catalog(REGIONS["cn"])
+    assert catalog.resolve_key("qoder/glm-5.2") == "gm51model"
+    assert catalog.resolve_key("qoder/kimi-k2.8-preview") == "kmodel"
+    assert catalog.resolve_key("qoder/minimax-m2.7") == "mmodel"
 
 
 def test_models_does_not_list_openai_style_ids():
