@@ -300,7 +300,7 @@ def _assert_paced(native_env, n: int) -> None:
     state = native_env[0]
     quiet = tp_impl._REJECT_QUIET_S
     assert len(state._sleeps) == n
-    assert all(14.0 < s <= quiet for s in state._sleeps), state._sleeps
+    assert all(quiet - 1.0 < s <= quiet for s in state._sleeps), state._sleeps
 
 
 def test_native_4001_falls_back_to_legacy(client, native_env):
