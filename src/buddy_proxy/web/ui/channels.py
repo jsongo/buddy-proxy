@@ -705,13 +705,32 @@ async def ui_dumate_accounts_order(request: Request):
 
 @app.get("/ui/api/codebuddy/accounts")
 async def ui_codebuddy_accounts(request: Request):
-    """codebuddy 各账号本地凭证/冷却状态（纯本地不触网，不含秘密）。"""
+    """codebuddy（CN 区）各账号本地凭证/冷却状态（纯本地不触网，不含秘密）。
+
+    只下发 region=cn 的账号，``index`` 按区内位次——海外版账号由
+    ``/ui/api/codebuddyintl/accounts`` 单独下发，两张卡的序号各数各的。
+    """
     _ensure_local(request)
     try:
         from ...codebuddy_provider import failover
     except Exception:
         raise HTTPException(status_code=503, detail={"error": {"message": "codebuddy 通道不可用"}})
-    return await asyncio.to_thread(failover.accounts_status)
+    return await asyncio.to_thread(failover.accounts_status, "cn")
+
+
+@app.get("/ui/api/codebuddyintl/accounts")
+async def ui_codebuddyintl_accounts(request: Request):
+    """codebuddyintl（海外版）各账号本地凭证/冷却状态（纯本地不触网，不含秘密）。
+
+    与 CN 卡共用账号 store，按 region=global 过滤；字段与 CN 卡同构，
+    前端照 qoderintl 的先例渲染独立的海外版额度卡。
+    """
+    _ensure_local(request)
+    try:
+        from ...codebuddy_provider import failover
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codebuddy 通道不可用"}})
+    return await asyncio.to_thread(failover.accounts_status, "global")
 
 
 @app.post("/ui/api/codebuddy/accounts/order")
@@ -732,12 +751,19 @@ async def ui_codebuddy_accounts_order(request: Request):
     if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
         raise HTTPException(status_code=400,
                             detail={"error": {"message": "缺少 ids（账号 id 的完整顺序列表）"}})
+    region = body.get("region")
+    if region is not None and region not in ("cn", "global"):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": f"非法 region: {region!r}"}})
     try:
-        await asyncio.to_thread(creds.reorder_accounts, ids)
+        if region is None:
+            await asyncio.to_thread(creds.reorder_accounts, ids)
+        else:
+            await asyncio.to_thread(creds.reorder_accounts, ids, region)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
     from ...codebuddy_provider import failover
-    return await asyncio.to_thread(failover.accounts_status)
+    return await asyncio.to_thread(failover.accounts_status, region or "cn")
 
 
 @app.post("/ui/api/codebuddy/accounts/rename")
@@ -761,11 +787,14 @@ async def ui_codebuddy_accounts_rename(request: Request):
         raise HTTPException(status_code=400,
                             detail={"error": {"message": "别名过长（≤64 字符）"}})
     try:
-        await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
+        accounts = await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
+    # 回包按被改账号自己的 region 下发：海外卡 ✎ 与 CN 卡共用本端点，
+    # 回 CN 区列表会让海外卡快照（只含 global 账号）对不上号。
+    region = next((a.region for a in accounts if a.id == aid.strip()), "cn")
     from ...codebuddy_provider import failover
-    return await asyncio.to_thread(failover.accounts_status)
+    return await asyncio.to_thread(failover.accounts_status, region)
 
 
 @app.post("/ui/api/codebuddy/accounts/delete")
@@ -792,7 +821,7 @@ async def ui_codebuddy_accounts_delete(request: Request):
                             detail={"error": {"message": f"账号不存在: {aid}"}})
     from ...codebuddy_provider import failover
     await asyncio.to_thread(failover.clear_cooldown, aid)
-    return await asyncio.to_thread(failover.accounts_status)
+    return await asyncio.to_thread(failover.accounts_status, "cn")
 
 
 @app.get("/ui/api/codebuddy/usage-records")

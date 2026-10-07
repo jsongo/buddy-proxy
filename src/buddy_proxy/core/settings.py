@@ -162,11 +162,12 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 #: - ``xxx`` 压根不是通道名（如 ``openrouter/...``）→ 才轮到兜底逻辑。
 #:
 #: ``workbuddy`` 是 ``codebuddy`` 的旧称，不单列：归一在 ``model_key`` 里做。
-#: ``traeintl`` / ``qoderintl`` 与 ``traepat`` 同理：没有独立开关，只在有海外区
-#: 账号时挂到 ``--trae`` / ``--qoder`` 分支下注册。
+#: ``traeintl`` / ``qoderintl`` / ``codebuddyintl`` 与 ``traepat`` 同理：没有
+#: 独立开关，只在有海外区账号时挂到 ``--trae`` / ``--qoder`` / codebuddy 主通道
+#: 分支下注册。
 KNOWN_PROVIDER_IDS = frozenset(
-    {"codebuddy", "zcode", "glm", "mimo", "qoder", "qoderintl", "doubao", "dumate",
-     "trae", "traepat", "traeintl", "kimi"}
+    {"codebuddy", "codebuddyintl", "zcode", "glm", "mimo", "qoder", "qoderintl",
+     "doubao", "dumate", "trae", "traepat", "traeintl", "kimi"}
 )
 
 #: 通道没启用时，告诉用户**怎么启用**。值是要打印给用户看的短句。
@@ -189,6 +190,7 @@ PROVIDER_ENABLE_HINTS: dict[str, str] = {
     # 海外通道同样没独立开关：先登录海外区账号，再开 --trae / --qoder
     "traeintl": "先 `buddy login trae --region global` 登录海外账号，再加 --trae",
     "qoderintl": "先 `buddy login qoder --region global` 登录海外账号，再加 --qoder",
+    "codebuddyintl": "先 `buddy login codebuddy --region global` 登录海外账号，重启 Buddy 自动注册",
     "kimi": "加 --kimi（或设 KIMI_ENABLED=1）",
     # codebuddy 是默认通道，进到这里只可能是「认得但没注册」的异常态
     "codebuddy": "检查启动参数（codebuddy 是默认通道，不应缺失）",

@@ -192,6 +192,13 @@ class CodeBuddyProvider(BaseProvider):
     # WorkBuddy/CodeBuddy IDE 提供每日签到（billing/meter，2026-09 从 IDE asar 反查）
     supports_checkin = True
 
+    def __init__(self, region: str = "cn") -> None:
+        # 账号归属区（cn/global）。CN 通道默认 cn；海外版（codebuddyintl）
+        # 子类钉 global——两通道共用同一账号 store，但 failover/签到/额度
+        # 各自只看自己区的账号，绝不互捞。
+        self._region = region
+        super().__init__()
+
     def models(self) -> list[dict[str, Any]]:
         # CodeBuddy 的模型列表由 /v1/models 统一从本地配置加载，
         # 此处返回空（不参与 provider 路由的模型合并，避免重复）。
@@ -211,14 +218,15 @@ class CodeBuddyProvider(BaseProvider):
     _quota_tag = "CodeBuddy"
 
     def _accounts_for_benefits(self) -> list[Any]:
-        """签到遍历的账号列表（全量，不剔除冷却中的）。
+        """签到/额度遍历的账号列表：**本区全量**，不剔除冷却中的。
 
         冷却挡的是模型转发（quota/限流退避），签到的 billing 面与它无关；
         按冷却过滤会把在冷却的账号整条从签到卡里藏掉（2026-10-07 用户实报：
         双号只显示一个、「每日」只算一半）。全量枚举后位次天然与账号快照
         一致，display_index 的对位问题也随之消失。
+        海外版（region=global）只取本区账号，与 CN 互不混用（#131）。
         """
-        return creds.list_accounts()
+        return [a for a in creds.list_accounts() if a.region == self._region]
 
     def _checkin_status_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """把上游 checkin-activity-status envelope 收拢成统一签到状态。"""
@@ -296,10 +304,11 @@ class CodeBuddyProvider(BaseProvider):
         acct_details: list[dict[str, Any]] = []
         enabled_any = False
         total_daily = 0.0  # 「每日 +X」chip 用：多账号显示总和（前端带「（N账号）」）
-        # 展示序号一律取 failover.display_index()（与 /ui 账号快照同源）。
-        # accounts 已是全量列表，与快照位次一致，但序号仍从同一来源取——
-        # 别处的子集过滤（历史教训）不能再把位次对歪。
-        didx = failover.display_index()
+        # 展示序号一律取 failover.display_index(self._region)（与 /ui 账号
+        # 快照同源；区内编号）。accounts 已是本区全量列表、与区内快照位次
+        # 一致，但序号仍从同一来源取——别处的子集过滤（历史教训）不能再把
+        # 位次对歪。
+        didx = failover.display_index(self._region)
         for pos, acct in enumerate(accounts, 1):
             i = didx.get(acct.id, pos)
             # 显示名 alias 优先（管理页 ✎ 改的名）；id 一并下发——明细行的
@@ -375,7 +384,7 @@ class CodeBuddyProvider(BaseProvider):
                 "message": payload.get("msg", ""),
             }
 
-        didx = failover.display_index()
+        didx = failover.display_index(self._region)
         total_credits: float = 0.0
         any_claimed = False
         messages: list[str] = []
@@ -432,13 +441,13 @@ class CodeBuddyProvider(BaseProvider):
         """
         accounts = self._accounts_for_benefits()
         if not accounts:
-            log.warning("codebuddy 额度查询失败: 所有账号均在冷却中")
+            log.warning("codebuddy 额度查询失败: 无本区账号")
             return None
         multi = len(accounts) > 1
-        # 展示序号取 failover.display_index()（与 /ui 账号快照同源，理由同
-        # checkin_status：额度块按序号对上账号后 ✕ 删除/▲▼ 顺位拿到的才是
-        # 同一个账号，删号是不可逆的）。
-        didx = failover.display_index()
+        # 展示序号取 failover.display_index(self._region)（与 /ui 账号快照
+        # 同源，理由同 checkin_status：额度块按序号对上账号后 ✕ 删除/▲▼ 顺位
+        # 拿到的才是同一个账号，删号是不可逆的）。
+        didx = failover.display_index(self._region)
         items: list[dict[str, Any]] = []
         failed: list[str] = []
         level = None
@@ -457,7 +466,7 @@ class CodeBuddyProvider(BaseProvider):
                          for p in packs)
         if failed:
             items.insert(0, {
-                "label": "CodeBuddy 额度查询失败",
+                "label": f"{self._quota_tag} 额度查询失败",
                 "used": None, "total": None,
                 "remaining": f"{len(failed)}/{len(accounts)} 个账号取不到额度"
                              f"（{'、'.join(failed)}）",
@@ -613,12 +622,13 @@ class CodeBuddyProvider(BaseProvider):
         upstream_body.setdefault("stream_options", {"include_usage": True})
 
         # ---- 多账号 failover：按顺位试可用账号，账号级错误冷却换号 ----
-        accounts = failover.available_accounts()
+        accounts = failover.available_accounts(self._region)
         if not accounts:
+            hint = "" if self._region == "cn" else "（海外版）"
             raise HTTPException(
                 status_code=429,
                 detail={"error": {
-                    "message": (f"codebuddy 所有账号均在冷却中：{failover.cooldown_report()}"
+                    "message": (f"codebuddy{hint} 所有账号均在冷却中：{failover.cooldown_report()}"
                                 "；额度冷却到点自动恢复"),
                     "type": "rate_limit_error"}})
         last_exc: BaseException | None = None
@@ -684,7 +694,7 @@ class CodeBuddyProvider(BaseProvider):
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
-        url = creds.endpoint() + "/v2/chat/completions"
+        url = creds.endpoint(str(cred.get("region") or "cn")) + "/v2/chat/completions"
 
         # 🔍 调试：输出实际发送的IDE识别headers
         state = get_state()

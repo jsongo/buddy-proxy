@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 # 别名归一：workbuddy 是 codebuddy 的旧称/别称（腾讯 WorkBuddy 同一产品线），
 # 用户两种名字都可能敲，这里统一映射。
@@ -46,6 +47,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     # 隐含 region=global（见 _resolve_provider_region 的冲突检查）。
     "traeintl": "trae",
     "qoderintl": "qoder",
+    "codebuddyintl": "codebuddy",
 }
 
 KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi")
@@ -95,14 +97,27 @@ def _pick_region(provider_label: str, cli_region: str | None, *, default_key: st
     return default_key
 
 
-def _login_codebuddy(open_browser: bool = True, **_kwargs) -> int:
-    """CodeBuddy（copilot.tencent.com）浏览器 OAuth 登录。"""
+def _login_codebuddy(open_browser: bool = True, region: str | None = None,
+                     **_kwargs) -> int:
+    """CodeBuddy 浏览器 OAuth 登录（region=cn/global，默认 cn）。
+
+    海外版（www.codebuddy.ai）与 CN 协议同构，只是换 host + 独立 session
+    文件：不能写进 CN 的历史 session 路径（~/.codebuddy-session.json），否则
+    首次触达的 legacy 迁移会把海外账号并进 CN 区。
+    """
     import json
 
     from buddy_proxy.codebuddy_provider.client import CodeBuddyClient, CodeBuddyError
+    from buddy_proxy.codebuddy_provider.credentials import endpoint as cb_endpoint
 
-    endpoint = os.getenv("CODEBUDDY_ENDPOINT", "https://copilot.tencent.com")
-    client = CodeBuddyClient(endpoint)
+    region = region or "cn"
+    endpoint = cb_endpoint(region)
+    if region == "global":
+        session_file = Path(os.getenv("CODEBUDDY_INTL_SESSION", "")
+                            .strip() or str(Path.home() / ".codebuddy-session-global.json"))
+        client = CodeBuddyClient(endpoint, session_file=session_file)
+    else:
+        client = CodeBuddyClient(endpoint)
     # login() 只落盘 session 文件、不更新内存 session，且浏览器超时会静默返回。
     # 因此以「文件前后快照是否变化」判定登录是否真的完成：直接读内存旧会话
     # 会把超时误判成成功（旧 session 里还留着死 token），或把首登误判成失败。
@@ -139,6 +154,7 @@ def _login_codebuddy(open_browser: bool = True, **_kwargs) -> int:
         from buddy_proxy.codebuddy_provider import credentials as cb_creds
 
         cred = cb_creds.session_to_cred(session)
+        cred["region"] = region
         ref = cb_creds.save_account_cred(cred)
         accounts = cb_creds.list_accounts()
         pos = next((i + 1 for i, a in enumerate(accounts) if a.id == ref.id), "?")
@@ -146,7 +162,8 @@ def _login_codebuddy(open_browser: bool = True, **_kwargs) -> int:
         print(f"[!] 登录成功但写入多账号 store 失败: {exc}", file=sys.stderr)
         pos = None
     print()
-    print(f"[OK] CodeBuddy 登录成功（{endpoint}）")
+    tag = "CodeBuddy 海外版" if region == "global" else "CodeBuddy"
+    print(f"[OK] {tag} 登录成功（{endpoint}）")
     if account.get("nickname") or account.get("uid"):
         print(f"    账号: {account.get('nickname') or ''} uid={account.get('uid')}")
     if pos is not None:
@@ -767,15 +784,16 @@ _DISPATCH = {
 def _resolve_provider_region(raw: str, cli_region: str | None) -> tuple[str, str | None]:
     """provider 名归一 + intl 登录别名的隐含区域。
 
-    ``traeintl``/``qoderintl`` 是通道 id（服务端海外版 provider），登录侧没有
-    独立入口——别名落到主 provider 并隐含 ``region=global``（账号落盘打 region
-    标，重启后 ``intl_enabled()`` 检测到海外账号自动注册通道）。显式给了别的
-    ``--region`` 时抛 ValueError，别让两个信号打架。
+    ``traeintl``/``qoderintl``/``codebuddyintl`` 是通道 id（服务端海外版
+    provider），登录侧没有独立入口——别名落到主 provider 并隐含
+    ``region=global``（账号落盘打 region 标，重启后 ``intl_enabled()`` 检测到
+    海外账号自动注册通道）。显式给了别的 ``--region`` 时抛 ValueError，别让
+    两个信号打架。
     """
     name = raw.strip().lower()
     provider = PROVIDER_ALIASES.get(name, name)
     region = cli_region
-    if name in ("traeintl", "qoderintl"):
+    if name in ("traeintl", "qoderintl", "codebuddyintl"):
         if region and region != "global":
             raise ValueError(
                 f"{name} 隐含 --region global（海外版），与 --region {region} 冲突")
@@ -789,13 +807,13 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi，默认 codebuddy")
+                        help="codebuddy(=workbuddy, =codebuddyintl 海外) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi 登录不自动打开浏览器，只打印链接")
     parser.add_argument("--region", default=None,
-                        help="trae/qoder 登录区域：cn（国内版）/ global（海外版）。"
+                        help="trae/qoder/codebuddy 登录区域：cn（国内版）/ global（海外版）。"
                              "不给且是交互终端时会问一句；两区账号不通用。"
-                             "traeintl/qoderintl 隐含 global")
+                             "traeintl/qoderintl/codebuddyintl 隐含 global")
     args = parser.parse_args()
 
     try:

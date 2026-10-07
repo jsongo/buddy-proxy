@@ -47,6 +47,11 @@ STATE_DIR_NAME = "codebuddy"
 #: 默认上游端点（与 CodeBuddyClient / --endpoint 的默认一致）。
 DEFAULT_ENDPOINT = "https://copilot.tencent.com"
 
+#: 海外版端点。CodeBuddy 桌面端 product-ide.json（intl）与 product-ide-cn.json
+#: 的唯一差异就是这个 host（2026-10 实测两边 /v2/plugin 协议逐字节同构），
+#: 海外账号只是换域名登录/转发，凭据形状与 CN 完全一致。
+INTL_ENDPOINT = "https://www.codebuddy.ai"
+
 #: 历史 CodeBuddyClient session 文件（迁移源；新装不再创建）。
 LEGACY_SESSION_NAME = ".codebuddy-session.json"
 
@@ -79,6 +84,9 @@ class AccountRef:
     # 本地别名（管理页 ✎ 改）：只改显示名，原始凭据里的 nickname 不动；
     # 空串 = 未设置（显示回退 nickname/uid/id）。upsert/重登不碰它。
     alias: str = ""
+    # 账号归属区：cn（国内版，copilot.tencent.com）/ global（海外版，
+    # www.codebuddy.ai）。历史条目无该字段一律视为 cn（存量不动）。
+    region: str = "cn"
 
 
 # ---------------------------------------------------------------------------
@@ -113,8 +121,15 @@ def legacy_session_path() -> Path:
     return Path.home() / LEGACY_SESSION_NAME
 
 
-def endpoint() -> str:
-    """上游端点（``CODEBUDDY_ENDPOINT`` 可覆盖；与 CodeBuddyClient 默认一致）。"""
+def endpoint(region: str = "cn") -> str:
+    """上游端点（与 CodeBuddyClient 默认一致）。
+
+    ``cn`` 走 ``CODEBUDDY_ENDPOINT`` / DEFAULT_ENDPOINT；``global`` 走
+    ``CODEBUDDY_INTL_ENDPOINT`` / INTL_ENDPOINT。缺省 cn——全部历史调用方
+    （client/老测试）不用感知海外版的存在。
+    """
+    if region == "global":
+        return os.environ.get("CODEBUDDY_INTL_ENDPOINT", "").strip() or INTL_ENDPOINT
     return os.environ.get("CODEBUDDY_ENDPOINT", "").strip() or DEFAULT_ENDPOINT
 
 
@@ -252,15 +267,19 @@ def derive_account_id(cred: dict[str, Any]) -> str:
 
     uid 首选（登录轮询 ``/v2/plugin/login/account`` 必带回，天然唯一且跨重登
     稳定）；拿不到退 ``acct-<sha256(token)[:12]>``——保证任何导入路径都落得了盘。
+
+    海外版（region=global）的 uid 可能与 CN 账号撞车（两家账号体系独立），
+    一律加 ``intl-`` 前缀隔离，CN 账号的 id 形状保持不变（存量零迁移）。
     """
     existing = str(cred.get("account_id") or "").strip()
     if existing and _ID_RE.fullmatch(existing):
         return existing
+    prefix = "" if str(cred.get("region") or "cn") == "cn" else "intl-"
     uid = str(cred.get("uid") or "").strip()
-    if uid and _ID_RE.fullmatch(uid):
-        return uid
+    if uid and _ID_RE.fullmatch(prefix + uid):
+        return prefix + uid
     digest = hashlib.sha256(str(cred.get("token") or "").encode()).hexdigest()[:12]
-    return f"acct-{digest}"
+    return f"{prefix}acct-{digest}"
 
 
 def _is_expired(cred: dict[str, Any], margin_ms: int = REFRESH_MARGIN_MS) -> bool:
@@ -303,6 +322,7 @@ def list_accounts() -> list[AccountRef]:
                 priority=int(e.get("priority") or 0),
                 added_at=int(e.get("added_at") or 0),
                 alias=str(e.get("alias") or ""),
+                region=str(e.get("region") or "cn"),
             ))
         if changed:
             _atomic_write_json(index_path(), _index_payload([asdict(a) for a in kept]))
@@ -348,7 +368,12 @@ def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
         rt = str(cred.get("refresh_token") or "")
         if not uid and not rt:
             return None
+        region = str(cred.get("region") or "cn")
         for e in entries:
+            # region 隔离：CN 与海外的账号体系独立，uid/refresh_token 撞车
+            # 也不能互并（否则会拿 A 区的顺位顶掉 B 区的凭据）。
+            if str(e.get("region") or "cn") != region:
+                continue
             other = load_account_cred(str(e.get("id") or "")) or {}
             if uid and str(other.get("uid") or "").strip() == uid:
                 return e
@@ -381,16 +406,21 @@ def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
             nickname=str(cred.get("nickname") or ""),
             priority=max((int(e.get("priority") or 0) for e in entries), default=-1) + 1,
             added_at=int(time.time()),
+            region=str(cred.get("region") or "cn"),
         )
         entries.append(asdict(ref))
         target = asdict(ref)
     target["uid"] = str(cred.get("uid") or target.get("uid") or "")
     target["nickname"] = str(cred.get("nickname") or target.get("nickname") or "")
+    # region 命中既有条目时以条目为准（存量条目视为 cn，不被覆盖）；
+    # 新条目已在 AccountRef 构造时带上 cred 的 region。
+    target.setdefault("region", str(cred.get("region") or "cn"))
     # alias 不在 upsert 覆写之列：它是用户手起的本地别名，重登不改
     ref = AccountRef(id=aid, uid=target["uid"], nickname=target["nickname"],
                      priority=int(target.get("priority") or 0),
                      added_at=int(target.get("added_at") or 0),
-                     alias=str(target.get("alias") or ""))
+                     alias=str(target.get("alias") or ""),
+                     region=str(target.get("region") or "cn"))
     _atomic_write_json(account_cred_path(ref.id), dict(cred))
     _atomic_write_json(index_path(), _index_payload(entries))
     return ref
@@ -411,21 +441,42 @@ def delete_account(account_id: str) -> bool:
     return True
 
 
-def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
-    """按给定 id 顺序重写全部账号的 priority（failover 顺位）。
+def reorder_accounts(ordered_ids: list[str],
+                     region: str | None = None) -> list[AccountRef]:
+    """按给定 id 顺序重写账号的 priority（failover 顺位）。
 
-    入参必须是**完整**的当前账号 id 列表（少一个/多一个/重复即拒绝）；
-    priority 重写为 0..n-1，added_at 原样保留。返回重排后的 list_accounts()。
+    ``region=None``：入参必须是**完整**的当前账号 id 列表（少一个/多一个/
+    重复即拒绝）——历史契约，全 CN 时代的行为不变。
+
+    ``region`` 给定（"cn"/"global"）：入参只须覆盖**该区**的全部账号 id，
+    其余区的账号保持现有相对顺位不动。双区共用一个 index.json，CN 面板
+    拿不到（也不该拿到）海外账号的 id，故按区分治。
+    priority 重写后全量仍保持 0..n-1 连续，added_at 原样保留。
+    返回重排后的 list_accounts()。
     """
     list_accounts()  # 先走唯一的枚举入口：自愈完再重排，别在残缺索引上动刀
     with _index_lock, _index_file_lock():
         entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
         current = [str(e.get("id") or "") for e in entries]
-        if sorted(ordered_ids) != sorted(current) or len(set(ordered_ids)) != len(ordered_ids):
-            raise ValueError(
-                f"重排必须提交完整的账号 id 列表（当前 {len(current)} 个，"
-                f"收到 {len(ordered_ids)} 个）")
-        rank = {aid: i for i, aid in enumerate(ordered_ids)}
+        if region is None:
+            new_order = ordered_ids
+            if sorted(new_order) != sorted(current) or len(set(new_order)) != len(new_order):
+                raise ValueError(
+                    f"重排必须提交完整的账号 id 列表（当前 {len(current)} 个，"
+                    f"收到 {len(ordered_ids)} 个）")
+        else:
+            entries.sort(key=lambda e: (int(e.get("priority") or 0), int(e.get("added_at") or 0)))
+            in_region = [e for e in entries if str(e.get("region") or "cn") == region]
+            in_ids = [str(e.get("id") or "") for e in in_region]
+            if sorted(ordered_ids) != sorted(in_ids) or len(set(ordered_ids)) != len(ordered_ids):
+                raise ValueError(
+                    f"重排必须提交 {region} 区完整的账号 id 列表"
+                    f"（该区当前 {len(in_ids)} 个，收到 {len(ordered_ids)} 个）")
+            # 只在该区自己的位置段内重排：把新序按序填回该区原本占据的坑位
+            it = iter(ordered_ids)
+            new_order = [next(it) if str(e.get("id") or "") in set(in_ids)
+                         else str(e.get("id") or "") for e in entries]
+        rank = {aid: i for i, aid in enumerate(new_order)}
         for e in entries:
             e["priority"] = rank[str(e.get("id") or "")]
         _atomic_write_json(index_path(), _index_payload(entries))
@@ -556,7 +607,7 @@ def refresh_account_cred(cred: dict[str, Any]) -> dict[str, Any]:
         headers["X-Auth-Refresh-Source"] = "plugin"
         try:
             resp = httpx.post(
-                f"{endpoint()}/v2/plugin/auth/token/refresh",
+                f"{endpoint(str(cred.get('region') or 'cn'))}/v2/plugin/auth/token/refresh",
                 json={},
                 headers={"Accept": "application/json", **headers},
                 timeout=30,
@@ -649,6 +700,7 @@ def api_post_as(account_id: str, path: str, body: Any = None, *,
     benefits 层经 ``asyncio.to_thread`` 调用，不卡事件循环。
     """
     token, cred = ensure_account_token(account_id)
+    base = endpoint(str(cred.get("region") or "cn"))
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; Genie-IDE/1.0)",
         "Accept": "application/json",
@@ -656,7 +708,7 @@ def api_post_as(account_id: str, path: str, body: Any = None, *,
         "Content-Type": "application/json",
         **auth_headers_from_cred({**cred, "token": token}),
     }
-    resp = httpx.post(f"{endpoint()}{path}",
+    resp = httpx.post(f"{base}{path}",
                       json={} if body is None else body,
                       headers=headers, timeout=timeout)
     if resp.status_code != 200:
