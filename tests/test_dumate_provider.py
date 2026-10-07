@@ -450,6 +450,9 @@ def test_checkin_status_parses_login_bonus_info():
     assert st["total_points"] == 1000
     assert st["daily_credit"] == 500
     assert st["sign_in_days"] == ["2026-10-02", "2026-10-05"]
+    # 每日零点轮换（本地推断）：卡片「下次 明天 00:00」chip 用
+    assert isinstance(st["next_ts"], int) and st["next_ts"] > 0
+    assert st["next_ts_source"] == "inferred"
 
 
 def test_checkin_status_none_when_not_logged_in():

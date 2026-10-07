@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from ..core.checkin import SOURCE_INFERRED, next_daily_reset
 from .cookies import resolve_bceconsole_auth
 
 log = logging.getLogger(__name__)
@@ -77,6 +78,10 @@ def _parse_status_payload(data: dict[str, Any]) -> dict[str, Any]:
                               / max(int(result.get("totalTimes") or 1), 1)),
         # signInDays 是真实签到日期列表，交给 BenefitsManager 记日历
         "sign_in_days": result.get("signInDays") or [],
+        # 每日零点轮换（百度签到按自然日），上游没给时间字段——同 trae/codebuddy
+        # 按本地零点推断，标 inferred，界面注明。
+        "next_ts": next_daily_reset(),
+        "next_ts_source": SOURCE_INFERRED,
     }
 
 

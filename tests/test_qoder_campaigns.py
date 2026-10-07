@@ -275,6 +275,9 @@ def test_status_aggregation_carries_daily_credit_top_and_per_account(monkeypatch
     assert st["daily_credit"] == 200
     assert st["benefit_kind"] == "CREDITS"
     assert st["activity_name"] == "act-20260923-556"
+    # 「下次/截止」也要下发：单账号分支原样返回带着，聚合丢了卡片就没时间 chip
+    assert st["next_ts"] == 1790647140
+    assert st["next_ts_source"] == "upstream"
     for row in st["accounts"]:
         assert row["daily_credit"] == 100
         assert row["activity_name"] == "act-20260923-556"
