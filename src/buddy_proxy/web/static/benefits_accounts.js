@@ -81,9 +81,12 @@ function acctSubHtml(a, subExtra, dataAttr) {
  *  预填的当前显示名不内联进 onclick——alias 是用户自由文本（引号/反斜杠都可能有），
  *  字符串字面量拼参数会碎；prompt 里按 id 从各通道快照现查。 */
 function acctRenameButton(pid, acct) {
+  // 共用账号池的通道在按钮层就映射到实际 rename 端点（qoderintl 与 qoder
+  // 同池同端点）——按钮 → 弹窗 → 提交整条链路只认端点 pid，不必每处特判。
+  const ep = pid === 'qoderintl' ? 'qoder' : pid;
   return acct
     ? `<button class="ghost" title="重命名该账号（只改显示名，凭据不动）" ` +
-      `onclick="acctRenamePrompt('${pid}','${acct.id}')">✎</button>` : '';
+      `onclick="acctRenamePrompt('${ep}','${acct.id}')">✎</button>` : '';
 }
 
 /** 改名弹窗（四通道共用，复用 index.html 的 overlay/modal 骨架）。
@@ -123,10 +126,7 @@ async function acctRenameSubmit(pid, id) {
   const input = document.getElementById('acct-rename-input');
   const alias = input ? input.value.trim() : '';
   try {
-    // qoderintl 与 qoder 共用同一账号池：后端 rename 端点只有一个（按 id 改
-    // 任意区账号），海外号的 ✎ 也打到 qoder 的 endpoint 上。
-    const ep = pid === 'qoderintl' ? 'qoder' : pid;
-    const r = await api(`/ui/api/${ep}/accounts/rename`, {
+    const r = await api(`/ui/api/${pid}/accounts/rename`, {
       method: 'POST', body: JSON.stringify({id, alias}),
     });
     // 就地更新快照（各面板的全局数组）+ 立即重渲，不等 30s 轮询。
@@ -151,7 +151,7 @@ async function acctRenameSubmit(pid, id) {
     }
     // Trae/Qoder 签到明细行的名字来自后端，不在明细里复制 alias——照 rename
     // 响应就地改 name，免得要等下轮 benefits 轮询才看到新名字。
-    if ((pid === 'trae' || pid === 'qoder' || pid === 'qoderintl') &&
+    if ((pid === 'trae' || pid === 'qoder') &&
         typeof BENEFITS !== 'undefined' && BENEFITS.providers) {
       const st = (r.accounts || []).find(x => x.id === id) || {};
       const displayName = pid === 'trae'
