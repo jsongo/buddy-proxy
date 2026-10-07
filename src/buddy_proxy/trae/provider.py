@@ -813,9 +813,12 @@ class TraeProvider(BaseProvider):
                 # 是 codebuddy observability._instrument 放入的 dict，离线/测试等
                 # 未经 _instrument 的场景为 None，直接跳过。PAT 子类不走这里
                 # （pat/chat.py 自己写 meta["account"]）。
+                # 落库统一写稳定 id，名字由展示端按当前 alias 链解析
+                # （web/ui/queries._account_name_map）——写死名字的话改名后
+                # 历史日志行跟不上。
                 meta = ACCOUNT_META.get()
                 if meta is not None:
-                    meta["account"] = acct.alias or acct.nickname or acct.id
+                    meta["account"] = acct.id
                 try:
                     return await self._forward_once(
                         body, protocol, original, requested_model, prompt,

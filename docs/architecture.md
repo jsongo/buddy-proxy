@@ -111,7 +111,15 @@ other index write) is the sole writer of `alias`; the HTTP surface is
 `ValueError` → 404). Display names everywhere run one chain
 (`alias > name/email/nickname > id`) in `failover.accounts_status()`, trae
 check-in detail rows and the frontend panels, so the quota card and the
-check-in card never disagree about who is who.
+check-in card never disagree about who is who. The request log follows the
+same rule via **store-id / resolve-at-display**: forward paths write the
+stable account id into `metrics` `account` (trae used to write the alias at
+request time — that froze old rows on a stale name), and `/ui/api/logs`
+attaches `account_name` resolved through the per-channel `accounts_status`
+alias chain (`web/ui/queries._account_name_map`, 60 s cache, local reads
+only), so a rename retroactively relabels every historical row. Rows that
+cannot be resolved (pre-change trae rows, deleted accounts) pass through
+untouched.
 
 **qoder's model catalog is per-account.** The upstream model list is bucketed
 by account (a risk-controlled account may only see the Qwen3.8 pair while a

@@ -212,6 +212,10 @@
   td { padding: 8px 10px; border-bottom: 1px solid rgba(38,47,60,.55); vertical-align: middle; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(79,140,255,.04); }
+  /* 请求日志「通道」列的账号名：alias 是用户自由文本（rename 允许 64 字符），
+     不限宽会把整行撑开；完整原始值已在 hover title 里 */
+  .acct-name { display: inline-block; max-width: 14em; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
   .muted { color: var(--muted); }
   /* 模型分组：注意不能用 overflow:hidden（会禁掉内部 position:sticky 吸顶） */
