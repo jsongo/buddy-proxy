@@ -594,8 +594,9 @@ async function loadQoderAccounts() {
 }
 
 
-// ---- QODER INTL 面板（只读额度；账号名/副标题来自共享账号接口的 global 区条目，
-//      管理操作（✎/▲▼/✕）仍在 Qoder 主卡，海外卡不重复）----
+// ---- QODER INTL 面板（额度 + ✎ 改名；▲▼/✕ 仍在 Qoder 主卡——主卡只管 CN 账号，
+//      海外号此前无任何改名入口、显示链只能落到 UUID，故 ✎ 落在本卡；
+//      rename 走 qoder 的共享端点，见 acctRenameSubmit 的 pid 映射）----
 let INTL_ACCTS = null;  // 最近一次 accounts 快照的 global 区子集；render 先用，防 30s 闪回「Global」
 
 function renderQoderIntlPanel() {
@@ -627,7 +628,8 @@ function renderQoderIntlPanel() {
     return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-qoderintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>` +
       `${_qoder_sub_html(acct, false)}` +
       `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
-      `${quotaItemsHtml(its, 'qoderintl:' + grp)}</div>`;
+      `${quotaItemsHtml(its, 'qoderintl:' + grp)}` +
+      `${acct ? `<span class="ag-move">${acctRenameButton('qoderintl', acct)}</span>` : ''}</div>`;
   }).join('');
   const noticeHtml = notices.map(quotaItemHtml).join('');
   panel.innerHTML = `

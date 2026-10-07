@@ -81,9 +81,12 @@ function acctSubHtml(a, subExtra, dataAttr) {
  *  预填的当前显示名不内联进 onclick——alias 是用户自由文本（引号/反斜杠都可能有），
  *  字符串字面量拼参数会碎；prompt 里按 id 从各通道快照现查。 */
 function acctRenameButton(pid, acct) {
+  // 共用账号池的通道在按钮层就映射到实际 rename 端点（qoderintl 与 qoder
+  // 同池同端点）——按钮 → 弹窗 → 提交整条链路只认端点 pid，不必每处特判。
+  const ep = pid === 'qoderintl' ? 'qoder' : pid;
   return acct
     ? `<button class="ghost" title="重命名该账号（只改显示名，凭据不动）" ` +
-      `onclick="acctRenamePrompt('${pid}','${acct.id}')">✎</button>` : '';
+      `onclick="acctRenamePrompt('${ep}','${acct.id}')">✎</button>` : '';
 }
 
 /** 改名弹窗（四通道共用，复用 index.html 的 overlay/modal 骨架）。
@@ -136,6 +139,7 @@ async function acctRenameSubmit(pid, id) {
     const snaps = [
       (typeof AG_ACCTS !== 'undefined' ? AG_ACCTS : null),
       (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : null),
+      (typeof INTL_ACCTS !== 'undefined' ? INTL_ACCTS : null),
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : null),
       (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : null),
       (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : null),
@@ -161,6 +165,7 @@ async function acctRenameSubmit(pid, id) {
     if (typeof renderAntigravityPanel === 'function') renderAntigravityPanel();
     if (typeof renderKimiPanel === 'function') renderKimiPanel();
     if (typeof renderQoderPanel === 'function') renderQoderPanel();
+    if (typeof renderQoderIntlPanel === 'function') renderQoderIntlPanel();
     if (typeof renderTraePanel === 'function') renderTraePanel();
     if (typeof renderCodebuddyPanel === 'function') renderCodebuddyPanel();
     if (typeof renderBenefits === 'function') renderBenefits();
