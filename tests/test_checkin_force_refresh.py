@@ -108,5 +108,6 @@ def test_refresh_checkin_posts_checkin_flag():
     assert "/ui/api/benefits/refresh" in fn
     assert "loadData(['benefits']" in fn, "刷完要立刻重拉渲染"
     assert "刷新中…" in fn, "多账号逐号真查最坏十几秒，必须给反馈"
-    assert "CKREFRESH" in fn and js.index("const CKREFRESH") < fn.index("CKREFRESH"), \
-        "在飞标记放模块级：30s 轮询重建 innerHTML 会把按钮态刷掉（QREFRESH 同款坑）"
+    assert "CKREFRESH[pid]" in fn, "在飞标记要真用上（30s 轮询重建 innerHTML 会把按钮态刷掉）"
+    assert js.index("const CKREFRESH") < js.index("async function refreshCheckin"), \
+        "在飞标记放模块级（QREFRESH 同款坑），不能挂在会被重建的 DOM/闭包里"
