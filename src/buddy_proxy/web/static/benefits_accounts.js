@@ -123,7 +123,10 @@ async function acctRenameSubmit(pid, id) {
   const input = document.getElementById('acct-rename-input');
   const alias = input ? input.value.trim() : '';
   try {
-    const r = await api(`/ui/api/${pid}/accounts/rename`, {
+    // qoderintl 与 qoder 共用同一账号池：后端 rename 端点只有一个（按 id 改
+    // 任意区账号），海外号的 ✎ 也打到 qoder 的 endpoint 上。
+    const ep = pid === 'qoderintl' ? 'qoder' : pid;
+    const r = await api(`/ui/api/${ep}/accounts/rename`, {
       method: 'POST', body: JSON.stringify({id, alias}),
     });
     // 就地更新快照（各面板的全局数组）+ 立即重渲，不等 30s 轮询。
@@ -136,6 +139,7 @@ async function acctRenameSubmit(pid, id) {
     const snaps = [
       (typeof AG_ACCTS !== 'undefined' ? AG_ACCTS : null),
       (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : null),
+      (typeof INTL_ACCTS !== 'undefined' ? INTL_ACCTS : null),
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : null),
       (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : null),
       (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : null),
@@ -147,7 +151,7 @@ async function acctRenameSubmit(pid, id) {
     }
     // Trae/Qoder 签到明细行的名字来自后端，不在明细里复制 alias——照 rename
     // 响应就地改 name，免得要等下轮 benefits 轮询才看到新名字。
-    if ((pid === 'trae' || pid === 'qoder') &&
+    if ((pid === 'trae' || pid === 'qoder' || pid === 'qoderintl') &&
         typeof BENEFITS !== 'undefined' && BENEFITS.providers) {
       const st = (r.accounts || []).find(x => x.id === id) || {};
       const displayName = pid === 'trae'
@@ -161,6 +165,7 @@ async function acctRenameSubmit(pid, id) {
     if (typeof renderAntigravityPanel === 'function') renderAntigravityPanel();
     if (typeof renderKimiPanel === 'function') renderKimiPanel();
     if (typeof renderQoderPanel === 'function') renderQoderPanel();
+    if (typeof renderQoderIntlPanel === 'function') renderQoderIntlPanel();
     if (typeof renderTraePanel === 'function') renderTraePanel();
     if (typeof renderCodebuddyPanel === 'function') renderCodebuddyPanel();
     if (typeof renderBenefits === 'function') renderBenefits();

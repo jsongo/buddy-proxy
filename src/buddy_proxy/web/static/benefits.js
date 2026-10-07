@@ -214,7 +214,7 @@ function renderBenefits() {
           : '<span class="br-state ok">已签到</span>');
       const extra = a.message ? `<span class="muted" style="font-size:11px">${esc(a.message)}</span>` : '';
       return `<div class="ck-acct">${s}<span class="ck-acct-name">${esc(a.name || ('#' + a.index))}</span>` +
-        `${a.id && p.id !== 'qoderintl' ? acctRenameButton(p.id, a) : ''}${extra}</div>`;
+        `${a.id ? acctRenameButton(p.id, a) : ''}${extra}</div>`;
     }).join('');
     // 照 antigravity 面板的卡中卡（pat-pkg）包一层：两列平摊时裸行 + 底线
     // 会把左右两列糊成一片，子卡（亮底 + 描边 + 圆角）分隔一眼能看出来
