@@ -61,7 +61,11 @@ document.addEventListener('visibilitychange', syncPatStatusAuto);
 
 // 强刷单通道签到状态：绕过 5 分钟快照缓存真打上游（多账号通道逐号重查，
 // 最坏十几秒——和 claimNow 同理必须给反馈，否则像「点了没反应」）。
+const CKREFRESH = {};  // pid -> 在飞标记：trae 强刷十几秒，30s 轮询会整页重建
+                       // innerHTML 把按钮态刷掉（又能再点），照 QREFRESH 放模块级
 async function refreshCheckin(pid, btn) {
+  if (CKREFRESH[pid]) return;
+  CKREFRESH[pid] = true;
   if (btn) { btn.disabled = true; btn.textContent = '刷新中…'; }
   const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '强刷'; } };
   try {
@@ -71,7 +75,10 @@ async function refreshCheckin(pid, btn) {
     await loadData(['benefits'], true);
     toast(`✓ ${pid} 签到状态已强刷`);
   } catch (e) { toast('刷新失败: ' + e.message, true); }
-  finally { restore(); }
+  finally {
+    CKREFRESH[pid] = false;
+    restore();
+  }
 }
 
 async function claimNow(pid, btn) {
