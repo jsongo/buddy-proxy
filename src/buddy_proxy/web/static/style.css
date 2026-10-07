@@ -400,8 +400,16 @@
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .pat-head .name { font-weight: 600; }
   .pat-head .grow { flex: 1; }
-  .pat-quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 22px; }
-  @media (max-width: 720px) { .pat-quota-grid { grid-template-columns: 1fr; } }
+  /* 轨道必须写 minmax(0, 1fr) 而不是 1fr：后者的隐含下限是内容的 min-content
+     （= minmax(auto, 1fr)）。额度网关不可达时第一块是那条长说明条（「Trae PAT
+     (服务账号直连) · PAT 额度网关不可达 剩 10/10 个账号本轮未取到新数据（网络
+     不可达）；下方为上次成功查询的缓存…」），1fr 会让左列被它撑到 900px+、右列
+     的账号卡被挤到 400px 并整体顶出卡片右缘——就是用户截图里的「账号卡片超出了
+     父容器」。minmax(0, …) 把下限压到 0，两列严格等宽，长文本按 .qlabel 的省略
+     号收起。这条对共用该类的一票面板（trae PAT / antigravity / kimi / qoder /
+     codebuddy / dumate）一起生效，别改回 1fr。 */
+  .pat-quota-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 22px; }
+  @media (max-width: 720px) { .pat-quota-grid { grid-template-columns: minmax(0, 1fr); } }
   /* 账号块 = 卡中卡：背景亮一档 + 描边 + 圆角。原先只有一条 rgba(.4) 的
      底线，两栏并排时两个账号的额度内容直接糊成一片（用户截图：分隔看不
      出来）。trae PAT / antigravity / kimi 三个面板共用这个类，一起变样。 */
@@ -428,8 +436,8 @@
   .pat-acct { display: flex; gap: 8px; align-items: center; padding: 3px 0;
               border-bottom: 1px solid rgba(38,47,60,.4); font-size: 12px; }
   .pat-keeper { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .pat-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
-  @media (max-width: 720px) { .pat-cols { grid-template-columns: 1fr; } }
+  .pat-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 14px; }
+  @media (max-width: 720px) { .pat-cols { grid-template-columns: minmax(0, 1fr); } }
   .pat-col-head { display: flex; align-items: center; gap: 8px; font-size: 12px;
                   color: var(--muted); margin-bottom: 8px; }
   .pat-col-head .grow { flex: 1; }
