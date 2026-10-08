@@ -73,8 +73,10 @@ src/buddy_proxy/
   (delete-confirm modal / move / delete / snapshot backfill) that new
   multi-account channels reuse, `benefits_checkin.js` the checkin rows + Kimi
   panel, `benefits_panels.js` the Trae PAT / Antigravity / Qoder panels.
-  It may update runtime settings but must use `core/settings.py` for
-  persistence.
+  The panel mount order in `index.html` is also the visible quota-card order:
+  Kimi stays immediately above DuMate, while the operational Trae PAT card is
+  intentionally last. It may update runtime settings but must use
+  `core/settings.py` for persistence.
 
 ## Runtime composition
 
@@ -117,9 +119,10 @@ stable account id into `metrics` `account` (trae used to write the alias at
 request time — that froze old rows on a stale name), and `/ui/api/logs`
 attaches `account_name` resolved through the per-channel `accounts_status`
 alias chain (`web/ui/queries._account_name_map`, 60 s cache, local reads
-only), so a rename retroactively relabels every historical row. Rows that
-cannot be resolved (pre-change trae rows, deleted accounts) pass through
-untouched.
+only), so a rename retroactively relabels every historical row. Trae PAT has
+no aliases; its local profile list resolves an id to `PAT #N（id）`, matching
+the quota-card title. Rows that cannot be resolved (pre-change trae rows,
+deleted accounts) pass through untouched.
 
 **qoder's model catalog is per-account.** The upstream model list is bucketed
 by account (a risk-controlled account may only see the Qwen3.8 pair while a
@@ -182,7 +185,10 @@ benefits, and unrelated model routes in the same process.
 ## Models and settings
 
 - `web/models_config.json` is the source for static CodeBuddy/PAT catalog
-  metadata. Dynamic providers expose their catalog through
+  metadata. New PAT entries use lowercase public model IDs even when the
+  upstream model or `config_name` is case-sensitive; `upstream_model` /
+  `config_name` are the explicit boundary mapping and must preserve the exact
+  upstream spelling. Dynamic providers expose their catalog through
   `BaseProvider.models()`.
 - Any persisted model identity must be built with `core.settings.model_key(
   provider, model)`. It normalizes the legacy `workbuddy` name to `codebuddy`;

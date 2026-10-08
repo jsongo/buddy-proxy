@@ -1438,9 +1438,17 @@ async def _sync_to_async_iter(it: Any) -> Any:
 
 
 async def _gate_first_event_async(gen: Any) -> "_GatedStream | BaseException":
-    """用专属线程池预驱动首事件，避免慢闸门耗尽 asyncio 默认线程池。"""
+    """用专属线程池预驱动首事件，并把请求 ContextVar 带入工作线程。
+
+    ``run_in_executor`` 不像 ``asyncio.to_thread`` 会自动传播 contextvars；PAT 的
+    请求级账号 holder 就在 ``ACCOUNT_META`` 里。若首个 ``next(gen)`` 在空上下文
+    中执行，``_stream`` 随后复制给 SSE 读线程的也是空上下文，最终请求虽成功，
+    metrics 的 account 却永远为空（Claude Code 流式请求正好稳定命中这条路径）。
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_stream_gate_pool, _gate_first_event, gen)
+    request_ctx = contextvars.copy_context()
+    return await loop.run_in_executor(
+        _stream_gate_pool, request_ctx.run, _gate_first_event, gen)
 
 
 def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":

@@ -396,7 +396,7 @@
   .qmore:hover { color: var(--text); border-color: var(--accent); }
   .qmore[hidden] { display: none; }
   .qbar > div { height: 100%; border-radius: 4px; }
-  /* TRAE PAT 面板：日包/周包按 PAT 单双数两栏；下方 账号状态 / 模型负载 左右两栏 */
+  /* TRAE PAT 面板：账号额度卡两栏；token 状态并入各自标题；模型负载另起两栏。 */
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .pat-head .name { font-weight: 600; }
   .pat-head .grow { flex: 1; }
@@ -416,7 +416,11 @@
   .pat-pkg { position: relative; padding: 10px 12px 12px;
              background: var(--card2); border: 1px solid var(--line);
              border-radius: 8px; }
-  .pat-pkg-name { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+  .pat-pkg-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; min-width: 0; }
+  .pat-pkg-name { font-weight: 600; font-size: 12px; min-width: 0; overflow: hidden;
+                  text-overflow: ellipsis; white-space: nowrap; }
+  .pat-pkg-status { margin-left: auto; font-size: 11px; text-align: right; white-space: nowrap; }
+  .pat-pkg-status.warn { color: var(--warn); }
   /* antigravity 账号操作（顺位 ▲▼ + 删除 ✕）：块尾渲染、绝对定位到右上角
      （不干扰就地回填的「名字→副标题」锚点）；平时低调、悬停才亮，不抢额度条的视觉 */
   .ag-move { position: absolute; top: 8px; right: 10px; display: inline-flex; gap: 2px;
@@ -435,9 +439,16 @@
   .ag-move button.danger { color: #e5534b; }
   .pat-acct { display: flex; gap: 8px; align-items: center; padding: 3px 0;
               border-bottom: 1px solid rgba(38,47,60,.4); font-size: 12px; }
-  .pat-keeper { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .pat-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 14px; }
-  @media (max-width: 720px) { .pat-cols { grid-template-columns: minmax(0, 1fr); } }
+  .pat-keeper { font-size: 12px; color: var(--muted); }
+  .pat-load-section { margin-top: 14px; }
+  .pat-load-hint { grid-column: 1 / -1; font-size: 12px; margin-bottom: 6px; }
+  .pat-load-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                   gap: 4px 22px; }
+  @media (max-width: 720px) {
+    .pat-load-grid { grid-template-columns: minmax(0, 1fr); }
+    .pat-pkg-head { align-items: flex-start; }
+    .pat-pkg-status { white-space: normal; }
+  }
   .pat-col-head { display: flex; align-items: center; gap: 8px; font-size: 12px;
                   color: var(--muted); margin-bottom: 8px; }
   .pat-col-head .grow { flex: 1; }

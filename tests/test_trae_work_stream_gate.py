@@ -100,6 +100,29 @@ def test_async_gate_keeps_event_loop_responsive_while_waiting():
     asyncio.run(run())
 
 
+def test_async_gate_propagates_request_context_to_generator():
+    """PAT 在闸门工作线程里选账号；ACCOUNT_META 必须随请求上下文传播。"""
+    from buddy_proxy.core.metrics import ACCOUNT_META
+
+    async def run():
+        meta: dict[str, str] = {}
+        token = ACCOUNT_META.set(meta)
+        try:
+            def source():
+                holder = ACCOUNT_META.get()
+                assert holder is meta
+                holder["account"] = "primary"
+                yield 'data: {"x":1}\n\n'
+
+            result = await _gate_first_event_async(source())
+            assert not isinstance(result, BaseException)
+            assert meta == {"account": "primary"}
+        finally:
+            ACCOUNT_META.reset(token)
+
+    asyncio.run(run())
+
+
 def test_sync_to_async_iter_keeps_event_loop_responsive_while_waiting():
     def _slow():
         time.sleep(0.2)

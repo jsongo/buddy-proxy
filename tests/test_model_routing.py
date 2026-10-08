@@ -75,7 +75,7 @@ class PrefixedAliasProvider(BaseProvider):
 
     #: 归一键 -> 内部 key（与真实 catalog 的别名表同构：显示名与 key 都指向 key）
     _ALIASES = {
-        "flashx": "flashx", "qwen38flash": "flashx",
+        "flashx": "flashx", "mockqwen99": "flashx",
         "glm53": "glm53", "fakeglm99": "glm53",
     }
 
@@ -84,7 +84,7 @@ class PrefixedAliasProvider(BaseProvider):
 
     def models(self):
         return [
-            {"id": "prefixed/flashx", "description": "Qwen3.8-Flash"},
+            {"id": "prefixed/flashx", "description": "MockQwen-9.9"},
             {"id": "prefixed/glm53", "description": "FakeGlm-9.9"},
         ]
 
@@ -148,8 +148,8 @@ def test_prefixed_toggle_accepts_bare_name(prefixed_env):
     assert r.json()["model"] == "prefixed/flashx"
 
 
-@pytest.mark.parametrize("model", ["flashx", "prefixed/flashx", "Qwen3.8-Flash",
-                                   "qwen3.8-flash", "QWEN3.8-FLASH"])
+@pytest.mark.parametrize("model", ["flashx", "prefixed/flashx", "MockQwen-9.9",
+                                   "mockqwen-9.9", "MOCKQWEN-9.9"])
 def test_prefixed_aliases_auto_route(prefixed_env, model):
     """别名不该掉进兜底通道：必须命中 prefixed 通道。"""
     r = prefixed_env.client.post(
@@ -159,8 +159,8 @@ def test_prefixed_aliases_auto_route(prefixed_env, model):
     assert prefixed_env.provider.calls, f"{model} 未被路由到 prefixed 通道"
 
 
-@pytest.mark.parametrize("model", ["flashx", "prefixed/flashx", "Qwen3.8-Flash",
-                                   "qwen3.8-flash"])
+@pytest.mark.parametrize("model", ["flashx", "prefixed/flashx", "MockQwen-9.9",
+                                   "mockqwen-9.9"])
 def test_prefixed_disable_blocks_all_aliases(prefixed_env, model):
     """停用后所有别名写法一律 403（别名绕过会让人以为停用失效）。"""
     prefixed_env.client.post(
