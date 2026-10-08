@@ -311,7 +311,7 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
 
 ## 模型列表
 
-`src/buddy_proxy/web/models_config.json` 中的静态目录包含 **CodeBuddy 和 Trae PAT 共 46 个条目**，无需访问上游即可读取；Trae Work 等其他通道由 provider 自己提供目录。下方列出 CodeBuddy 和 Trae Work 模型，国内 Trae Work 目录定义在 `src/buddy_proxy/trae/config.py`。`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
+`src/buddy_proxy/web/models_config.json` 中的静态目录包含 **CodeBuddy 和 Trae PAT 共 51 个条目**，无需访问上游即可读取；Trae Work 等其他通道由 provider 自己提供目录。下方列出 CodeBuddy 和 Trae Work 模型，国内 Trae Work 目录定义在 `src/buddy_proxy/trae/config.py`。`GET /v1/models` 的 `data[].credits` / `models[].credits` 会返回积分倍率（消费 × 倍率）：
 
 **CodeBuddy 通道**（19 个）——直接用模型名，无前缀：
 
@@ -456,8 +456,10 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
   下轮生效）——避免耗时随账号数线性增长。网关不可达或部分账号查询失败时，页面会明确给出
   「n/m 个账号未取到新数据」的说明条并用警告色区分，而不是一直转圈让人不知道卡在哪；这类
   失败结果只缓存 30 秒（成功结果仍缓存 5 分钟），网络抖动恢复后下一轮就能自愈
-- **Trae PAT 账号** — 每个账号一张卡片：本地凭证与冷却状态（纯本地读取，不触网）、一键补签
-  Token（只补缺失/临期的，不打扰健康账号）、以及上游各模型在本通道的负载状态（10 分钟缓存）
+- **Trae PAT 账号** — 每张额度卡标题统一为 `PAT #N（profile id）`，该账号的 token / 冷却状态
+  直接放在同一标题行右侧（纯本地读取，不触网，不再在卡片尾部集中重复）；「补签 Token」放在
+  面板总标题右侧，只补缺失/临期账号。模型负载独立放在账号额度卡之后，以两栏展示（10 分钟缓存）。
+  作为服务账号运维卡，Trae PAT 固定收在额度页最后；Kimi 则紧邻百度搭子上方。
 - **账号改名（alias）** — qoder / kimi / antigravity 额度卡与 trae 签到明细行的账号标题旁
   有 **✎** 按钮，弹窗改的是**显示名**（`alias` 字段，只动本地索引显示，凭据与顺位不动），
   `POST /ui/api/{ch}/accounts/rename`（`{id, alias}`，空串=恢复默认名）落盘；名字全链路一致

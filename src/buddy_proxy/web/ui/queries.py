@@ -114,7 +114,7 @@ async def ui_logs(request: Request, start: str = "", end: str = "",
 # ---------------------------------------------------------------------------
 
 #: 有多账号且往日志 account 字段写 id 的通道（各自的 ``failover.accounts_status``
-#: 是纯本地读取，不触网）。traepat 的 profile 行没有 alias，不列。
+#: 是纯本地读取，不触网）。Trae PAT 单独从 ``trae.pat.accounts_status`` 取 profile id。
 _ACCOUNT_NAME_SOURCES = ("codebuddy_provider", "trae", "antigravity", "qoder", "kimi")
 
 _ACCT_NAME_TTL_S = 60.0
@@ -149,6 +149,17 @@ def _account_name_map() -> dict[str, str]:
                        or a.get("email") or "")
             if aid and display and display != aid:
                 out[str(aid)] = str(display)
+    try:
+        from buddy_proxy.trae.pat import accounts_status as pat_accounts_status
+        pat_accounts = (pat_accounts_status(start_keeper=False) or {}).get("accounts") or []
+    except Exception:
+        pat_accounts = []
+    for index, account in enumerate(pat_accounts, start=1):
+        if isinstance(account, dict) and account.get("id"):
+            # PAT profile 没有可编辑 alias；标题本身就是用户识别它的稳定名称。
+            # accounts 按 priority 返回，显示序号则跟额度 label 一样取原配置下标。
+            display_index = account.get("display_index") or index
+            out[str(account["id"])] = f"PAT #{display_index}（{account['id']}）"
     _acct_name_cache = (now, out)
     return out
 

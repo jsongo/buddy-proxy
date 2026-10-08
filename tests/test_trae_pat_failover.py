@@ -762,6 +762,8 @@ def test_accounts_status_reports_token_cooldown_and_keeper(monkeypatch):
     pat._keeper_last.update({"at": now, "env_ready": True, "refreshed": ["x"], "waiting": []})
     status = pat.accounts_status()
     by_id = {a["id"]: a for a in status["accounts"]}
+    assert by_id["primary"]["display_index"] == 1
+    assert by_id["backup"]["display_index"] == 2
     assert by_id["primary"]["token"] == "ok"
     assert by_id["primary"]["cooling"] == [{"kind": "standard", "minutes_left": 5}]
     assert by_id["backup"]["token"] == "missing"

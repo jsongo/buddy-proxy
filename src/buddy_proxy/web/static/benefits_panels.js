@@ -1,6 +1,6 @@
-// ---- TRAE PAT 面板（底部整宽卡片）----
-// 结构：上方 日包/周包 按 PAT 单双数左右两栏；下方 账号状态（左）/ 模型负载（右）左右两栏。
-// 模型负载默认读缓存（GET，不触网），点「更新」再强制查询（POST）。
+// ---- TRAE PAT 面板（额度页末尾整宽卡片）----
+// 结构：每个账号的 token 状态直接回填到对应 PAT #N 额度卡标题；模型负载放在
+// 账号卡之后，内部两栏排列。默认读缓存（GET，不触网），点「更新」再强制查询。
 function renderTraepatPanel() {
   const panel = document.getElementById('traepat-panel');
   if (!panel) return;
@@ -16,11 +16,18 @@ function renderTraepatPanel() {
     if (!groups.has(grp)) groups.set(grp, []);
     groups.get(grp).push(Object.assign({}, it, {label: sub}));
   }
-  const quotaHtml = [...groups.entries()].map(([grp, its]) => `
-    <div class="pat-pkg">
-      <div class="pat-pkg-name">${esc(grp)}</div>
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => {
+    const m = /^PAT #(\d+)$/.exec(grp);
+    const idx = m ? Number(m[1]) : null;
+    const attrs = idx == null ? '' : ` data-pat-idx="${idx}"`;
+    return `<div class="pat-pkg"${attrs}>
+      <div class="pat-pkg-head">
+        <div class="pat-pkg-name">${esc(grp)}</div>
+        <div class="pat-pkg-status muted">账号状态加载中…</div>
+      </div>
       ${quotaItemsHtml(its, 'pat:' + grp)}
-    </div>`).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
+    </div>`;
+  }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
 
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
@@ -29,23 +36,16 @@ function renderTraepatPanel() {
         <span class="tag">多账号 · 自愈</span>
         <span class="grow"></span>
         <span class="pat-keeper" id="pat-keeper"></span>
+        <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
       </div>
       <div class="pat-quota-grid">${quotaHtml}</div>
-      <div class="pat-cols">
-        <div>
-          <div class="pat-col-head">
-            <span>账号状态</span><span class="grow"></span>
-            <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
-          </div>
-          <div id="traepat-accounts"><div class="empty" style="padding:8px 0">账号状态加载中…</div></div>
+      <div id="traepat-account-error"></div>
+      <div class="pat-load-section">
+        <div class="pat-col-head">
+          <span>模型负载</span><span class="grow"></span>
+          <button class="primary" onclick="loadTraepatStatus(this, true)">更新</button>
         </div>
-        <div>
-          <div class="pat-col-head">
-            <span>模型负载</span><span class="grow"></span>
-            <button class="primary" onclick="loadTraepatStatus(this, true)">更新</button>
-          </div>
-          <div id="traepat-status"><div class="empty" style="padding:8px 0">加载中…</div></div>
-        </div>
+        <div id="traepat-status"><div class="empty" style="padding:8px 0">加载中…</div></div>
       </div>
     </div>`;
   loadTraepatAccounts();
@@ -54,29 +54,32 @@ function renderTraepatPanel() {
 }
 
 async function loadTraepatAccounts() {
-  const box = document.getElementById('traepat-accounts');
+  const panel = document.getElementById('traepat-panel');
   const keeperBox = document.getElementById('pat-keeper');
-  if (!box) return;
+  const errorBox = document.getElementById('traepat-account-error');
+  if (!panel) return;
   try {
     const r = await api('/ui/api/traepat/accounts');
-    if (!r.enabled) { document.getElementById('traepat-panel').innerHTML = ''; return; }
-    const tag = (t) => t === 'ok' ? '<span class="tag ok">token 正常</span>'
-      : t === 'expiring' ? '<span class="tag" style="color:var(--warn)">临期</span>'
-      : '<span class="tag bad">无 token</span>';
-    // 每账号一行：#N sa_… Pxx token正常 剩Xh（+ 冷却），逐行竖排在左栏。
-    // #N 顺序与上方日包/周包的「PAT #N」分组一一对应，便于对照。
-    const rows = (r.accounts || []).map((a, i) => {
-      const cool = (a.cooling || []).map(c => `${c.kind} 冷却 ${c.minutes_left}min`).join(' · ');
-      const left = a.hours_left != null ? `剩 ${a.hours_left}h` : '';
-      return `<div class="pat-acct">
-        <span class="muted" style="min-width:26px">#${i + 1}</span>
-        <span class="mono">${esc(a.id)}</span>
-        <span class="muted">P${a.priority}</span>
-        ${tag(a.token)}${left ? `<span class="muted">${left}</span>` : ''}
-        ${cool ? `<span class="muted" style="color:var(--warn)">${cool}</span>` : ''}</div>`;
-    }).join('');
-    box.innerHTML = rows || '<div class="empty" style="padding:8px 0">无账号</div>';
-    // keeper 自愈状态 → 头部
+    if (!r.enabled) { panel.innerHTML = ''; return; }
+    const tokenText = t => t === 'ok' ? 'token 正常' : t === 'expiring' ? 'token 临期' : '无 token';
+    for (const [i, a] of (r.accounts || []).entries()) {
+      // accounts 按 priority 排序，但额度 label 的 #N 是配置原始下标；以后者为准。
+      const idx = Number(a.display_index) || (i + 1);  // 兼容滚动升级时的旧响应
+      const card = panel.querySelector(`[data-pat-idx="${idx}"]`);
+      if (!card) continue;  // 该账号本轮无额度数据时不凭空造一张空卡
+      const name = card.querySelector('.pat-pkg-name');
+      const status = card.querySelector('.pat-pkg-status');
+      if (name) name.textContent = `PAT #${idx}（${a.id}）`;
+      const bits = [tokenText(a.token)];
+      if (a.hours_left != null) bits.push(`剩 ${a.hours_left}h`);
+      for (const c of a.cooling || []) bits.push(`${c.kind} 冷却 ${c.minutes_left}min`);
+      if (status) {
+        status.textContent = bits.join(' · ');
+        status.classList.toggle('warn', a.token !== 'ok' || (a.cooling || []).length > 0);
+      }
+    }
+    if (errorBox) errorBox.innerHTML = '';
+    // keeper 自愈状态 → 总标题；账号 token 详情已经散到各自卡片标题。
     const k = r.keeper || {};
     const kAt = k.at ? new Date(k.at * 1000).toLocaleTimeString('zh-CN') : '—';
     const kState = k.env_ready === false ? '<span style="color:var(--warn)">换 token 端点不可达，等网络恢复</span>'
@@ -85,7 +88,8 @@ async function loadTraepatAccounts() {
     if (keeperBox) keeperBox.innerHTML =
       `每 ${Math.round((r.keepalive_s || 0) / 60)} 分钟自愈 · ${kState}（${kAt}）`;
   } catch (e) {
-    box.innerHTML = `<div class="empty" style="padding:8px 0">账号状态加载失败：${esc(e.message)}</div>`;
+    if (errorBox) errorBox.innerHTML =
+      `<div class="empty" style="padding:8px 0">账号状态加载失败：${esc(e.message)}</div>`;
   }
 }
 

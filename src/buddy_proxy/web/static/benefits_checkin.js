@@ -25,8 +25,8 @@ async function loadTraepatStatus(btn, force, silent) {
     const hint = !r.fetched_at
       ? '尚无缓存，点「更新」查询'
       : `数值越高越繁忙 · ${ts} ${r.cached ? '缓存' : '更新'}${auto}`;
-    box.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px">${hint}</div>` +
-      (rows || '<div class="empty" style="padding:8px 0">无负载数据</div>');
+    box.innerHTML = `<div class="muted pat-load-hint">${hint}</div><div class="pat-load-grid">` +
+      (rows || '<div class="empty" style="padding:8px 0">无负载数据</div>') + '</div>';
   } catch (e) {
     // 后台静默刷新失败不覆盖已有数据，仅手动/首屏才提示
     if (!silent) box.innerHTML = `<div class="empty" style="padding:8px 0">查询失败：${esc(e.message)}</div>`;

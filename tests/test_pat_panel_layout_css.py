@@ -12,11 +12,10 @@
 交给 ``.qlabel`` 的省略号收起。这个断言盯住「别改回 1fr」——改回去不报错、
 只是又溢出了，所以必须静态盯着。
 
-同一个面板的 ``.pat-cols``（下方「账号状态 / 模型负载」两栏）是同一失效模式，
-一并盯住。两个类都被多个通道面板共用（antigravity / kimi / qoder / trae /
-codebuddy / dumate 都从 benefits_panels.js 里铺 ``.pat-quota-grid``），所以
-这里查的是**类定义本身**，修好一次对全部面板生效，也保证不会有哪个面板被
-改回会溢出的写法。
+同一个面板的 ``.pat-load-grid``（下方模型负载两栏）是同一失效模式，一并
+盯住。``.pat-quota-grid`` 还被多个通道面板共用（antigravity / kimi / qoder /
+trae / codebuddy / dumate），所以这里查的是**类定义本身**，修好一次对全部面板
+生效，也保证不会有哪个面板被改回会溢出的写法。
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ def _rule(selector: str) -> str:
     return m.group(1)
 
 
-@pytest.mark.parametrize("selector", [".pat-quota-grid", ".pat-cols"])
+@pytest.mark.parametrize("selector", [".pat-quota-grid", ".pat-load-grid"])
 def test_pat_grid_tracks_can_shrink_below_content(selector):
     """两栏轨道必须是 minmax(0, 1fr)：1fr 的 min-content 下限会让长说明条
     把一列撑爆、另一列被顶出父容器（用户截图报的账号卡溢出）。"""
@@ -59,7 +58,7 @@ def test_pat_grid_tracks_can_shrink_below_content(selector):
     )
 
 
-@pytest.mark.parametrize("selector", [".pat-quota-grid", ".pat-cols"])
+@pytest.mark.parametrize("selector", [".pat-quota-grid", ".pat-load-grid"])
 def test_pat_grid_narrow_fallback_is_single_column(selector):
     """窄屏回退到单列时，也必须是 minmax(0, 1fr)——同一条溢出规则。"""
     text = STYLE_CSS.read_text(encoding="utf-8")

@@ -64,6 +64,24 @@ def test_account_name_map_swallows_broken_channel(monkeypatch):
     assert queries._account_name_map() == {}
 
 
+def test_account_name_map_includes_traepat_profile_names(monkeypatch):
+    """PAT 没 alias，也要给通道列一个与额度卡一致的可读账号名。"""
+    _fake_source(monkeypatch, [])
+    import buddy_proxy.trae.pat as pat
+    monkeypatch.setattr(
+        pat, "accounts_status",
+        lambda **_kwargs: {"accounts": [
+            {"id": "sa_primary", "display_index": 2},
+            {"id": "sa_backup", "display_index": 1},
+        ]},
+    )
+
+    assert queries._account_name_map() == {
+        "sa_primary": "PAT #2（sa_primary）",
+        "sa_backup": "PAT #1（sa_backup）",
+    }
+
+
 def test_attach_account_names(monkeypatch):
     _fake_source(monkeypatch, [{"id": "a1", "alias": "工作号"}])
     rows = [

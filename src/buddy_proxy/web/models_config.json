@@ -571,13 +571,24 @@
       "credits": "x0.83"
     },
     {
-      "id": "kimi-k2.6",
-      "name": "Kimi-K2.6",
+      "id": "kimi-k2.8-preview",
+      "name": "Kimi-K2.8-Preview",
       "vendor": "trae",
       "provider": "traepat",
       "gateway": "public",
-      "upstream_model": "kimi-k2.6",
-      "config_name": "kimi-k2.6",
+      "upstream_model": "kimi-k2.8-preview",
+      "config_name": "kimi-k2.8-preview",
+      "reasoning": true,
+      "tool_call": true
+    },
+    {
+      "id": "qwen3.8-flash",
+      "name": "Qwen3.8-Flash",
+      "vendor": "trae",
+      "provider": "traepat",
+      "gateway": "public",
+      "upstream_model": "qwen3.8-flash",
+      "config_name": "qwen3.8-flash",
       "reasoning": true,
       "tool_call": true
     },
@@ -604,6 +615,17 @@
       "reasoning": true,
       "tool_call": true,
       "credits": "x0.25"
+    },
+    {
+      "id": "doubao-seed-evolving",
+      "name": "Doubao-Seed-Evolving",
+      "vendor": "trae",
+      "provider": "traepat",
+      "gateway": "public",
+      "upstream_model": "Doubao-Seed-Evolving",
+      "config_name": "Doubao-Seed-Evolving",
+      "reasoning": true,
+      "tool_call": true
     },
     {
       "id": "Doubao-Seed-2.1-Pro",
@@ -642,6 +664,17 @@
       "credits": "x0.40"
     },
     {
+      "id": "glm-5.3-flashx",
+      "name": "glm-5.3-flashx",
+      "vendor": "trae",
+      "provider": "traepat",
+      "gateway": "public",
+      "upstream_model": "glm-5.3-flashx",
+      "config_name": "glm-5.3-flashx",
+      "reasoning": true,
+      "tool_call": true
+    },
+    {
       "id": "glm-5.3-flash",
       "name": "glm-5.3-flash",
       "vendor": "trae",
@@ -666,6 +699,17 @@
       "credits": "x0.72"
     },
     {
+      "id": "deepseek-v4.1-flash",
+      "name": "DeepSeek-V4.1-Flash",
+      "vendor": "trae",
+      "provider": "traepat",
+      "gateway": "public",
+      "upstream_model": "deepseek-v4.1-flash",
+      "config_name": "deepseek-v4.1-flash",
+      "reasoning": true,
+      "tool_call": true
+    },
+    {
       "id": "deepseek-v4-flash",
       "name": "DeepSeek-V4-Flash",
       "vendor": "trae",
@@ -676,6 +720,17 @@
       "reasoning": true,
       "tool_call": true,
       "credits": "x0.08"
+    },
+    {
+      "id": "step-5-preview",
+      "name": "Step-5-Preview",
+      "vendor": "trae",
+      "provider": "traepat",
+      "gateway": "public",
+      "upstream_model": "step-5-preview",
+      "config_name": "step-5-preview",
+      "reasoning": true,
+      "tool_call": true
     },
     {
       "id": "kimi-k3",
