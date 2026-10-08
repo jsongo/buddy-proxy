@@ -188,6 +188,9 @@ def accounts_status(*, start_keeper: bool = True) -> dict[str, Any]:
         hours_left = (expires_at - now) / 3600 if current else None
         accounts.append({
             "id": profile.id,
+            # 额度 label 由 quota.py 用原配置下标生成 PAT #N；账号状态虽按
+            # priority 排序返回，也必须带同一稳定序号，前端才能回填到正确卡片。
+            "display_index": profile.index + 1,
             "priority": profile.priority,
             "token": ("ok" if current and hours_left > _REFRESH_MARGIN_S / 3600
                       else "expiring" if current else "missing"),

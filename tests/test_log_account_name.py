@@ -70,12 +70,15 @@ def test_account_name_map_includes_traepat_profile_names(monkeypatch):
     import buddy_proxy.trae.pat as pat
     monkeypatch.setattr(
         pat, "accounts_status",
-        lambda **_kwargs: {"accounts": [{"id": "sa_primary"}, {"id": "sa_backup"}]},
+        lambda **_kwargs: {"accounts": [
+            {"id": "sa_primary", "display_index": 2},
+            {"id": "sa_backup", "display_index": 1},
+        ]},
     )
 
     assert queries._account_name_map() == {
-        "sa_primary": "PAT #1（sa_primary）",
-        "sa_backup": "PAT #2（sa_backup）",
+        "sa_primary": "PAT #2（sa_primary）",
+        "sa_backup": "PAT #1（sa_backup）",
     }
 
 

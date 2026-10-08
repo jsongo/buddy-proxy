@@ -10,8 +10,9 @@ def test_account_status_is_backfilled_into_matching_quota_card():
     js = (_STATIC / "benefits_panels.js").read_text("utf-8")
 
     assert 'data-pat-idx="${idx}"' in js
+    assert 'const idx = Number(a.display_index) || (i + 1)' in js
     assert 'card.querySelector(\'.pat-pkg-name\')' in js
-    assert 'name.textContent = `PAT #${i + 1}（${a.id}）`' in js
+    assert 'name.textContent = `PAT #${idx}（${a.id}）`' in js
     assert "tokenText(a.token)" in js
     assert "bits.push(`剩 ${a.hours_left}h`)" in js
     assert "P${a.priority}" not in js, "priority 对用户无意义，不应显示 P10 之类内部值"

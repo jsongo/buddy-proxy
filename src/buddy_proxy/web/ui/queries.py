@@ -157,7 +157,9 @@ def _account_name_map() -> dict[str, str]:
     for index, account in enumerate(pat_accounts, start=1):
         if isinstance(account, dict) and account.get("id"):
             # PAT profile 没有可编辑 alias；标题本身就是用户识别它的稳定名称。
-            out[str(account["id"])] = f"PAT #{index}（{account['id']}）"
+            # accounts 按 priority 返回，显示序号则跟额度 label 一样取原配置下标。
+            display_index = account.get("display_index") or index
+            out[str(account["id"])] = f"PAT #{display_index}（{account['id']}）"
     _acct_name_cache = (now, out)
     return out
 

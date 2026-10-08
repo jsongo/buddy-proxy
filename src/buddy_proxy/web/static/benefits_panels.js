@@ -63,11 +63,13 @@ async function loadTraepatAccounts() {
     if (!r.enabled) { panel.innerHTML = ''; return; }
     const tokenText = t => t === 'ok' ? 'token 正常' : t === 'expiring' ? 'token 临期' : '无 token';
     for (const [i, a] of (r.accounts || []).entries()) {
-      const card = panel.querySelector(`[data-pat-idx="${i + 1}"]`);
+      // accounts 按 priority 排序，但额度 label 的 #N 是配置原始下标；以后者为准。
+      const idx = Number(a.display_index) || (i + 1);  // 兼容滚动升级时的旧响应
+      const card = panel.querySelector(`[data-pat-idx="${idx}"]`);
       if (!card) continue;  // 该账号本轮无额度数据时不凭空造一张空卡
       const name = card.querySelector('.pat-pkg-name');
       const status = card.querySelector('.pat-pkg-status');
-      if (name) name.textContent = `PAT #${i + 1}（${a.id}）`;
+      if (name) name.textContent = `PAT #${idx}（${a.id}）`;
       const bits = [tokenText(a.token)];
       if (a.hours_left != null) bits.push(`剩 ${a.hours_left}h`);
       for (const c of a.cooling || []) bits.push(`${c.kind} 冷却 ${c.minutes_left}min`);
