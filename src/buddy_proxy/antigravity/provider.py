@@ -24,7 +24,6 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, AsyncIterator, Sequence
 
 import httpx
@@ -42,6 +41,19 @@ from .credentials import (
     has_cred,
     list_accounts,
     load_account_cred,
+)
+from .model_catalog import (
+    DEFAULT_MODELS,
+    MODELS,
+    _EFFORTS,
+    _MODELS_JSON,
+    _MODEL_BY_ID,
+    _load_models as _load_catalog_models,
+    _default_effort,
+    _group_for_model,
+    _is_public_upstream_model,
+    _split_effort_suffix,
+    _strip_effort_suffix,
 )
 
 log = logging.getLogger(__name__)
@@ -68,62 +80,14 @@ _ATTEMPT_DEADLINE_S = 180.0
 #: 流式首事件闸门的缓冲行上限（防异常上游无界攒内存，见 _gate_first_event）。
 _GATE_BUFFER_MAX_LINES = 256
 
-#: 模型表放 JSON（models.json，随包分发）：实测要增删模型改文件就行。
-_MODELS_JSON = Path(__file__).with_name("models.json")
-
-
 def _load_models() -> list[dict[str, Any]]:
-    try:
-        data = json.loads(_MODELS_JSON.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("antigravity models.json 读取失败（%s），使用内置兜底表", exc)
-        return [{"id": "gemini-3.8-flash", "group": "gemini", "description": "Gemini 3.8 Flash (fallback)"}]
-    return [m for m in data.get("models") or [] if isinstance(m, dict) and m.get("id")] or [
-        {"id": "gemini-3.8-flash", "group": "gemini", "description": "Gemini 3.8 Flash (fallback)"}
-    ]
+    """兼容旧导入路径；实际目录逻辑已拆到 ``model_catalog``。"""
+    return _load_catalog_models(_MODELS_JSON)
 
-
-MODELS: list[dict[str, Any]] = _load_models()
-DEFAULT_MODELS: dict[str, str] = {m["id"]: str(m.get("description") or m["id"]) for m in MODELS}
-_MODEL_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
 
 _QUOTA_NOTE = ("两组模型各自共享 5 小时 + 每周两个额度池（Gemini 组 / Claude+GPT 组），"
                "按 token 成本比例消耗。上游只在用量逼近池上限时才下调读数——"
                "显示 100% 代表两组池都接近满额，不是「没有额度」")
-
-#: 组内模型清单展示、动态目录归一化时去掉 effort / 形态后缀；同一模型
-#: 的多档位只对外发布一个 base id。其它末段（如 ``-thinking/-image/-agent``）
-#: 是模型身份的一部分，不能泛化裁掉。
-_EFFORT_SUFFIXES = ("-extra-low", "-low", "-medium", "-high", "-tiered")
-_EFFORTS = tuple(suffix.removeprefix("-") for suffix in _EFFORT_SUFFIXES)
-_INTERNAL_MODEL_PREFIXES = ("chat_", "tab_")
-
-
-def _split_effort_suffix(name: str) -> tuple[str, str | None]:
-    for suffix in _EFFORT_SUFFIXES:
-        if name.endswith(suffix):
-            return name[: -len(suffix)], suffix.removeprefix("-")
-    return name, None
-
-
-def _strip_effort_suffix(name: str) -> str:
-    return _split_effort_suffix(name)[0]
-
-
-def _is_public_upstream_model(name: str) -> bool:
-    return bool(name) and not name.lower().startswith(_INTERNAL_MODEL_PREFIXES)
-
-
-def _default_effort(efforts: Sequence[str]) -> str:
-    """为动态条目选择保守且可路由的默认档位。"""
-    for preferred in ("medium", "tiered", "low", "high", "extra-low"):
-        if preferred in efforts:
-            return preferred
-    return efforts[0]
-
-
-def _group_for_model(model_id: str) -> str:
-    return "claude-gpt" if model_id.startswith(("claude-", "gpt-")) else "gemini"
 
 #: 多账号额度并发查询：整轮 deadline + 常驻线程池。
 #: 常驻（不是每轮新建）的理由见 trae/pat/quota.py：每轮新建 + shutdown(wait=False)
@@ -232,15 +196,17 @@ class AntigravityProvider(BaseProvider):
         ]
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
-        """逐可用账号拉取上游目录，成功结果取并集并原子替换实例目录。
+        """逐全量账号拉取上游目录，成功结果取并集并原子替换实例目录。
 
         ``force`` 为通用刷新接口保留；本 provider 没有 TTL 缓存，每次均强拉。
-        单账号失败不阻断其余账号；若整轮没有有效成功结果（包括成功响应均为空），
-        则抛错且保留旧目录。静态表中已验证条目的路由规则与 metadata 优先保留，
-        新发现条目才按上游 effort 后缀推导配置。
+        单账号失败不阻断其余账号，但部分成功时只增不删，保留失败账号可能独有的
+        上一版条目；只有全账号成功才允许确认下架。若整轮没有有效成功结果（包括
+        成功响应均为空），则抛错且保留旧目录。静态表中已验证条目的路由规则与
+        metadata 优先保留，新发现条目才按上游 effort 后缀推导配置。
         """
         del force
-        accounts = failover.available_accounts()
+        # 冷却只影响聊天选号，不影响目录发现；否则冷却账号独有模型会被静默下架。
+        accounts = list_accounts()
         if not accounts:
             raise RuntimeError("Antigravity 没有可用于刷新模型目录的账号")
 
@@ -273,6 +239,15 @@ class AntigravityProvider(BaseProvider):
             raise RuntimeError(f"Antigravity 模型目录刷新全部失败：{detail}")
         if not discovered:
             raise RuntimeError("Antigravity 模型目录刷新成功响应均无公开模型")
+
+        if succeeded < len(accounts):
+            # 部分账号失败时无法证明旧 id 已从所有账号下架；本轮只允许新增/更新。
+            for local in self._models:
+                model_id = str(local.get("id") or "").strip()
+                upstream_name = str(local.get("upstream") or model_id).strip()
+                if model_id and upstream_name:
+                    base = _strip_effort_suffix(upstream_name)
+                    discovered.setdefault(base, [(upstream_name, None)])
 
         # 已验证本地条目按对外 id 和 upstream base 双索引；例如静态
         # gemini-3.8-flash -> gemini-3.8-flash-tiered 也能命中并保留固定路由。

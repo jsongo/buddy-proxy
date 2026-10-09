@@ -102,7 +102,9 @@ def test_refresh_models_unions_accounts_preserves_local_metadata_and_instance_sc
     by_id = {model["id"]: model for model in models}
 
     assert token_calls == ["bad", "limited", "full"]
-    assert set(by_id) == {"kimi-for-coding", "account-a-only", "brand-new"}
+    assert {"kimi-for-coding", "account-a-only", "brand-new"} <= set(by_id)
+    # bad 账号失败，上一版其它 id 不能被误判为已下架。
+    assert {m["id"] for m in kimi_provider.MODELS} <= set(by_id)
     # models.json 的人工描述不可被上游简名覆盖。
     assert by_id["kimi-for-coding"]["description"] == "Kimi K2.8 Preview (1M)"
     assert by_id["brand-new"]["description"] == "Brand New"
@@ -174,8 +176,9 @@ def test_refresh_models_all_fail_raises_and_keeps_previous_catalog(monkeypatch):
 def test_refreshed_model_routes_and_unknown_model_is_rejected(monkeypatch):
     """刷新发现的新 id 可直接转发；未知 id 不再静默落到默认模型。"""
     monkeypatch.setattr(kimi_provider, "has_cred", lambda: True)
-    monkeypatch.setattr(kimi_provider, "list_accounts",
-                        lambda: _accounts("acct"))
+    accounts = _accounts("acct")
+    monkeypatch.setattr(kimi_provider, "list_accounts", lambda: accounts)
+    monkeypatch.setattr(kimi_provider.failover, "available_accounts", lambda: accounts)
     monkeypatch.setattr(
         kimi_provider, "ensure_account_token",
         lambda account_id: ("tok-acct", {
