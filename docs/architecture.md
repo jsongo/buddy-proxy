@@ -201,10 +201,14 @@ benefits, and unrelated model routes in the same process.
   `BaseProvider.models()`.
 - A provider that implements optional async `refresh_models(force=True)` is
   capability-discovered by `web/ui/models_api.py`; only then does its group show
-  “↻ 重新拉取”. Qoder/Kimi/Antigravity refresh every available account and
-  publish the successful union. The replacement is provider-instance local and
-  atomic; an all-failed or valid-but-empty round raises and leaves the previous
-  catalog untouched. Newly discovered entries must feed the same runtime lookup
+  “↻ 重新拉取”. Qoder/Kimi/Antigravity refresh every account and publish the
+  successful union. Catalog discovery must not reuse the cooldown-filtered chat
+  failover list: cooldown is transient and cannot prove an account-only model was
+  removed. For Kimi/Antigravity a partially successful round is therefore
+  monotonic (new ids may be added, previous ids stay); only an all-account success
+  may confirm removals. The replacement is provider-instance local and atomic;
+  an all-failed or valid-but-empty round raises and leaves the previous catalog
+  untouched. Newly discovered entries must feed the same runtime lookup
   used by forwarding, otherwise the UI would advertise a model that routing
   silently rewrites or rejects.
 - `hidden_models` and `disabled_models` are intentionally different policy

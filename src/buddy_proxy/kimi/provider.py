@@ -203,15 +203,17 @@ class KimiProvider(BaseProvider):
         ]
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
-        """逐可用账号强拉官方 ``/v1/models``，成功结果取并集。
+        """逐全量账号强拉官方 ``/v1/models``，成功结果取并集。
 
         ``force`` 为统一刷新接口保留；Kimi 当前没有 TTL 缓存，每次调用都请求
-        上游。单账号失败只记日志；整轮没有一个成功账号则抛错且不改旧目录。
-        本地已有条目按 id 合并，以保留 description/default/verified 等 metadata；
-        上游新 id 则采用 fetch_models 归一出的 id/name/display_name。
+        上游。单账号失败只记日志，部分成功时只增不删，保留失败账号可能独有的
+        上一版条目；只有全账号成功才允许确认下架。整轮没有一个成功账号则抛错且
+        不改旧目录。本地已有条目按 id 合并，以保留 description/default/verified
+        等 metadata；上游新 id 则采用 fetch_models 归一出的字段。
         """
         del force
-        accounts = failover.available_accounts()
+        # 冷却只影响聊天选号，不影响目录发现；否则冷却账号独有模型会被静默下架。
+        accounts = list_accounts()
         if not accounts:
             raise RuntimeError("Kimi 没有可用于刷新模型目录的账号")
 
@@ -239,6 +241,13 @@ class KimiProvider(BaseProvider):
         if not discovered:
             # fetch_models 已拒绝空目录；这里防测试替身或未来实现违反契约。
             raise RuntimeError("Kimi 模型目录刷新全部成功响应均为空")
+
+        if succeeded < len(accounts):
+            # 部分账号失败时无法证明旧 id 已从所有账号下架；本轮只允许新增/更新。
+            for local in self._models:
+                model_id = str(local.get("id") or "").strip()
+                if model_id:
+                    discovered.setdefault(model_id, local)
 
         local_by_id = {str(m.get("id")): m for m in self._models if m.get("id")}
         merged: list[dict[str, Any]] = []

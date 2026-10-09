@@ -23,7 +23,7 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
     provider = prov.AntigravityProvider()
     static_snapshot = [dict(model) for model in prov.MODELS]
     accounts = [_account("a1"), _account("a2"), _account("broken")]
-    monkeypatch.setattr(prov.failover, "available_accounts", lambda: accounts)
+    monkeypatch.setattr(prov, "list_accounts", lambda: accounts)
 
     async def fake_fetch(account_id: str):
         if account_id == "broken":
@@ -46,12 +46,15 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
     monkeypatch.setattr(provider, "_fetch_available_models", fake_fetch)
     refreshed = asyncio.run(provider.refresh_models(force=True))
 
-    assert {model["id"] for model in refreshed} == {
+    refreshed_ids = {model["id"] for model in refreshed}
+    assert {
         "gemini-3.1-pro",
         "gemini-4-flash",
         "claude-sonnet-5-5",
         "gpt-next",
-    }
+    } <= refreshed_ids
+    # broken 账号失败，本轮只能新增，不能把上一版 id 当成已下架。
+    assert {model["id"] for model in static_snapshot} <= refreshed_ids
     assert "chat_20706" not in _ids(provider)
     assert "tab_jump" not in _ids(provider)
 
@@ -87,7 +90,7 @@ def test_refresh_all_failures_or_empty_keep_previous_catalog(monkeypatch):
     provider = prov.AntigravityProvider()
     before = provider.models()
     monkeypatch.setattr(
-        prov.failover, "available_accounts", lambda: [_account("a1"), _account("a2")]
+        prov, "list_accounts", lambda: [_account("a1"), _account("a2")]
     )
 
     async def all_fail(account_id: str):
@@ -110,11 +113,39 @@ def test_refresh_all_failures_or_empty_keep_previous_catalog(monkeypatch):
 def test_refresh_with_no_available_account_keeps_previous_catalog(monkeypatch):
     provider = prov.AntigravityProvider()
     before = provider.models()
-    monkeypatch.setattr(prov.failover, "available_accounts", lambda: [])
+    monkeypatch.setattr(prov, "list_accounts", lambda: [])
 
     with pytest.raises(RuntimeError, match="没有可用于刷新"):
         asyncio.run(provider.refresh_models())
     assert provider.models() == before
+
+
+def test_partial_refresh_keeps_failed_account_models_and_queries_cooled_accounts(monkeypatch):
+    provider = prov.AntigravityProvider()
+    accounts = [_account("healthy"), _account("cooled")]
+    monkeypatch.setattr(prov, "list_accounts", lambda: accounts)
+    # 即使聊天 failover 会过滤 cooled，目录刷新也必须探它。
+    monkeypatch.setattr(prov.failover, "available_accounts", lambda: [accounts[0]])
+    rounds = 0
+    calls: list[str] = []
+
+    async def fake_fetch(account_id: str):
+        nonlocal rounds
+        calls.append(account_id)
+        if rounds == 0:
+            return {"models": {f"{account_id}-only-low": {}}}
+        if account_id == "cooled":
+            raise OSError("temporary failure")
+        return {"models": {"healthy-only-high": {}, "brand-new-medium": {}}}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", fake_fetch)
+    asyncio.run(provider.refresh_models())
+    assert {"healthy-only", "cooled-only"} <= _ids(provider)
+    rounds = 1
+    asyncio.run(provider.refresh_models())
+
+    assert calls == ["healthy", "cooled", "healthy", "cooled"]
+    assert {"healthy-only", "cooled-only", "brand-new"} <= _ids(provider)
 
 
 def test_unknown_model_is_rejected_instead_of_routing_to_default(monkeypatch):
@@ -133,7 +164,7 @@ def test_unknown_model_is_rejected_instead_of_routing_to_default(monkeypatch):
 def test_refreshed_model_routes_and_drives_quota_mapping(monkeypatch):
     provider = prov.AntigravityProvider()
     account = _account("a1")
-    monkeypatch.setattr(prov.failover, "available_accounts", lambda: [account])
+    monkeypatch.setattr(prov, "list_accounts", lambda: [account])
 
     async def fake_fetch(_account_id: str):
         return {"models": {
@@ -174,6 +205,7 @@ def test_refreshed_model_routes_and_drives_quota_mapping(monkeypatch):
         return httpx.Response(200, json={})
 
     monkeypatch.setattr(provider, "ensure_auth", lambda: None)
+    monkeypatch.setattr(prov.failover, "available_accounts", lambda: [account])
     monkeypatch.setattr(prov, "ensure_account_token", lambda _account_id: ("token", {"project_id": "p1"}))
     monkeypatch.setattr(prov, "chat_to_antigravity_request", fake_convert)
     monkeypatch.setattr(prov, "gemini_response_to_chat", lambda _payload, *, model: {"model": model})
