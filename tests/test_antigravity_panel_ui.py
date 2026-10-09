@@ -663,11 +663,11 @@ console.log(JSON.stringify({sub: QS['#antigravity-panel [data-ag-idx="1"]'].inse
 
 
 # ---------------------------------------------------------------------------
-# 卡片级「↻ 刷新」（2026-10-03）：每张账号卡可单独重查本通道额度
+# 渠道标题「↻ 刷新」：一次重查本通道全部账号额度
 # ---------------------------------------------------------------------------
 
 def test_panel_renders_refresh_button_even_single_account():
-    """每张卡都有 ↻（单账号没有 ▲▼✕ 也能刷——缓存 TTL 5 分钟，等不及就用它）。"""
+    """渠道标题始终有 ↻；单账号同样可绕过额度缓存重查。"""
     out = _run_js("""
 globalThis.BENEFITS = {providers: [{id: 'antigravity', checkin: {supported: false},
   quota: {supported: true, level: 'free', items: [
@@ -682,8 +682,7 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
 
 
 def test_refresh_provider_quota_posts_and_force_reload():
-    """刷新流程：POST /ui/api/benefits/refresh 带 provider → force 重拉渲染；
-    在飞期间再点被忽略（按钮转圈中，不给上游连环打）。"""
+    """旧服务没返回快照时 POST 后 force 重拉；在飞期间再点被忽略。"""
     out = _run_js("""
 let POSTS = [], REFRESHES = 0, LOADS = [];
 globalThis.loadData = async (keys, manual) => { LOADS.push({keys, manual}); };
@@ -719,4 +718,81 @@ console.log(JSON.stringify({
     assert data["spinning"], "等待期间按钮该转圈+禁用"
     assert data["restored"], "完成后按钮该恢复"
     assert data["loads"] == [{"keys": ["benefits"], "manual": True}], \
-        f"完成后要 force 重拉 benefits: {data['loads']}"
+        f"旧响应缺 snapshot 时才 force 重拉 benefits: {data['loads']}"
+
+
+def test_refresh_provider_quota_uses_returned_snapshot_directly():
+    """POST 已返回完整 snapshot 时直接更新全局并重渲，不再补 GET。"""
+    out = _run_js("""
+let LOADS = [], RENDERS = 0;
+globalThis.loadData = async (keys, manual) => { LOADS.push({keys, manual}); };
+globalThis.renderBenefits = () => { RENDERS++; };
+globalThis.api = async () => ({providers: [{id: 'fresh'}]});
+await refreshProviderQuota('antigravity', null);
+console.log(JSON.stringify({loads: LOADS, renders: RENDERS,
+  provider: BENEFITS.providers[0].id}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data == {"loads": [], "renders": 1, "provider": "fresh"}
+
+
+def test_refresh_provider_quota_lock_is_per_provider():
+    """锁按 provider 分桶：同通道防连点，不同通道可以并行刷新。"""
+    out = _run_js("""
+let BODIES = [], RELEASE = {};
+globalThis.api = async (path, opts) => {
+  const pid = JSON.parse(opts.body).provider;
+  BODIES.push(pid);
+  return new Promise(res => { RELEASE[pid] = () => res({providers: []}); });
+};
+globalThis.renderBenefits = () => {};
+const p1 = refreshProviderQuota('antigravity', null);
+const duplicate = refreshProviderQuota('antigravity', null);
+const p2 = refreshProviderQuota('kimi', null);
+await new Promise(r => setTimeout(r, 5));
+RELEASE.antigravity(); RELEASE.kimi();
+await Promise.all([p1, duplicate, p2]);
+console.log(JSON.stringify(BODIES));
+""")
+    assert json.loads(out.strip().splitlines()[-1]) == ["antigravity", "kimi"]
+
+
+def test_parallel_refresh_does_not_apply_late_stale_snapshot():
+    """不同通道并行刷新时，先发后到的旧快照不能覆盖后发请求的新结果。"""
+    out = _run_js("""
+let RELEASE = {}, RENDERS = [];
+globalThis.api = async (path, opts) => {
+  const pid = JSON.parse(opts.body).provider;
+  return new Promise(res => { RELEASE[pid] = res; });
+};
+globalThis.renderBenefits = () => { RENDERS.push(BENEFITS.providers[0].id); };
+const older = refreshProviderQuota('antigravity', null);
+const newer = refreshProviderQuota('kimi', null);
+await new Promise(r => setTimeout(r, 5));
+RELEASE.kimi({providers: [{id: 'newer'}]});
+await newer;
+RELEASE.antigravity({providers: [{id: 'older-stale'}]});
+await older;
+console.log(JSON.stringify({renders: RENDERS, provider: BENEFITS.providers[0].id}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data == {"renders": ["newer"], "provider": "newer"}
+
+
+def test_refresh_provider_quota_failure_keeps_old_snapshot():
+    """POST 失败保留旧 BENEFITS，并恢复按钮状态。"""
+    out = _run_js("""
+BENEFITS = {providers: [{id: 'old'}]};
+let TOASTS = [];
+globalThis.toast = (m, bad) => TOASTS.push([m, bad]);
+globalThis.api = async () => { throw new Error('boom'); };
+const btn = {innerHTML: '↻', disabled: false, classList: {
+  add() {}, remove() {}, contains() { return false; }}};
+await refreshProviderQuota('antigravity', btn);
+console.log(JSON.stringify({provider: BENEFITS.providers[0].id,
+  toast: TOASTS[0], restored: !btn.disabled && btn.innerHTML === '↻'}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["provider"] == "old"
+    assert data["toast"] == ["刷新失败: boom", True]
+    assert data["restored"]

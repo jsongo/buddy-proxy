@@ -68,7 +68,13 @@ def _provider_models(provider: Any) -> list[dict[str, Any]]:
     return models
 
 
-def _model_groups(state: Any) -> list[dict[str, Any]]:
+def _model_groups(state: Any, *, include_hidden: bool = False) -> list[dict[str, Any]]:
+    """构建模型分组；默认摘除用户隐藏项，校验/恢复场景可取完整目录。
+
+    ``hidden_models`` 只管曝光，不改变 provider 自己的路由目录：隐藏后直接点名
+    仍可调用。provider 内置的旧模型过滤（如 Qoder ``HIDDEN_KEYS``）发生在
+    ``provider.models()`` 内，比这里更早，刷新后也不会被重新展示。
+    """
     groups: list[dict[str, Any]] = []
 
     # 默认 CodeBuddy 通道（模型来自 models_config.json）
@@ -82,6 +88,7 @@ def _model_groups(state: Any) -> list[dict[str, Any]]:
             "authenticated": bool(auth.get("accessToken")),
             "token_valid": not expires or expires > int(time.time() * 1000),
         },
+        "refreshable": False,
         "models": _codebuddy_models(),
     })
 
@@ -95,6 +102,7 @@ def _model_groups(state: Any) -> list[dict[str, Any]]:
             "name": p.name,
             "enabled": True,
             "health": health,
+            "refreshable": callable(getattr(p, "refresh_models", None)),
             "models": _provider_models(p),
         })
     # zcode / zcode-start 是同一家产品的两档套餐，组排一起好对照——providers
@@ -106,6 +114,16 @@ def _model_groups(state: Any) -> list[dict[str, Any]]:
         if zcs is not None and groups.index(zcs) > zc_idx + 1:
             groups.remove(zcs)
             groups.insert(zc_idx + 1, zcs)
+
+    if not include_hidden:
+        hidden = getattr(state, "hidden_models", set()) or set()
+        for group in groups:
+            gid = group["id"]
+            group["models"] = [
+                m for m in group["models"]
+                if settings_mod.model_key(gid, _bare_model_id(m.get("id") or "", gid))
+                not in hidden
+            ]
     return groups
 
 
@@ -270,6 +288,29 @@ async def ui_models(request: Request):
     _ensure_local(request)
     state = get_state()
     groups = _model_groups(state)
+    all_groups = _model_groups(state, include_hidden=True)
+
+    # 已隐藏列表独立下发，供模型页顶部的恢复弹窗使用。即便模型后来被上游下架，
+    # settings 里的键也保留最小条目，用户仍能清掉这条本地配置。
+    hidden_keys = getattr(state, "hidden_models", set()) or set()
+    hidden_items: list[dict[str, Any]] = []
+    all_by_key: dict[str, dict[str, Any]] = {}
+    for raw_group in all_groups:
+        gid = raw_group["id"]
+        for raw_model in raw_group["models"]:
+            bare = _bare_model_id(raw_model.get("id") or "", gid)
+            all_by_key[settings_mod.model_key(gid, bare)] = {
+                "provider": gid,
+                "model": bare,
+                "name": raw_model.get("name") or bare,
+            }
+    for key in sorted(hidden_keys):
+        if not isinstance(key, str) or "/" not in key:
+            continue
+        pid, bare = key.split("/", 1)
+        hidden_items.append(all_by_key.get(key) or {
+            "provider": pid, "model": bare, "name": bare, "missing": True,
+        })
 
     # 附加每个 (provider, model) 的请求统计
     metrics = getattr(state, "metrics", None)
@@ -332,7 +373,100 @@ async def ui_models(request: Request):
                     "windows": windows,
                     "open": settings_mod.model_schedule_open(windows),
                 }
-    return {"groups": groups, "default_model": default_model}
+    return {"groups": groups, "default_model": default_model,
+            "hidden_models": hidden_items}
+
+
+@app.post("/ui/api/models/refresh")
+async def ui_models_refresh(request: Request):
+    """从指定通道的官方/逆向目录强制重新拉取模型。
+
+    只有实现可选 ``refresh_models`` 能力的 provider 才会在模型页显示按钮；
+    静态目录通道不提供伪刷新。失败由 provider 保留旧快照后抛出，此处转成可读 502。
+    """
+    _ensure_local(request)
+    state = get_state()
+    body = await request.json()
+    provider_id = (body.get("provider") or "").strip()
+    provider = (getattr(state, "providers", {}) or {}).get(provider_id)
+    if provider is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"message": f"未知或未启用的通道: {provider_id or '(空)' }"}},
+        )
+    refresh = getattr(provider, "refresh_models", None)
+    if not callable(refresh):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": f"{provider_id} 使用静态模型表，不支持从上游刷新"}},
+        )
+
+    before = {
+        _bare_model_id(str(m.get("id") or ""), provider_id)
+        for m in provider.models()
+    }
+    try:
+        refreshed = await refresh(force=True)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 上游目录失败需转成管理页可读错误
+        raise HTTPException(
+            status_code=502,
+            detail={"error": {"message": f"{provider_id} 模型目录刷新失败: {str(exc)[:300]}"}},
+        ) from exc
+    after = {
+        _bare_model_id(str(m.get("id") or ""), provider_id)
+        for m in (refreshed if isinstance(refreshed, (list, tuple)) else provider.models())
+    }
+    # added/removed 按 provider 的公开目录口径计算；用户 hidden_models 在展示层
+    # 继续过滤，不会因刷新被清掉或重新冒出来。
+    return {
+        "ok": True,
+        "provider": provider_id,
+        "count": len(after),
+        "added": sorted(after - before),
+        "removed": sorted(before - after),
+    }
+
+
+@app.post("/ui/api/model-hidden")
+async def ui_model_hidden(request: Request):
+    """隐藏/恢复一个模型（只影响目录曝光，直接点名仍可调用）。"""
+    _ensure_local(request)
+    state = get_state()
+    body = await request.json()
+    provider = (body.get("provider") or "").strip()
+    model = (body.get("model") or "").strip()
+    if not provider or not model:
+        raise HTTPException(
+            status_code=400, detail={"error": {"message": "缺少 provider 或 model"}})
+    # 归一时允许从完整目录查找：已隐藏项不在默认 _model_groups 里，否则恢复会
+    # 先被自己的隐藏过滤挡成「模型不存在」。已被上游下架的残留键也允许恢复。
+    if model.startswith(f"{provider}/"):
+        model = _bare_model_id(model, provider)
+    found = any(
+        group["id"] == provider and any(
+            _bare_model_id(str(m.get("id") or ""), provider) == model
+            for m in group["models"])
+        for group in _model_groups(state, include_hidden=True)
+    )
+    key = settings_mod.model_key(provider, model)
+    current = getattr(state, "hidden_models", set()) or set()
+    if not isinstance(current, set):
+        current = set(current)
+    want_hidden = bool(body["hidden"]) if "hidden" in body else key not in current
+    if want_hidden and not found:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": f"模型 {key} 不在当前通道目录中"}},
+        )
+    if want_hidden:
+        current.add(key)
+    else:
+        current.discard(key)  # 下架残留项仍可清理
+    state.hidden_models = current
+    settings_mod.save_settings({"hidden_models": sorted(current)})
+    return {"ok": True, "model": key, "hidden": want_hidden}
 
 
 @app.post("/ui/api/model-toggle")

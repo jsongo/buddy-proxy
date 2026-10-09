@@ -147,14 +147,64 @@ def iso_to_epoch(value: Any) -> float:
         return 0.0
 
 
-def _get_json(url: str, access_token: str, timeout: float) -> dict[str, Any]:
-    req = urllib.request.Request(url, headers=device_headers({}, access_token=access_token))
+def _get_json(
+    url: str,
+    access_token: str,
+    timeout: float,
+    cred: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    req = urllib.request.Request(
+        url, headers=device_headers(cred or {}, access_token=access_token))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
     except Exception as exc:  # noqa: BLE001 - 统一转 OSError 语义，调用方按失败处理
         raise OSError(f"Kimi 上游请求失败（{url}）: {exc}") from exc
     return data if isinstance(data, dict) else {}
+
+
+def fetch_models(
+    base_url: str,
+    access_token: str,
+    cred: dict[str, Any] | None = None,
+    timeout: float = 15.0,
+) -> list[dict[str, Any]]:
+    """``GET /v1/models`` 并归一成运行时目录条目。
+
+    官方端点使用 OpenAI 常见的 ``{"data": [...]}`` 形状。每项优先用 ``id``
+    作路由 id；少数兼容实现只有 ``name`` / ``display_name`` 时依次回退。新增
+    模型保留这三个可读字段，并生成 provider 使用的 ``description``。
+    """
+    payload = _get_json(
+        f"{normalize_base_url(base_url)}/models", access_token, timeout, cred)
+    raw_models = payload.get("data")
+    if not isinstance(raw_models, list):
+        raise OSError("Kimi /models 响应缺少 data 数组")
+
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_models:
+        if isinstance(raw, str):
+            raw = {"id": raw}
+        if not isinstance(raw, dict):
+            continue
+        model_id = str(
+            raw.get("id") or raw.get("name") or raw.get("display_name") or ""
+        ).strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        entry: dict[str, Any] = {"id": model_id}
+        for key in ("name", "display_name"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                entry[key] = value.strip()
+        entry["description"] = str(
+            entry.get("display_name") or entry.get("name") or model_id)
+        models.append(entry)
+    if not models:
+        raise OSError("Kimi /models 未返回有效模型")
+    return models
 
 
 def fetch_me(base_url: str, access_token: str, timeout: float = 15.0) -> dict[str, Any]:

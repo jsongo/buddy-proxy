@@ -36,8 +36,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -54,6 +57,14 @@ CAMPAIGN_COSY_VERSION = "0.4.3"
 
 #: 单次请求超时。
 TIMEOUT_S = 20.0
+
+#: 桌面端活动日志的 bundle id。直连 ``/sash`` 偶尔按进程会话定向隐藏签到条目，
+#: 但桌面主进程同账号已拿到完整列表；只在直连缺签到时把严格同 uid、仍在窗口内
+#: 的桌面条目补回来。日志超过两天一定不可能覆盖仍有效的每日窗口，直接跳过。
+_DESKTOP_BUNDLES = {"global": "com.qoder.app.stable", "cn": "com.qodercn.app.stable"}
+_DESKTOP_LOG_MAX_AGE_S = 2 * 86400.0
+_DESKTOP_LOG_TAIL_BYTES = 2 * 1024 * 1024
+_DESKTOP_CAMPAIGN_MARKER = "[Campaign] 活动状态请求返回 "
 
 #: 可领的活动类型：只有这个类型带 benefit（其余是「查看详情」）。
 CLAIM_ACTION = "CLAIM_BENEFIT"
@@ -148,6 +159,74 @@ def _to_int(value: object) -> int:
     return 0
 
 
+def _desktop_campaigns(region_key: str, uid: str, now: float | None = None) -> list[Campaign]:
+    """从桌面 ``main.log`` 取同账号、当前窗口的最后一份活动列表。
+
+    这是直连列表缺签到条目时的只读兜底，不是第二份权威状态：uid 必须逐字匹配，
+    日志文件必须新鲜，且只返回当前确实处在 ``startAt``/``endAt`` 窗口内的条目。
+    日志损坏、没装桌面端、
+    权限不足等一律返回空列表，绝不阻断正常上游查询。
+    """
+    uid = str(uid or "").strip()
+    bundle = _DESKTOP_BUNDLES.get(region_key)
+    if not uid or not bundle:
+        return []
+    clock = time.time() if now is None else now
+    log_dir = Path.home() / "Library" / "Application Support" / bundle / "logs"
+    try:
+        candidates = [p for p in log_dir.glob("*/main.log") if p.is_file()]
+        path = max(candidates, key=lambda p: p.stat().st_mtime)
+        stat = path.stat()
+        if clock - stat.st_mtime > _DESKTOP_LOG_MAX_AGE_S:
+            return []
+        with path.open("rb") as fh:
+            fh.seek(max(0, stat.st_size - _DESKTOP_LOG_TAIL_BYTES))
+            text = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+
+    # 从后往前找最后一份可用响应；最新的坏/别账号行不能遮住同账号有效行。
+    for line in reversed(text.splitlines()):
+        if _DESKTOP_CAMPAIGN_MARKER not in line:
+            continue
+        try:
+            event = json.loads(line.split(_DESKTOP_CAMPAIGN_MARKER, 1)[1])
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if event.get("statusCode") != 200 or not isinstance(payload, dict):
+                continue
+            if str(payload.get("uid") or "") != uid:
+                continue
+            raw = payload.get("campaigns")
+            if not isinstance(raw, list):
+                continue
+            parsed = [c for c in (Campaign.parse(item) for item in raw) if c is not None]
+            # 只接纳此刻确实处于开放窗口的条目。未来活动和已经结束的历史活动
+            # 都不能借桌面日志提前/延后出现在管理页。
+            return [c for c in parsed if c.start_at <= clock < c.end_at]
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return []
+
+
+def _merge_desktop_campaigns(
+    direct: list[Campaign], region_key: str, uid: str, now: float | None = None
+) -> list[Campaign]:
+    """直连已有签到条目时原样返回；缺失时用桌面签到替换同 id 占位。"""
+    if any(c.action_type == CLAIM_ACTION for c in direct):
+        return direct
+    fallback_claims = [
+        c for c in _desktop_campaigns(region_key, uid, now)
+        if c.action_type == CLAIM_ACTION
+    ]
+    if not fallback_claims:
+        return direct
+    # 同一个 campaign 在无桌面会话的直连结果里可能降级成 VIEW_DETAILS。
+    # 这时不能简单按 id 去重丢掉桌面端的 CLAIM_BENEFIT；仅让严格校验过的
+    # 签到条目替换同 id 的直连占位，其余直连活动保持原顺序和内容。
+    fallback_ids = {c.id for c in fallback_claims}
+    return [c for c in direct if c.id not in fallback_ids] + fallback_claims
+
+
 def campaign_headers(cred: Credential, identity: MachineIdentity | None = None) -> dict[str, str]:
     """活动面的请求头。
 
@@ -200,7 +279,9 @@ class CampaignClient:
             parsed = Campaign.parse(item)
             if parsed is not None:
                 out.append(parsed)
-        return out
+        # 上游偶发按进程会话隐藏 CLAIM_BENEFIT：桌面同账号已经拿到的当前窗口
+        # 是可靠补充。直连已有任何签到条目时绝不覆盖（包括 CLAIMED）。
+        return _merge_desktop_campaigns(out, self.region.key, self.cred.uid)
 
     async def claim(self, campaign_id: str) -> ClaimResult:
         """领取指定活动。网络/HTTP 错误抛异常，业务失败在返回值里。

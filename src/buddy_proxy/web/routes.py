@@ -21,6 +21,7 @@ from buddy_proxy.core.state import (
     diagnostic,
     get_state,
 )
+from buddy_proxy.core import settings as settings_mod
 from buddy_proxy.web.model_list import load_models_from_local_config, model_to_codex_format
 from buddy_proxy.codebuddy_provider import (
     CLIENT_TAG,
@@ -154,6 +155,20 @@ async def list_models():
                 **({"images": bool(m["images"])} if "images" in m else {}),
                 **({"tool_call": bool(m["tool_call"])} if "tool_call" in m else {}),
             })
+
+    # 用户隐藏项只影响目录曝光，不改变 provider 路由：从两个公开数组生成前统一
+    # 过滤，保证 OpenAI data 与 Codex 扩展 models 完全一致。provider 目录条目的 id
+    # 可能带自身前缀（qoder/qwen...），settings 键一律是 provider/裸名。
+    hidden = getattr(state, "hidden_models", set()) or set()
+    visible: list[dict[str, Any]] = []
+    for m in data:
+        pid = str(m.get("provider") or "codebuddy")
+        mid = str(m.get("id") or "")
+        prefix = f"{pid}/"
+        bare = mid[len(prefix):] if mid.startswith(prefix) else mid
+        if settings_mod.model_key(pid, bare) not in hidden:
+            visible.append(m)
+    data = visible
 
     # 记录模型列表请求
     diagnostic(

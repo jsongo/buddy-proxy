@@ -592,6 +592,9 @@ def test_refresh_api_invalidates_and_returns_snapshot(monkeypatch):
     calls: list[str] = []
 
     class FakeManager:
+        def provider_ids(self):
+            return {"antigravity"}
+
         def invalidate_quota(self, pid):
             calls.append(pid)
             return 1
@@ -606,6 +609,30 @@ def test_refresh_api_invalidates_and_returns_snapshot(monkeypatch):
     assert r.status_code == 200
     assert r.json()["refreshed"] is True
     assert calls == ["antigravity", "disabled=[]"]
+
+
+def test_refresh_api_rejects_unknown_provider(monkeypatch):
+    """未知通道一律 404，不制造无效缓存键，也不触发快照查询。"""
+    from types import SimpleNamespace
+
+    from buddy_proxy import __main__ as m
+    from buddy_proxy.core import state as st
+    from fastapi.testclient import TestClient
+
+    boom = mock.MagicMock(side_effect=AssertionError("不该触发作废或快照"))
+    manager = SimpleNamespace(
+        provider_ids=lambda: {"trae", "qoder"},
+        invalidate_quota=boom,
+        invalidate_checkin=boom,
+        snapshot=boom,
+    )
+    monkeypatch.setattr(st, "proxy_state", SimpleNamespace(benefits=manager))
+    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+    r = TestClient(m.app).post(
+        "/ui/api/benefits/refresh", json={"provider": "not-real"})
+    assert r.status_code == 404
+    assert "未知 provider" in r.text
+    boom.assert_not_called()
 
 
 def test_refresh_api_requires_provider(monkeypatch):

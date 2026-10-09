@@ -67,9 +67,10 @@
 
   <section class="page" id="page-models">
     <div class="sec-head">
-      <h2>模型 <span class="sub">点击通道条/表头可折叠分组 · 「测试」发送一条 hi</span></h2>
+      <h2>模型 <span class="sub">点击通道条/表头可折叠 · 隐藏只是不展示，停用才会拒绝调用</span></h2>
       <span class="spacer"></span>
       <span class="muted" style="font-size:12px" id="model-summary"></span>
+      <button class="ghost" id="hidden-models-btn" onclick="openHiddenModelsModal()">已隐藏</button>
       <button class="ghost" onclick="setAllGroups(false)">全部展开</button>
       <button class="ghost" onclick="setAllGroups(true)">全部折叠</button>
     </div>
@@ -132,13 +133,14 @@
       </div>
       <div id="checkin-rows"></div>
     </div>
-    <div id="antigravity-panel"></div>
-    <div id="qoder-panel"></div>
-    <div id="qoderintl-panel"></div>
-    <div id="trae-panel"></div>
     <div id="codebuddy-panel"></div>
     <div id="codebuddyintl-panel"></div>
+    <div id="trae-panel"></div>
+    <div id="traeintl-panel"></div>
     <div id="kimi-panel"></div>
+    <div id="qoder-panel"></div>
+    <div id="qoderintl-panel"></div>
+    <div id="antigravity-panel"></div>
     <div id="dumate-panel"></div>
     <!-- Trae PAT 是服务账号运维卡，与个人账号通道分开，固定收在额度页末尾。 -->
     <div id="traepat-panel"></div>

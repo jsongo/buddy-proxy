@@ -312,6 +312,9 @@ function renderGroups() {
   const dm = MODELS.default_model || '';
   document.getElementById('model-summary').textContent =
     `${groups.length} 个通道 · ${totalModels} 个模型` + (dm ? ` · 默认 ${dm}` : '');
+  const hidden = (MODELS.hidden_models || []).length;
+  const hiddenBtn = document.getElementById('hidden-models-btn');
+  if (hiddenBtn) hiddenBtn.textContent = `已隐藏${hidden ? ' ' + hidden : ''}`;
   if (!groups.length) { el.innerHTML = '<div class="empty">没有可用通道</div>'; return; }
   el.innerHTML = groups.map(g => {
     const h = g.health || {};
@@ -336,7 +339,7 @@ function renderGroups() {
           + (ordMarks.length ? '；冷却中：' + ordMarks.map(k => k.target).join(', ') : '')
         : '';
       const ordTag = ord
-        ? `<span class="tag ${ordMarks.length ? 'bad' : 'ok'}" title="${esc(ordTitle)}">⇄ ${ord.targets.length}${ordMarks.length ? ` <span style="cursor:pointer" title="冷却中，点击清除" onclick="clearOrderMarks('${esc(g.id)}','${esc(m.id)}')">⏸${ordMarks.length}</span>` : ''}</span>`
+        ? `<span class="tag ${ordMarks.length ? 'bad' : 'ok'}" title="${esc(ordTitle)}">⇄ ${ord.targets.length}${ordMarks.length ? ` <span style="cursor:pointer" title="冷却中，点击清除" onclick='clearOrderMarks(${jsq(g.id)},${jsq(m.id)})'>⏸${ordMarks.length}</span>` : ''}</span>`
         : '';
       return `<tr>
         <td${dim}><span class="mono">${esc(m.id)}</span>
@@ -349,14 +352,15 @@ function renderGroups() {
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
         <td class="num mono muted"${dim}>${st.count ? fmtMs(st.avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
-            ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick="setDefault('${esc(g.id)}','${esc(m.id)}')">设为默认</button>`}
-            <button class="primary" onclick="runTest('${esc(g.id)}','${esc(m.id)}')">测试</button>
-            <button class="ghost" title="设置限时可用时段：仅在窗口内可调用，窗口外直接失败（支持跨天）" onclick='openScheduleModal("${esc(g.id)}","${esc(m.id)}",${schWinsAttr})'>${sch ? '时段·' + sch.windows.length : '时段'}</button>
+            ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick='setDefault(${jsq(g.id)},${jsq(m.id)})'>设为默认</button>`}
+            <button class="primary" onclick='runTest(${jsq(g.id)},${jsq(m.id)})'>测试</button>
+            <button class="ghost" title="设置限时可用时段：仅在窗口内可调用，窗口外直接失败（支持跨天）" onclick='openScheduleModal(${jsq(g.id)},${jsq(m.id)},${schWinsAttr})'>${sch ? '时段·' + sch.windows.length : '时段'}</button>
             <!-- 候选顺序的编辑入口只在「模型顺序」页签：这张表行多列窄，塞进去
                  既挤又难找（用户当初就是在这一列里找不到它）。行内只留一个
                  徽标，说明「这个模型已配顺序、有几档、几档在冷却」。 -->
-            ${ordMarks.length ? `<button class="ghost" title="清除冷却标记，立刻重新尝试这些目标" onclick="clearOrderMarks('${esc(g.id)}','${esc(m.id)}')">清冷却</button>` : ''}
-            <button class="${dis ? 'primary' : 'ghost'}" title="${dis ? '重新启用后可正常调用' : '停用后调用此模型的请求直接失败'}" onclick="toggleModel('${esc(g.id)}','${esc(m.id)}',${dis ? 'false' : 'true'})">${dis ? '启用' : '停用'}</button>
+            ${ordMarks.length ? `<button class="ghost" title="清除冷却标记，立刻重新尝试这些目标" onclick='clearOrderMarks(${jsq(g.id)},${jsq(m.id)})'>清冷却</button>` : ''}
+            <button class="${dis ? 'primary' : 'ghost'}" title="${dis ? '重新启用后可正常调用' : '停用后调用此模型的请求直接失败'}" onclick='toggleModel(${jsq(g.id)},${jsq(m.id)},${dis ? 'false' : 'true'})'>${dis ? '启用' : '停用'}</button>
+            <button class="ghost" title="只从模型列表和选择器隐藏；直接点名仍可调用" onclick='hideModel(${jsq(g.id)},${jsq(m.id)})'>隐藏</button>
         </td></tr>`;
     }).join('');
     const gdis = !!g.disabled;
@@ -371,9 +375,10 @@ function renderGroups() {
         ${gdis ? '<span class="tag bad">已停用</span>' : ''}
         <span class="tag ${okFlag ? 'ok' : 'bad'}">${healthTxt}</span>
         <label style="display:flex;align-items:center;gap:4px;font-size:12px;margin-left:6px;cursor:${isDefaultProv ? 'not-allowed' : 'pointer'}" title="${swTitle}" onclick="event.stopPropagation()">
-          <input type="checkbox" ${gdis ? '' : 'checked'} ${isDefaultProv ? 'disabled' : ''} onchange="toggleProvider('${esc(g.id)}', this.checked)"> 启用
+          <input type="checkbox" ${gdis ? '' : 'checked'} ${isDefaultProv ? 'disabled' : ''} onchange='toggleProvider(${jsq(g.id)}, this.checked)'> 启用
         </label>
         <span class="spacer"></span>
+        ${g.refreshable ? `<button class="ghost" title="从上游官方/逆向目录强制重新拉取，发现新增模型" onclick='event.stopPropagation();refreshProviderModels(${jsq(g.id)},this)'>↻ 重新拉取</button>` : ''}
         <span class="muted" style="font-size:12px">${g.models.length} 个模型</span>
         <span class="chev">▾</span>
       </div>

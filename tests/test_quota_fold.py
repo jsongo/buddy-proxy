@@ -436,7 +436,7 @@ console.log(JSON.stringify({clipped: box._cls.has('clipped'),
 # ---------------------------------------------------------------------------
 
 def test_all_three_panels_use_the_fold_helper():
-    """主列表 / PAT / antigravity / kimi / qoder / trae / codebuddy 面板都要走 quotaItemsHtml。
+    """主列表及各专属额度面板（含 Trae 海外版）都要走 quotaItemsHtml。
 
     只改主列表的话，PAT 和 antigravity 还是老样子——用户看到的仍是「其它通道
     没变」，等于没修。kimi/qoder/trae 面板（复用 antigravity 的分组结构）也要跟上。"""
@@ -447,7 +447,7 @@ def test_all_three_panels_use_the_fold_helper():
     # codebuddy 面板同期随多账号改造加入。
     panels = "".join(p.read_text(encoding="utf-8") for p in PANELS_JS)
     calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", panels)
-    assert sorted(calls) == ["ag", "codebuddy", "codebuddyintl", "kimi", "pat", "qoder", "qoderintl", "trae"], f"各面板没接上折叠: {calls}"
+    assert sorted(calls) == ["ag", "codebuddy", "codebuddyintl", "kimi", "pat", "qoder", "qoderintl", "trae", "traeintl"], f"各面板没接上折叠: {calls}"
 
 
 def test_render_benefits_syncs_after_rebuild():

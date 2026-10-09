@@ -160,6 +160,30 @@ def test_intl_enabled_and_provider_region():
     p = CodeBuddyIntlProvider()
     assert p.id == "codebuddyintl" and p._region == "global"
     assert p._quota_tag == "CodeBuddy 海外版"
+    models = p.models()
+    assert [m["id"] for m in models] == [
+        "codebuddyintl/hy4-preview",
+        "codebuddyintl/gpt-5.6-sol",
+        "codebuddyintl/gpt-5.6-terra",
+        "codebuddyintl/gpt-5.6-luna",
+        "codebuddyintl/gemini-3.5-flash",
+        "codebuddyintl/glm-5.3",
+        "codebuddyintl/kimi-k3",
+    ]
+    assert all(m["images"] and m["tool_call"] for m in models)
+    assert {m["id"].split("/", 1)[1]: m["credits"] for m in models} == {
+        "hy4-preview": "x0.00 credits",
+        "gpt-5.6-sol": "x3.47 credits",
+        "gpt-5.6-terra": "x1.39 credits",
+        "gpt-5.6-luna": "x0.14 credits",
+        "gemini-3.5-flash": "x0.99 credits",
+        "glm-5.3": "x0.79 credits",
+        "kimi-k3": "x1.62 credits",
+    }
+    assert not {"hy3", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex",
+                "glm-5.2", "kimi-k2.6"} & {
+                    m["id"].split("/", 1)[1] for m in models
+                }
     # 没有 global 账号：ensure_auth 拒绝启动
     creds.save_account_cred(_cred("u100"))
     with pytest.raises(HTTPException) as ei:

@@ -178,9 +178,19 @@ function renderBenefits() {
       (lines.length ? lines.join('') : '<div class="t-p muted">当天未打卡</div>');
   });
 
-  const rows = (BENEFITS.providers || []).filter(p => p.checkin.supported);
+  const rows = (BENEFITS.providers || []).filter(p =>
+    p.checkin.supported || (!p.disabled && p.id === 'traeintl'));
   document.getElementById('checkin-rows').innerHTML = rows.length ? rows.map(p => {
     const c = p.checkin;
+    // Trae 海外版上游没有每日签到端点：展示原因但不伪装成支持，更不能渲染
+    // 「立即打卡」按钮。额度仍由下方通用渠道卡正常展示与刷新。
+    if (p.id === 'traeintl' && !c.supported) {
+      return `<div class="pat-pkg ck-pkg"><div class="benefit-row">` +
+        `<div class="br-id"><i class="br-dot" style="background:${pcolor(p.id)}"></i>` +
+        `<span class="br-name">${esc(p.id)}</span></div>` +
+        `<div class="br-meta"><span class="br-state">海外版无每日签到</span></div>` +
+        `<div class="br-act"></div></div></div>`;
+    }
     // 签到态做成带状态点的徽标；「连续 N 天 / 每日 +X」降级成旁边的小 chip，
     // 别和状态挤在同一个 tag 里（那行本来就长，挤一起更难扫）
     const st = c.error ? `<span class="br-state bad" title="${esc(c.error)}">状态未知</span>`
@@ -237,9 +247,10 @@ function renderBenefits() {
   syncNextTimeAuto();
 
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
-  // traepat/antigravity/kimi/qoder/qoderintl/trae/codebuddy/dumate 的额度挪到底部专属面板内展示，这里排除，避免重复且缩短页面
+  // traepat/antigravity/kimi/qoder/qoderintl/trae/traeintl/codebuddy/dumate 的额度
+  // 挪到底部专属面板内展示，这里排除，避免重复且缩短页面。
   // 停用的通道整卡不展示（模型页 provider 开关，用户 2026-10-06 需求）
-  const qps = (BENEFITS.providers || []).filter(p => !p.disabled && p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'qoderintl' && p.id !== 'trae' && p.id !== 'codebuddy' && p.id !== 'codebuddyintl' && p.id !== 'dumate');
+  const qps = (BENEFITS.providers || []).filter(p => !p.disabled && p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'qoderintl' && p.id !== 'trae' && p.id !== 'traeintl' && p.id !== 'codebuddy' && p.id !== 'codebuddyintl' && p.id !== 'dumate');
   // zcode / zcode-start 是同一家产品的两档套餐，卡片排一起好对照——providers
   // 默认按通道注册顺序排，zcode-start 落在队尾、和 zcode 中间隔着 glm/mimo 的卡
   const zcIdx = qps.findIndex(p => p.id === 'zcode');
@@ -256,18 +267,19 @@ function renderBenefits() {
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="font-weight:600">${esc(p.name)}</span>
         ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}
-        ${headSum}
+        ${headSum}<span style="flex:1"></span>${providerRefreshButton(p.id)}
       </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
-  renderDumatePanel();
+  renderCodebuddyPanel();
+  renderCodebuddyIntlPanel();
+  renderTraePanel();
+  renderTraeIntlPanel();
   renderTraepatPanel();
-  renderAntigravityPanel();
   renderKimiPanel();
   renderQoderPanel();
   renderQoderIntlPanel();
-  renderTraePanel();
-  renderCodebuddyPanel();
-  renderCodebuddyIntlPanel();
+  renderAntigravityPanel();
+  renderDumatePanel();
   syncQuotaFold();  // 样式与布局就位后按实际高度校准（各面板都已重建完）
 }
 
@@ -552,6 +564,7 @@ function renderDumatePanel() {
           <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor}"></i>
           ${esc(stateText)}${esc(ver)}${ready && st && st.bceconsole_authenticated ? ' · 已登录' : ''}
         </span>
+        ${providerRefreshButton('dumate')}
       </div>
       <div class="pat-quota-grid">
         <div class="pat-pkg">

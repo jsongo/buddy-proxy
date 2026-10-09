@@ -293,11 +293,8 @@ function renderKimiPanel() {
     const delBtn = acct
       ? `<button class="ghost danger" title="删除该账号（refresh_token 作废/不再使用时）" ` +
         `onclick="kimiDeleteAccount('${acct.id}')">✕</button>` : '';
-    // ↻ 刷新：与 antigravity 卡片同款（refreshProviderQuota 通用）
-    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
-      `onclick="refreshProviderQuota('kimi', this)">↻</button>`;
     const renameBtn = acctRenameButton('kimi', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
     return `
     <div class="pat-pkg">
       <span class="pat-pkg-name"${m ? ` data-kimi-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.id) : grp)}</span>
@@ -316,6 +313,7 @@ function renderKimiPanel() {
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Kimi Code 订阅'}</span>
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">${multi ? '429/403 自动冷却换号（按导入顺位）' : '额度耗尽自动切换下一个账号'}</span>
+        ${providerRefreshButton('kimi')}
         <button class="ghost" title="粘贴 kimi cli 导出的 token JSON" onclick="openKimiImport()">导入账号</button>
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}

@@ -91,16 +91,39 @@ _QUOTA_NOTE = ("两组模型各自共享 5 小时 + 每周两个额度池（Gemi
                "按 token 成本比例消耗。上游只在用量逼近池上限时才下调读数——"
                "显示 100% 代表两组池都接近满额，不是「没有额度」")
 
-#: 组内模型清单展示时去掉 effort / 形态后缀（-low/-medium/-high/-tiered/-agent…），
-#: 同一模型的多档位只列一次。上游名形如 ``gemini-3.1-pro-low``、``gemini-3.8-flash-tiered``。
+#: 组内模型清单展示、动态目录归一化时去掉 effort / 形态后缀；同一模型
+#: 的多档位只对外发布一个 base id。其它末段（如 ``-thinking/-image/-agent``）
+#: 是模型身份的一部分，不能泛化裁掉。
 _EFFORT_SUFFIXES = ("-extra-low", "-low", "-medium", "-high", "-tiered")
+_EFFORTS = tuple(suffix.removeprefix("-") for suffix in _EFFORT_SUFFIXES)
+_INTERNAL_MODEL_PREFIXES = ("chat_", "tab_")
+
+
+def _split_effort_suffix(name: str) -> tuple[str, str | None]:
+    for suffix in _EFFORT_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)], suffix.removeprefix("-")
+    return name, None
 
 
 def _strip_effort_suffix(name: str) -> str:
-    for suffix in _EFFORT_SUFFIXES:
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return name
+    return _split_effort_suffix(name)[0]
+
+
+def _is_public_upstream_model(name: str) -> bool:
+    return bool(name) and not name.lower().startswith(_INTERNAL_MODEL_PREFIXES)
+
+
+def _default_effort(efforts: Sequence[str]) -> str:
+    """为动态条目选择保守且可路由的默认档位。"""
+    for preferred in ("medium", "tiered", "low", "high", "extra-low"):
+        if preferred in efforts:
+            return preferred
+    return efforts[0]
+
+
+def _group_for_model(model_id: str) -> str:
+    return "claude-gpt" if model_id.startswith(("claude-", "gpt-")) else "gemini"
 
 #: 多账号额度并发查询：整轮 deadline + 常驻线程池。
 #: 常驻（不是每轮新建）的理由见 trae/pat/quota.py：每轮新建 + shutdown(wait=False)
@@ -187,6 +210,12 @@ class AntigravityProvider(BaseProvider):
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
+        # 模块级 MODELS 只是冷启动种子。运行时目录归实例持有，刷新一个 provider
+        # 不能污染其它实例（测试、多 app 同进程也不会串目录）。
+        self._models: list[dict[str, Any]] = [dict(m) for m in MODELS]
+        self._model_by_id: dict[str, dict[str, Any]] = {
+            str(m["id"]): m for m in self._models
+        }
 
     # ---- BaseProvider 接口 ----
 
@@ -199,8 +228,94 @@ class AntigravityProvider(BaseProvider):
                 "owned_by": self.id,
                 "description": str(m.get("description") or m["id"]),
             }
-            for m in MODELS
+            for m in self._models
         ]
+
+    async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
+        """逐可用账号拉取上游目录，成功结果取并集并原子替换实例目录。
+
+        ``force`` 为通用刷新接口保留；本 provider 没有 TTL 缓存，每次均强拉。
+        单账号失败不阻断其余账号；若整轮没有有效成功结果（包括成功响应均为空），
+        则抛错且保留旧目录。静态表中已验证条目的路由规则与 metadata 优先保留，
+        新发现条目才按上游 effort 后缀推导配置。
+        """
+        del force
+        accounts = failover.available_accounts()
+        if not accounts:
+            raise RuntimeError("Antigravity 没有可用于刷新模型目录的账号")
+
+        # remote base -> 按账号/响应顺序去重后的 (完整上游名, effort)
+        discovered: dict[str, list[tuple[str, str | None]]] = {}
+        succeeded = 0
+        errors: list[str] = []
+        for acct in accounts:
+            try:
+                data = await self._fetch_available_models(acct.id)
+                upstream = data.get("models") if isinstance(data, dict) else None
+                if not isinstance(upstream, dict):
+                    raise ValueError("响应缺少 models dict")
+            except Exception as exc:  # noqa: BLE001 - 单账号失败不阻断目录并集
+                errors.append(f"{acct.id}: {exc}")
+                log.warning("antigravity 模型目录刷新跳过账号 %s: %s", acct.id, exc)
+                continue
+            succeeded += 1
+            for raw_name in upstream:
+                name = str(raw_name or "").strip()
+                if not _is_public_upstream_model(name):
+                    continue
+                base, effort = _split_effort_suffix(name)
+                variants = discovered.setdefault(base, [])
+                if all(existing != name for existing, _ in variants):
+                    variants.append((name, effort))
+
+        if not succeeded:
+            detail = "; ".join(errors) or "无账号成功"
+            raise RuntimeError(f"Antigravity 模型目录刷新全部失败：{detail}")
+        if not discovered:
+            raise RuntimeError("Antigravity 模型目录刷新成功响应均无公开模型")
+
+        # 已验证本地条目按对外 id 和 upstream base 双索引；例如静态
+        # gemini-3.8-flash -> gemini-3.8-flash-tiered 也能命中并保留固定路由。
+        local_by_base: dict[str, dict[str, Any]] = {}
+        # MODELS 永远在前：某个静态已验证条目若一轮未出现、下一轮重新出现，仍须
+        # 恢复 models.json 中的人工 metadata/路由规则，而不是退化成动态推导条目。
+        for local in (*MODELS, *self._models):
+            model_id = str(local.get("id") or "").strip()
+            upstream_name = str(local.get("upstream") or model_id).strip()
+            if model_id:
+                local_by_base.setdefault(model_id, local)
+            if upstream_name:
+                local_by_base.setdefault(_strip_effort_suffix(upstream_name), local)
+
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for base, variants in discovered.items():
+            local = local_by_base.get(base)
+            if local is not None:
+                entry = dict(local)
+            else:
+                efforts = [effort for _, effort in variants if effort is not None]
+                # 一个 base 的同档位可能来自多个账号；保持首次发现顺序并去重。
+                efforts = list(dict.fromkeys(efforts))
+                entry = {
+                    "id": base,
+                    "upstream": base,
+                    "group": _group_for_model(base),
+                    "description": base,
+                }
+                if efforts:
+                    entry["efforts"] = efforts
+                    entry["default_effort"] = _default_effort(efforts)
+            model_id = str(entry["id"])
+            if model_id not in seen_ids:
+                seen_ids.add(model_id)
+                merged.append(entry)
+
+        if not merged:  # 防未来过滤规则变化把有效响应意外清空
+            raise RuntimeError("Antigravity 模型目录刷新后无可用模型")
+        self._models = merged
+        self._model_by_id = {str(m["id"]): m for m in merged}
+        return list(self.models())
 
     def ensure_auth(self) -> None:
         if not has_cred():
@@ -222,10 +337,19 @@ class AntigravityProvider(BaseProvider):
     ) -> StreamingResponse | JSONResponse:
         self.ensure_auth()
         stream = bool(body.get("stream", False))
-        model = str(body.get("model") or MODELS[0]["id"]).removeprefix(f"{self.id}/")
+        model = str(body.get("model") or self._models[0]["id"]).removeprefix(f"{self.id}/")
         # 模型表条目驱动：upstream 真名 + effort 后缀（上游只认列表变体名，
-        # gemini 3 系裸名会被 429 RESOURCE_EXHAUSTED 伪装拒绝）
-        entry = _MODEL_BY_ID.get(model) or MODELS[0]
+        # gemini 3 系裸名会被 429 RESOURCE_EXHAUSTED 伪装拒绝）。刷新后的新模型
+        # 与 models() 共用实例索引，发现后即可路由。
+        entry = self._model_by_id.get(model)
+        if entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {
+                    "message": f"antigravity 未知模型: {model}",
+                    "type": "invalid_request_error",
+                }},
+            )
         upstream_model = apply_effort_suffix(entry, body.get("reasoning_effort"))
 
         # failover 循环：按登录顺位尝试可用账号（429/403/凭据失效 → 冷却换号）
@@ -539,7 +663,7 @@ class AntigravityProvider(BaseProvider):
             "email": str(cred.get("email") or ""),
             "project_id": str(cred.get("project_id") or ""),
             "tier": str(cred.get("tier") or ""),
-            "models": list(DEFAULT_MODELS),
+            "models": [str(m["id"]) for m in self._models],
             "accounts": [
                 {
                     "id": a.id,
@@ -640,8 +764,7 @@ class AntigravityProvider(BaseProvider):
         prefix = f"AG #{index} · " if multi else ""
         return self._quota_items_from(data, prefix), bool(data["models"])
 
-    @staticmethod
-    def _quota_items_from(data: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
+    def _quota_items_from(self, data: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
         """fetchAvailableModels 响应 → 按组聚合的额度条目（prefix 拼在 label 前）。
 
         组内共享 5 小时 + 每周两个额度池，上游对组内每个模型变体只回**同一个**
@@ -663,7 +786,7 @@ class AntigravityProvider(BaseProvider):
         upstream = data["models"]
         # group -> [(frac, reset_epoch, upstream_model_name)]
         by_group: dict[str, list[tuple[float, float, str]]] = {}
-        for m in MODELS:
+        for m in self._models:
             base = str(m.get("upstream") or m["id"])
             fracs: list[tuple[float, float, str]] = []
             for key, q in upstream.items():

@@ -58,6 +58,27 @@ class FakeProvider(BaseProvider):
         })
 
 
+class FakeRefreshProvider(FakeProvider):
+    id = "fakerefresh"
+    name = "Refreshable Fake Provider"
+
+    def __init__(self):
+        super().__init__()
+        self._models = [{"id": "old-model", "description": "Old Model"}]
+        self.refresh_calls = 0
+
+    def models(self):
+        return list(self._models)
+
+    async def refresh_models(self, force=False):
+        self.refresh_calls += 1
+        self._models = [
+            {"id": "old-model", "description": "Old Model"},
+            {"id": "new-model", "description": "New Model"},
+        ]
+        return self.models()
+
+
 class FakeStreamProvider(FakeProvider):
     id = "fakestream"
 
@@ -97,6 +118,8 @@ def _make_state(providers, tmp_path):
         default_provider="codebuddy",
         default_model=None,
         disabled_models=set(),
+        hidden_models=set(),
+        disabled_providers=set(),
         model_schedules={},
         model_order={},
         metrics=MetricsCollector(tmp_path / "metrics.jsonl"),
@@ -227,6 +250,110 @@ def test_models_grouped_by_provider(env):
     assert set(by_id) == {"codebuddy", "fakeprov", "fakestream"}
     assert any(m["id"] == "glm-5.3" for m in by_id["codebuddy"]["models"])
     assert any(m["id"] == "fake-model" for m in by_id["fakeprov"]["models"])
+
+
+def test_only_dynamic_catalog_provider_is_refreshable(env):
+    refreshable = FakeRefreshProvider()
+    env.state.providers[refreshable.id] = refreshable
+    groups = {g["id"]: g for g in env.client.get("/ui/api/models").json()["groups"]}
+    assert groups["fakerefresh"]["refreshable"] is True
+    assert groups["fakeprov"]["refreshable"] is False
+    assert groups["codebuddy"]["refreshable"] is False
+
+
+def test_generic_model_refresh_discovers_new_model(env):
+    refreshable = FakeRefreshProvider()
+    env.state.providers[refreshable.id] = refreshable
+    r = env.client.post("/ui/api/models/refresh", json={"provider": "fakerefresh"})
+    assert r.status_code == 200
+    assert r.json()["added"] == ["new-model"]
+    assert r.json()["count"] == 2
+    assert refreshable.refresh_calls == 1
+    groups = {g["id"]: g for g in env.client.get("/ui/api/models").json()["groups"]}
+    assert {m["id"] for m in groups["fakerefresh"]["models"]} == {"old-model", "new-model"}
+    assert "new-model" in {m["id"] for m in env.client.get("/v1/models").json()["data"]}
+
+
+def test_generic_model_refresh_rejects_static_provider(env):
+    r = env.client.post("/ui/api/models/refresh", json={"provider": "fakeprov"})
+    assert r.status_code == 400
+    assert "静态" in json.dumps(r.json(), ensure_ascii=False)
+
+
+def test_hide_model_filters_catalog_but_does_not_block_direct_call(env):
+    r = env.client.post("/ui/api/model-hidden", json={
+        "provider": "fakeprov", "model": "fake-model", "hidden": True,
+    })
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "model": "fakeprov/fake-model", "hidden": True}
+    assert settings_mod.load_settings()["hidden_models"] == ["fakeprov/fake-model"]
+
+    body = env.client.get("/ui/api/models").json()
+    group = next(g for g in body["groups"] if g["id"] == "fakeprov")
+    assert group["models"] == []
+    assert body["hidden_models"] == [{
+        "provider": "fakeprov", "model": "fake-model", "name": "Fake Model",
+    }]
+    assert "fake-model" not in {
+        m["id"] for m in env.client.get("/v1/models").json()["data"]
+        if m.get("provider") == "fakeprov"
+    }
+    options = env.client.get("/ui/api/model-order/options").json()["groups"]
+    assert not any(g["provider"] == "fakeprov" for g in options)
+
+    # 隐藏不是停用：显式点名照常路由。
+    call = env.client.post("/v1/chat/completions", json={
+        "model": "fakeprov/fake-model",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert call.status_code == 200
+
+    restored = env.client.post("/ui/api/model-hidden", json={
+        "provider": "fakeprov", "model": "fake-model", "hidden": False,
+    })
+    assert restored.status_code == 200
+    assert settings_mod.load_settings()["hidden_models"] == []
+    group = next(g for g in env.client.get("/ui/api/models").json()["groups"]
+                 if g["id"] == "fakeprov")
+    assert [m["id"] for m in group["models"]] == ["fake-model"]
+
+
+def test_hidden_model_stays_hidden_after_catalog_refresh(env):
+    refreshable = FakeRefreshProvider()
+    env.state.providers[refreshable.id] = refreshable
+    env.client.post("/ui/api/model-hidden", json={
+        "provider": "fakerefresh", "model": "old-model", "hidden": True,
+    })
+    env.client.post("/ui/api/models/refresh", json={"provider": "fakerefresh"})
+    group = next(g for g in env.client.get("/ui/api/models").json()["groups"]
+                 if g["id"] == "fakerefresh")
+    assert [m["id"] for m in group["models"]] == ["new-model"]
+
+
+def test_restore_missing_hidden_key_is_allowed(env):
+    env.state.hidden_models = {"fakeprov/removed-model"}
+    r = env.client.post("/ui/api/model-hidden", json={
+        "provider": "fakeprov", "model": "removed-model", "hidden": False,
+    })
+    assert r.status_code == 200
+    assert env.state.hidden_models == set()
+
+
+def test_codebuddyintl_models_are_an_independent_group(tmp_path, monkeypatch):
+    """海外产品表只能归 codebuddyintl，不能混入默认 CodeBuddy 裸名目录。"""
+    from buddy_proxy.codebuddy_provider.intl_provider import CodeBuddyIntlProvider
+    from buddy_proxy.web.ui.models_api import _model_groups
+
+    state = _make_state({"codebuddyintl": CodeBuddyIntlProvider()}, tmp_path)
+    monkeypatch.setattr(st, "proxy_state", state)
+    by_id = {g["id"]: g for g in _model_groups(state)}
+    intl_ids = {m["id"] for m in by_id["codebuddyintl"]["models"]}
+    cn_ids = {m["id"] for m in by_id["codebuddy"]["models"]}
+
+    assert "codebuddyintl/gpt-5.6-sol" in intl_ids
+    assert "codebuddyintl/gemini-3.5-flash" in intl_ids
+    assert "gpt-5.6-sol" not in cn_ids
+    assert "gemini-3.5-flash" not in cn_ids
 
 
 def test_stats_empty(env):

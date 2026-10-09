@@ -43,6 +43,9 @@ def test_refresh_api_with_checkin_flag_also_invalidates_checkin(monkeypatch):
     calls: list[str] = []
 
     class FakeManager:
+        def provider_ids(self):
+            return {"trae"}
+
         def invalidate_quota(self, pid):
             calls.append(f"quota:{pid}")
             return 1
@@ -79,8 +82,8 @@ def test_refresh_api_without_flag_keeps_checkin_cache(monkeypatch):
         return {"providers": []}
 
     monkeypatch.setattr(st, "proxy_state", SimpleNamespace(benefits=SimpleNamespace(
-        invalidate_quota=lambda pid: 1, invalidate_checkin=checkin_boom,
-        snapshot=snapshot)))
+        provider_ids=lambda: {"trae"}, invalidate_quota=lambda pid: 1,
+        invalidate_checkin=checkin_boom, snapshot=snapshot)))
     monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
     r = TestClient(m.app).post("/ui/api/benefits/refresh", json={"provider": "trae"})
     assert r.status_code == 200
@@ -92,8 +95,11 @@ def test_refresh_api_without_flag_keeps_checkin_cache(monkeypatch):
 
 def test_checkin_card_has_force_refresh_button_before_claim():
     js = (STATIC / "benefits.js").read_text(encoding="utf-8")
-    br_act = js[js.index('<div class="br-act">'):]
-    br_act = br_act[:br_act.index("</div>")]
+    # Trae 海外版的不支持行也有一个空 .br-act；以普通签到行的 claim 按钮反向
+    # 定位，避免误切到那个明确不提供操作的分支。
+    claim_at = js.index('onclick="claimNow(')
+    start = js.rindex('<div class="br-act">', 0, claim_at)
+    br_act = js[start:js.index("</div>", claim_at)]
     assert 'onclick="refreshCheckin(' in br_act, "强刷按钮缺失"
     assert ">强刷<" in br_act
     assert br_act.index("refreshCheckin") < br_act.index("claimNow"), "强刷要在「立即打卡」前面"

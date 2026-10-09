@@ -208,6 +208,11 @@ async def ui_benefits_refresh(request: Request):
     provider_id = (body.get("provider") or "").strip()
     if not provider_id:
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 provider"}})
+    if provider_id not in manager.provider_ids():
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"message": f"未知 provider: {provider_id}"}},
+        )
     if body.get("checkin"):
         manager.invalidate_checkin(provider_id)
     manager.invalidate_quota(provider_id)
