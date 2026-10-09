@@ -13,15 +13,42 @@ provider id 的子类，客户端以 ``codebuddyintl/<模型>`` 前缀显式路�
 ``/ui`` 管理页 CN 与海外各一张额度卡。``forward()``/``checkin``/``quota``
 全部继承父类，父类按 ``self._region`` 只取本区账号。
 
-模型目录返回空（不参与裸名自动匹配）：海外站的模型表要等登过海外账号后
-实测再录，v1 靠显式 ``codebuddyintl/<模型>`` 前缀路由。
+模型目录来自海外客户端在线「模型倍率」面板（2026-10-10 截图）并逐项用真实
+海外账号调用确认；同系列只保留用户指定的新一代模型。只发布带
+``codebuddyintl/`` 前缀的模型，不参与裸名自动匹配，也绝不混进 CN 的
+CodeBuddy 静态表。
 """
 
 from __future__ import annotations
 
+from typing import Any, Sequence
+
 from fastapi import HTTPException
 
 from .provider import CodeBuddyProvider
+
+
+# 海外客户端在线倍率面板的 2026-10-10 快照；内部 id 均经 www.codebuddy.ai
+# 真实调用验证。旧安装包 product-ide.json 的 Claude 3.7/4.0、GPT-5、Gemini 2.5
+# 已全数返回 11102，不能作为目录兜底。同系列旧代按用户要求不展示：Hy3、GPT
+# 5.5/5.4/5.3-Codex、GLM-5.2、Kimi-K2.6。``credits`` 保持项目既有格式，
+# 尤其 x0.00 是有效免费倍率，不能用真值判断吞掉。
+_INTL_MODELS: tuple[dict[str, Any], ...] = (
+    {"id": "hy4-preview", "name": "Hy4 preview", "vendor": "tencent",
+     "credits": "x0.00 credits", "tool_call": True, "images": True},
+    {"id": "gpt-5.6-sol", "name": "GPT-5.6-Sol", "vendor": "openai",
+     "credits": "x3.47 credits", "tool_call": True, "images": True},
+    {"id": "gpt-5.6-terra", "name": "GPT-5.6-Terra", "vendor": "openai",
+     "credits": "x1.39 credits", "tool_call": True, "images": True},
+    {"id": "gpt-5.6-luna", "name": "GPT-5.6-Luna", "vendor": "openai",
+     "credits": "x0.14 credits", "tool_call": True, "images": True},
+    {"id": "gemini-3.5-flash", "name": "Gemini-3.5-Flash", "vendor": "google",
+     "credits": "x0.99 credits", "tool_call": True, "images": True},
+    {"id": "glm-5.3", "name": "GLM-5.3", "vendor": "zhipu",
+     "credits": "x0.79 credits", "tool_call": True, "images": True},
+    {"id": "kimi-k3", "name": "Kimi-K3", "vendor": "moonshot",
+     "credits": "x1.62 credits", "tool_call": True, "images": True},
+)
 
 
 def intl_enabled() -> bool:
@@ -49,6 +76,20 @@ class CodeBuddyIntlProvider(CodeBuddyProvider):
 
     def __init__(self) -> None:
         super().__init__(region="global")
+
+    def models(self) -> Sequence[dict[str, Any]]:
+        """海外版聊天模型（独立前缀，避免被默认 CodeBuddy 裸名认领）。"""
+        return [
+            {
+                **model,
+                "id": f"{self.id}/{model['id']}",
+                "object": "model",
+                "created": 0,
+                "owned_by": self.id,
+                "description": model["name"],
+            }
+            for model in _INTL_MODELS
+        ]
 
     def ensure_auth(self) -> None:
         """启动校验：必须有海外版账号。

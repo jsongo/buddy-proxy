@@ -74,9 +74,12 @@ src/buddy_proxy/
   multi-account channels reuse, `benefits_checkin.js` the checkin rows + Kimi
   panel, `benefits_panels.js` the Trae PAT / Antigravity / Qoder panels.
   The panel mount order in `index.html` is also the visible quota-card order:
-  Kimi stays immediately above DuMate, while the operational Trae PAT card is
-  intentionally last. It may update runtime settings but must use
-  `core/settings.py` for persistence.
+  regional twins stay adjacent (CN then Global), Kimi sits between Trae and
+  Qoder, and the operational Trae PAT card is intentionally last. Dedicated
+  panels put one provider-wide quota refresh in the title rather than repeating
+  it on every account card; Trae Global has a separate quota panel and an
+  explicit unsupported-check-in row. The UI may update runtime settings but
+  must use `core/settings.py` for persistence.
 
 ## Runtime composition
 
@@ -172,6 +175,12 @@ identities it recognizes. Requests therefore carry the desktop app's
 (`qoder/umid.py`, cached 1h, subprocess-based with a static-header fallback
 when the binary is absent); without a recognized fingerprint the campaign list
 silently omits the check-in entry and the UI misreports "no claimable reward".
+For the remaining process-session targeting case, `qoder/campaigns.py` has a
+strict read-only desktop-log fallback: it scans only the newest log tail, matches
+payload uid exactly, rejects stale/future/expired entries, and is consulted only
+when direct results contain no claim action. Direct state always wins; a desktop
+claim may replace the same-id `VIEW_DETAILS` placeholder but cannot overwrite an
+actual direct claim result.
 
 The ASGI event loop is shared by model streaming and management routes, so
 blocking operations must stay off-loop even when wrapped by an `async` method.
@@ -190,6 +199,19 @@ benefits, and unrelated model routes in the same process.
   `config_name` are the explicit boundary mapping and must preserve the exact
   upstream spelling. Dynamic providers expose their catalog through
   `BaseProvider.models()`.
+- A provider that implements optional async `refresh_models(force=True)` is
+  capability-discovered by `web/ui/models_api.py`; only then does its group show
+  “↻ 重新拉取”. Qoder/Kimi/Antigravity refresh every available account and
+  publish the successful union. The replacement is provider-instance local and
+  atomic; an all-failed or valid-but-empty round raises and leaves the previous
+  catalog untouched. Newly discovered entries must feed the same runtime lookup
+  used by forwarding, otherwise the UI would advertise a model that routing
+  silently rewrites or rejects.
+- `hidden_models` and `disabled_models` are intentionally different policy
+  layers. A hidden `provider/model` is filtered from the models UI, selectors
+  and both `/v1/models` arrays, but direct addressing still routes it; a disabled
+  pair fails fast. The UI builds the hidden-recovery list from an unfiltered
+  catalog and retains missing keys so stale settings remain removable.
 - Any persisted model identity must be built with `core.settings.model_key(
   provider, model)`. It normalizes the legacy `workbuddy` name to `codebuddy`;
   bypassing it can make UI policy and runtime routing disagree.

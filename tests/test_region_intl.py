@@ -205,6 +205,74 @@ def test_trae_intl_provider_identity():
     assert p.checkin_status() is None and p.checkin_claim() is None
 
 
+def test_trae_intl_benefits_snapshot_has_quota_and_unsupported_checkin(
+        tmp_path, monkeypatch):
+    """真实 TraeIntlProvider 的海外额度能进 snapshot，签到能力明确关闭。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from buddy_proxy.benefits import BenefitsManager
+
+    # snapshot 会读取全局设置；显式隔离，绝不读取用户真实 settings.json。
+    monkeypatch.setenv("BUDDY_PROXY_SETTINGS", str(tmp_path / "settings.json"))
+    account = save_account_cred(_trae_cred("gl-snapshot", region="global"))
+    calls = []
+
+    monkeypatch.setattr(
+        "buddy_proxy.trae.provider.ensure_account_token",
+        lambda account_id: (f"tok-{account_id}", {"uid": account_id}),
+    )
+
+    def _fetch_usage(token="", account_id="", region=""):
+        calls.append({"token": token, "account_id": account_id, "region": region})
+        return _intl_usage_fixture()
+
+    monkeypatch.setattr("buddy_proxy.trae.provider.fetch_ent_usage", _fetch_usage)
+
+    provider = TraeIntlProvider()
+
+    def _unexpected_checkin(*_args, **_kwargs):
+        raise AssertionError("Trae 海外版不应查询或领取签到")
+
+    monkeypatch.setattr(provider, "checkin_status", _unexpected_checkin)
+    monkeypatch.setattr(provider, "checkin_claim", _unexpected_checkin)
+
+    manager = BenefitsManager(
+        tmp_path / "checkin.jsonl",
+        SimpleNamespace(providers={"traeintl": provider}),
+    )
+    # 避免默认 CodeBuddy 参与快照并触发与本契约无关的上游查询。
+    monkeypatch.setattr(manager, "_providers", lambda: {"traeintl": provider})
+
+    snapshot = asyncio.run(manager.snapshot())
+    assert len(snapshot["providers"]) == 1
+    entry = snapshot["providers"][0]
+    assert entry["id"] == "traeintl"
+    assert entry["name"] == "Trae 海外版"
+    assert entry["checkin"] == {"supported": False}
+    assert snapshot["checkin_enabled_providers"] == []
+
+    quota = entry["quota"]
+    assert quota["supported"] is True
+    assert quota["level"] is None
+    head, fast, basic = quota["items"]
+    assert head["head_only"] is True and head["unit"] == "dollar"
+    assert fast["label"] == "Pro Plan · Premium 快速请求"
+    assert fast["used"] is None and fast["total"] == 600
+    assert fast["unit"] == "count"
+    assert basic["label"] == "Pro Plan · Basic 用量"
+    assert basic["used"] == 0.0001 and basic["total"] == 20
+    assert basic["unit"] == "dollar"
+    assert calls == [{
+        "token": f"tok-{account.id}",
+        "account_id": account.id,
+        "region": "global",
+    }]
+
+    result = asyncio.run(manager.claim_now("traeintl"))
+    assert result == {"ok": False, "error": "provider traeintl 不支持打卡"}
+
+
 def test_intl_quota_label_tag_differs_from_cn(monkeypatch):
     """两个通道并行在线时，额度行标不能都叫 ``Trae #N``（分不清哪张是美元）。"""
     _seed_quota_stubs(monkeypatch)

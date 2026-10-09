@@ -73,6 +73,7 @@ class ProxyState:
         default_provider: str = "codebuddy",
         default_model: Optional[str] = None,
         disabled_models: Optional[set[str]] = None,
+        hidden_models: Optional[set[str]] = None,
         disabled_providers: Optional[set[str]] = None,
         model_schedules: Optional[dict[str, list]] = None,
         model_order: Optional[dict[str, list[str]]] = None,
@@ -97,6 +98,10 @@ class ProxyState:
         # 已停用的模型键集合，形如 "codebuddy/glm-4.7"（provider/model）。
         # 命中的 (provider, model) 组合在转发时直接失败（settings.py 持久化，/ui 可改）
         self.disabled_models: set[str] = set(disabled_models or ())
+        # 从模型目录隐藏的模型键集合，形如 "qoder/qwen3.8-max"。隐藏只影响
+        # /v1/models、管理页与选择器曝光，直接点名仍可调用；与 disabled_models
+        # 的「调用直接失败」语义严格分开。settings.py 持久化，/ui 可改。
+        self.hidden_models: set[str] = set(hidden_models or ())
         # 整通道停用的 provider id 集合（/ui 模型页 provider 标题栏的开关，用户
         # 2026-10-06 需求）。命中通道：转发 403、/v1/models 组置灰、额度页与告警
         # 不再展示、顺序页对应模型置灰。settings.py 持久化，/ui 可改。

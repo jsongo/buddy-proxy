@@ -47,6 +47,7 @@ from .credentials import (
 from .upstream import (
     build_upstream_body,
     device_headers,
+    fetch_models,
     fetch_usages,
     normalize_base_url,
     usages_to_items,
@@ -89,7 +90,6 @@ def _load_models() -> list[dict[str, Any]]:
 
 MODELS: list[dict[str, Any]] = _load_models()
 DEFAULT_MODELS: dict[str, str] = {m["id"]: str(m.get("description") or m["id"]) for m in MODELS}
-_MODEL_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
 
 _QUOTA_NOTE = "Kimi Code 订阅：5 小时窗口 + 7 天池双额度（/v1/usages）"
 _QUOTA_LOGIN_NOTE = "Kimi 未登录：跑 `buddy login kimi`，或在管理面板「导入账号」粘贴 kimi cli 导出的 token JSON"
@@ -183,6 +183,9 @@ class KimiProvider(BaseProvider):
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
+        # 每个 provider 实例自持运行时目录；模块级 MODELS 只作冷启动种子，刷新
+        # 不能污染其它实例（尤其测试/多 app 场景）。
+        self._models: list[dict[str, Any]] = [dict(m) for m in MODELS]
 
     # ---- BaseProvider 接口 ----
 
@@ -193,10 +196,66 @@ class KimiProvider(BaseProvider):
                 "object": "model",
                 "created": 0,
                 "owned_by": self.id,
-                "description": str(m.get("description") or m["id"]),
+                "description": str(
+                    m.get("description") or m.get("display_name") or m.get("name") or m["id"]),
             }
-            for m in MODELS
+            for m in self._models
         ]
+
+    async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
+        """逐可用账号强拉官方 ``/v1/models``，成功结果取并集。
+
+        ``force`` 为统一刷新接口保留；Kimi 当前没有 TTL 缓存，每次调用都请求
+        上游。单账号失败只记日志；整轮没有一个成功账号则抛错且不改旧目录。
+        本地已有条目按 id 合并，以保留 description/default/verified 等 metadata；
+        上游新 id 则采用 fetch_models 归一出的 id/name/display_name。
+        """
+        del force
+        accounts = failover.available_accounts()
+        if not accounts:
+            raise RuntimeError("Kimi 没有可用于刷新模型目录的账号")
+
+        discovered: dict[str, dict[str, Any]] = {}
+        succeeded = 0
+        errors: list[str] = []
+        for acct in accounts:
+            try:
+                token, cred = await asyncio.to_thread(ensure_account_token, acct.id)
+                entries = await asyncio.to_thread(
+                    fetch_models, str(cred.get("base_url") or ""), token, cred)
+            except Exception as exc:  # noqa: BLE001 - 单账号失败不阻断并集刷新
+                errors.append(f"{acct.id}: {exc}")
+                log.warning("kimi 模型目录刷新跳过账号 %s: %s", acct.id, exc)
+                continue
+            succeeded += 1
+            for entry in entries:
+                model_id = str(entry.get("id") or "").strip()
+                if model_id:
+                    discovered.setdefault(model_id, entry)
+
+        if not succeeded:
+            detail = "; ".join(errors) or "无账号成功"
+            raise RuntimeError(f"Kimi 模型目录刷新全部失败：{detail}")
+        if not discovered:
+            # fetch_models 已拒绝空目录；这里防测试替身或未来实现违反契约。
+            raise RuntimeError("Kimi 模型目录刷新全部成功响应均为空")
+
+        local_by_id = {str(m.get("id")): m for m in self._models if m.get("id")}
+        merged: list[dict[str, Any]] = []
+        for model_id, remote in discovered.items():
+            local = local_by_id.get(model_id)
+            if local is None:
+                merged.append(dict(remote))
+                continue
+            # 已知 id 以本地完整条目为底，只补上游新增字段；尤其不让归一阶段
+            # 合成的 description 覆盖 models.json 里更丰富的人工 metadata。
+            item = dict(local)
+            for key, value in remote.items():
+                if key not in item:
+                    item[key] = value
+            merged.append(item)
+        self._models = merged
+        return list(self.models())
 
     def ensure_auth(self) -> None:
         if not has_cred():
@@ -219,9 +278,18 @@ class KimiProvider(BaseProvider):
     ) -> StreamingResponse | JSONResponse:
         self.ensure_auth()
         stream = bool(body.get("stream", False))
-        model = str(body.get("model") or MODELS[0]["id"]).removeprefix(f"{self.id}/")
-        # 模型表条目驱动：不认识的模型名落默认模型（上游自己还会再校验一遍）
-        entry = _MODEL_BY_ID.get(model) or MODELS[0]
+        model = str(body.get("model") or self._models[0]["id"]).removeprefix(f"{self.id}/")
+        # 只路由当前实例目录明确命中的 id。刷新后新模型会立即进入此表；未知
+        # 模型不能再静默改写成默认模型，否则请求看似成功却实际跑了别的模型。
+        entry = next((m for m in self._models if str(m.get("id")) == model), None)
+        if entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {
+                    "message": f"kimi 未知模型: {model}",
+                    "type": "invalid_request_error",
+                }},
+            )
         upstream_model = str(entry["id"])
 
         # failover 循环：按顺位尝试可用账号（429/403/凭据失效 → 冷却换号）

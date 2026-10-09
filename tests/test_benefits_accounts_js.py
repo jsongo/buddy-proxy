@@ -261,7 +261,7 @@ console.log(JSON.stringify({name: BENEFITS.providers[0].checkin.accounts[0].name
 
 
 def test_move_delete_row_buttons_markup():
-    """▲▼ 带 id 内联 + 首尾禁用；✕ 带 pid+id + 通道 hint；↻ 无条件排在按钮组最前。"""
+    """▲▼ 带 id 内联 + 首尾禁用；✕ 带 pid+id；↻ 只在渠道标题。"""
     out = _run_js("""
 const acct = {id: 'u1'};
 console.log(JSON.stringify({
@@ -281,9 +281,11 @@ console.log(JSON.stringify({
     assert "acctDelete('dumate','u1')" in data["del"] and "清除本地缓存" in data["del"]
     assert "ghost danger" in data["del"]
     assert data["delNoAcct"] == "", "没有账号（快照未到）时不渲染 ✕"
-    assert data["row"].startswith('<span class="ag-move"><button class="ghost" title="刷新')
-    assert "refreshProviderQuota('dumate', this)" in data["row"], "↻ 无条件在组内"
-    assert data["row"].index("refreshProviderQuota") < data["row"].index("acctMove"), "↻ 在最前"
+    assert data["row"].startswith('<span class="ag-move"><button class="ghost" title="上移')
+    assert "refreshProviderQuota" not in data["row"], "账号卡内不应重复放渠道级 ↻"
+    assert "refreshProviderQuota('dumate', this)" in _run_js(
+        "console.log(providerRefreshButton('dumate'));"
+    )
 
 
 def test_confirm_account_delete_modal_flow():

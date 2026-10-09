@@ -524,6 +524,16 @@ def main():
     if disabled_models:
         print(f"[Disabled Models] {len(disabled_models)} 个已停用: {', '.join(sorted(disabled_models))}")
 
+    # 隐藏模型：只从模型目录与管理页摘除，直接点名仍可调用。与 disabled_models
+    # 同用 provider/裸名口径，避免 qoder 这类目录 id 自带 provider 前缀时写出双前缀。
+    hidden_models = {
+        settings_mod.model_key(*k.split("/", 1)) if "/" in k else settings_mod.model_key("codebuddy", k)
+        for k in (saved_settings.get("hidden_models") or [])
+        if isinstance(k, str) and k.strip()
+    }
+    if hidden_models:
+        print(f"[Hidden Models] {len(hidden_models)} 个已隐藏: {', '.join(sorted(hidden_models))}")
+
     # 整通道停用：settings.json 的 provider id 列表，命中通道转发 403、/ui 各处
     # 隐藏或置灰（模型页开关写入，用户 2026-10-06 需求）
     disabled_providers = {
@@ -590,6 +600,7 @@ def main():
         default_provider=args.default_provider,
         default_model=default_model or None,
         disabled_models=disabled_models,
+        hidden_models=hidden_models,
         disabled_providers=disabled_providers,
         model_schedules=model_schedules,
         model_order=model_order,

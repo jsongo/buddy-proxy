@@ -6,7 +6,7 @@
 // 未来再接入照 dumatePanel 的样子写一个 CONFIG 即可，不必重抄这套逻辑。
 //
 // 复用件：confirmAccountDelete（删除确认弹窗）/ acctSubHtml（账号状态副标题）/
-//         acctMoveButtons（▲▼ 顺位）/ acctDeleteButton + acctRowButtons（✕ + ↻ 按钮组）/
+//         acctMoveButtons（▲▼ 顺位）/ acctDeleteButton + acctRowButtons（账号按钮组）/
 //         groupAccountsByPrefix（按「<Prefix> #N」切分组）/ acctLoad（账号快照回填，
 //         含首份快照整卡重渲 + 就地回填 + syncQuotaFold 校准）
 //
@@ -197,12 +197,17 @@ function acctDeleteButton(pid, acct, hint) {
       `onclick="acctDelete('${pid}','${acct.id}')">✕</button>` : '';
 }
 
-/** ▲▼ + ✕ + ↻ 合成右上角按钮组。仍放块尾、绝对定位——load 的就地回填靠「名字元素的
- *  下一个兄弟是副标题」定位，中间插任何元素会乱。↻ 无条件渲染（单账号也能刷）。 */
+/** 渠道标题统一使用的整体额度刷新按钮。 */
+function providerRefreshButton(pid) {
+  return `<button class="ghost" title="刷新本通道全部账号额度（绕过缓存重查）" ` +
+    `onclick="refreshProviderQuota('${pid}', this)">↻</button>`;
+}
+
+/** ▲▼ + ✕ 合成右上角账号按钮组。渠道级 ↻ 统一放面板标题；这里仍放块尾、
+ *  绝对定位——load 的就地回填靠「名字元素的下一个兄弟是副标题」定位，
+ *  中间插任何元素会乱。 */
 function acctRowButtons(pid, moveBtns, delBtn) {
-  return `<span class="ag-move">` +
-    `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
-    `onclick="refreshProviderQuota('${pid}', this)">↻</button>${moveBtns}${delBtn}</span>`;
+  return `<span class="ag-move">${moveBtns}${delBtn}</span>`;
 }
 
 /** 按「<Prefix> #N」切分组。额度 label 形如「<Prefix> #N · <条目>」，单账号无前缀。

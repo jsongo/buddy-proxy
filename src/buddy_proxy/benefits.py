@@ -408,6 +408,10 @@ class BenefitsManager:
         providers.update(getattr(self._state, "providers", {}) or {})
         return providers
 
+    def provider_ids(self) -> set[str]:
+        """返回当前已注册通道 id，供管理接口校验定向操作的目标。"""
+        return set(self._providers())
+
     def checkin_providers(self) -> dict[str, Any]:
         return {
             pid: p for pid, p in self._providers().items()

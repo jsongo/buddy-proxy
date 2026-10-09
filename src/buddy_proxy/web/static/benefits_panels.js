@@ -36,6 +36,7 @@ function renderTraepatPanel() {
         <span class="tag">多账号 · 自愈</span>
         <span class="grow"></span>
         <span class="pat-keeper" id="pat-keeper"></span>
+        ${providerRefreshButton('traepat')}
         <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
       </div>
       <div class="pat-quota-grid">${quotaHtml}</div>
@@ -239,21 +240,35 @@ async function agDeleteAccount(id) {
   }
 }
 
-// 卡片级「↻ 刷新」：只作废本通道的额度缓存并重查（POST 返回新快照），其余
-// 通道不打扰。antigravity / kimi 卡片共用；按钮自己转圈，完成后走 force 刷新
-// 渲染（写后刷新竞态已在 ensureData 修掉，这里必然读到刚返回的新数据）。
+// 渠道标题「↻ 刷新」：一次作废并重查该 provider 的全部账号额度，其余通道不打扰。
+// POST 已返回完整 snapshot 时直接更新全局并重渲；只为兼容旧响应才 force GET。
 const QREFRESH = {};  // pid -> 在飞标记：转圈期间忽略再点（整页 30s 重建 innerHTML，
                       // 按钮态挂 DOM 会被刷掉，和 QUOTA_FOLD 同理放模块级）
+let QREFRESH_SEQ = 0;
+let QREFRESH_APPLIED_SEQ = 0;
 async function refreshProviderQuota(pid, btn) {
   if (QREFRESH[pid]) return;
   QREFRESH[pid] = true;
+  const requestSeq = ++QREFRESH_SEQ;
   const prev = btn ? btn.innerHTML : '';
   if (btn) { btn.disabled = true; btn.innerHTML = '⟳'; btn.classList.add('spinning'); }
   try {
-    await api('/ui/api/benefits/refresh', {
+    const snapshot = await api('/ui/api/benefits/refresh', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({provider: pid})});
-    await loadData(['benefits'], true);
+    // refresh 接口已经返回作废缓存后的完整快照，直接采用可少一次 GET，也避免
+    // 写后读取竞态。兼容旧服务未返回 providers 的响应时再走强制拉取。
+    if (snapshot && Array.isArray(snapshot.providers)) {
+      // 不同 provider 可以并行刷；较早请求若较晚返回，快照里可能还带着另一个
+      // provider 刷新前的数据。只允许最后发起且尚未被采用的完整快照覆盖全局。
+      if (requestSeq > QREFRESH_APPLIED_SEQ) {
+        QREFRESH_APPLIED_SEQ = requestSeq;
+        BENEFITS = snapshot;
+        renderBenefits();
+      }
+    } else {
+      await loadData(['benefits'], true);
+    }
   } catch (e) { toast('刷新失败: ' + e.message, true); }
   finally {
     QREFRESH[pid] = false;
@@ -306,14 +321,8 @@ function renderAntigravityPanel() {
     // ✎ 改名：同样要 id（同 ✕ 快照没到先不渲）。放按钮组最前=标题行行尾，
     // 别插在名字和副标题之间——就地回填靠「名字元素的下一个兄弟是副标题」定位。
     const renameBtn = acctRenameButton('antigravity', acct);
-    // ↻ 刷新：作废本通道额度缓存重查（quota 缓存 TTL 5 分钟，等不及就用它）
-    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
-      `onclick="refreshProviderQuota('antigravity', this)">↻</button>`;
-    // ✎ ▲▼ ✕ ↻ 合成一个右上角按钮组（用户视角=「账号名那一行」的行尾）。
-    // 仍放块尾、绝对定位到右上角——loadAntigravityAccounts 的就地回填靠
-    // 「名字元素的下一个兄弟是副标题」定位，中间插任何元素都会让它错乱。
-    // 刷新按钮无条件渲染（单账号没有 ▲▼✕ 也能刷）。
-    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
+    // 账号级按钮只保留改名/排序/删除；渠道级 ↻ 统一放面板标题。
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
     return `
     <div class="pat-pkg">
       <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.email) : grp)}</span>
@@ -331,6 +340,7 @@ function renderAntigravityPanel() {
         <span class="tag">多账号 · 自动切换</span>
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">429/403 自动冷却换号（按登录顺位）</span>
+        ${providerRefreshButton('antigravity')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       <div class="pat-quota-grid">${quotaHtml}</div>
@@ -524,10 +534,8 @@ function renderQoderPanel() {
     const delBtn = acct
       ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
         `onclick="qoderDeleteAccount('${acct.id}')">✕</button>` : '';
-    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
-      `onclick="refreshProviderQuota('qoder', this)">↻</button>`;
     const renameBtn = acctRenameButton('qoder', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
     // 合计行：qoder 的订阅额度/加油包/专属积分是并存的份额，加起来才是账号
     // 总量（后端 sum_items 声明可合计）。quotaHeadSum 原本服务「列表头部」，
     // 借用它产出同款「剩 X / Y」chip，放进账号卡标题行下。
@@ -551,6 +559,7 @@ function renderQoderPanel() {
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Qoder 订阅'}</span>
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">${multi ? '403/额度尽自动冷却换号（按登录顺位）' : '403/额度尽自动切换下一个账号'}</span>
+        ${providerRefreshButton('qoder')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
@@ -640,7 +649,7 @@ function renderQoderIntlPanel() {
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head"><span class="name">Qoder 海外版</span>
         <span class="tag">Global · 额度与签到</span><span class="grow"></span>
-        <button class="ghost" title="刷新本通道额度（绕过缓存重查）" onclick="refreshProviderQuota('qoderintl', this)">↻</button>
+        ${providerRefreshButton('qoderintl')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
@@ -820,10 +829,8 @@ function renderTraePanel() {
     const delBtn = acct
       ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
         `onclick="traeDeleteAccount('${acct.id}')">✕</button>` : '';
-    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
-      `onclick="refreshProviderQuota('trae', this)">↻</button>`;
     const renameBtn = acctRenameButton('trae', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
     // 合计行：总额度那条（head_only，unshift 到组首）单独供数——各权益包是
     // 它的明细不能相加，quotaHeadSum 走非 sum_items 分支取第一条有数的。
     const headSum = quotaHeadSum({items: its});
@@ -846,6 +853,7 @@ function renderTraePanel() {
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Trae Work'}</span>
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
+        ${providerRefreshButton('trae')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
@@ -886,6 +894,51 @@ async function loadTraeAccounts() {
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
   }
+}
+
+
+// ---- TRAE INTL 面板（海外额度独立展示；上游没有每日签到端点）----
+function renderTraeIntlPanel() {
+  const panel = document.getElementById('traeintl-panel');
+  if (!panel) return;
+  const provider = (BENEFITS.providers || []).find(p => p.id === 'traeintl' && !p.disabled);
+  if (!provider) { panel.innerHTML = ''; return; }
+
+  // 海外额度标签由 provider 明确使用「Trae 海外版 #N · …」。保持账号分组，
+  // 不并回 CN 面板，避免两区额度与币种混在同一张卡里。
+  const groups = new Map();
+  const notices = [];
+  for (const it of (provider.quota && provider.quota.supported ? provider.quota.items : []) || []) {
+    const cut = it.label.indexOf(' · ');
+    if (it.query_failed || (it.percent == null && it.used == null && cut < 0)) {
+      notices.push(it); continue;
+    }
+    const grp = cut >= 0 ? it.label.slice(0, cut) : 'Trae 海外版';
+    const sub = cut >= 0 ? it.label.slice(cut + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    const item = Object.assign({}, it, {label: sub});
+    if (it.head_only) groups.get(grp).unshift(item);
+    else groups.get(grp).push(item);
+  }
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => {
+    const headSum = quotaHeadSum({items: its});
+    return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>` +
+      `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
+      `${quotaItemsHtml(its, 'traeintl:' + grp)}</div>`;
+  }).join('');
+  const noticeHtml = notices.map(quotaItemHtml).join('');
+
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head"><span class="name">Trae 海外版</span>
+        <span class="tag">Global · 海外额度</span><span class="grow"></span>
+        <span class="muted" style="font-size:11px">海外版无每日签到</span>
+        ${providerRefreshButton('traeintl')}
+      </div>
+      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
+      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（<span class="mono">buddy login traeintl</span> 后重启 Buddy）</div>'}
+    </div>`;
 }
 
 
@@ -1019,10 +1072,8 @@ function renderCodebuddyPanel() {
     const delBtn = acct
       ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
         `onclick="codebuddyDeleteAccount('${acct.id}')">✕</button>` : '';
-    const refreshBtn = `<button class="ghost" title="刷新本通道额度（绕过缓存重查）" ` +
-      `onclick="refreshProviderQuota('codebuddy', this)">↻</button>`;
     const renameBtn = acctRenameButton('codebuddy', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${refreshBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
     // 合计行：codebuddy 的订阅套餐/资源包是并存的份额，加起来才是账号总量
     // （后端 sum_items 声明可合计）。
     const headSum = quotaHeadSum({items: its, sum_items: true});
@@ -1045,6 +1096,7 @@ function renderCodebuddyPanel() {
         <span class="tag">${multi ? '多账号 · 自动切换' : 'CodeBuddy 订阅'}</span>
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
+        ${providerRefreshButton('codebuddy')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
@@ -1128,7 +1180,7 @@ function renderCodebuddyIntlPanel() {
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head"><span class="name">CodeBuddy 海外版</span>
         <span class="tag">Global · 额度与签到</span><span class="grow"></span>
-        <button class="ghost" title="刷新本通道额度（绕过缓存重查）" onclick="refreshProviderQuota('codebuddyintl', this)">↻</button>
+        ${providerRefreshButton('codebuddyintl')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`

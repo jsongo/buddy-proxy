@@ -11,8 +11,8 @@
 - **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
 - **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
-- **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；配置持久化在 `settings.json` 的 `disabled_providers`。按页签懒加载，首屏不会卡在最慢的日志接口上
-- **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）
+- **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
+- **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）；本地隐藏项会同时从该端点、管理页目录和模型顺序候选中移除
 - **脱敏**（`--desensitize`）— 向 system 消息里的合规关键词插入零宽空格，避免后端关键词审核误拦
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
 - **工具调用** — 完整的 function calling 支持，自动过滤无效工具定义；`tool_choice` 在 OpenAI / Anthropic 两种形态之间统一归一化，绝不会以 object 形式发给上游
@@ -37,7 +37,7 @@ buddy start                # 启动代理并打开管理页
 
 首次运行会自动创建状态目录 `~/.buddy-proxy/`（权限 `0700`，可用
 `BUDDY_PROXY_STATE_DIR` 整体覆盖）。机器本地的东西都在这里：`settings.json`
-（默认模型、已停用模型/通道、限时窗口）、Trae Work 凭证 `trae_work.json`、PAT token
+（默认模型、已停用/隐藏模型、已停用通道、限时窗口）、Trae Work 凭证 `trae_work.json`、PAT token
 缓存 `trae_pat_token.json`、客户端名映射 `buddy_client_names.json`。目录内含凭证，
 注意别被备份或版本控制带走。启动时会以 `[State] ...` 打印实际路径。
 
@@ -112,7 +112,7 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
 - **每日签到** —— 逐账号活动签到（连签积分），管理页聚合展示、逐账号明细；领取时把每个可领的账号都领一遍。
 - **积分** —— 逐账号资源包汇总（管理页按 `CodeBuddy #N · …` 分组），另有按请求粒度的消耗流水（`/ui/api/codebuddy/usage-records`）。
 - 账号管理：`GET /ui/api/codebuddy/accounts` 及 `order` / `rename` / `delete` 端点；管理面板支持逐账号 ▲▼ 顺位、✎ 改名、✕ 删除。
-- **海外版（`codebuddyintl`）** —— 同上游家族、换 host：`https://www.codebuddy.ai`（桌面端自带 product-ide.json / product-ide-cn.json 两份产品配置，唯一差异就是这个 host；2026-10 实测两边 `/v2/plugin` 协议逐字节同构）。登录：`buddy login codebuddy --region global`（别名 `codebuddyintl`）；海外账号在同一账号 store 里落 `region` 标，与 CN 账号互不混用。有海外账号后重启 Buddy 自动注册通道——模型用 `codebuddyintl/<模型>` 前缀显式路由，管理页单独一张「CodeBuddy 海外版」额度卡（额度 + ✎ 改名；▲▼/✕ 仍在 CN 卡）。海外登录态写在 `~/.codebuddy-session-global.json`（绝不写 CN 的历史 session 路径，避免 legacy 迁移把海外号并进 CN 区）。签到/额度端点在海外站按原样调用，若海外版未提供对应活动，逐账号行显示查询失败、不影响整页。
+- **海外版（`codebuddyintl`）** —— 同上游家族、换 host：`https://www.codebuddy.ai`，2026-10 实测两边 `/v2/plugin` 协议逐字节同构。登录：`buddy login codebuddy --region global`（别名 `codebuddyintl`）；海外账号在同一账号 store 里落 `region` 标，与 CN 账号互不混用。有海外账号后重启 Buddy 自动注册通道——模型用 `codebuddyintl/<模型>` 前缀显式路由，管理页单独一张「CodeBuddy 海外版」额度卡（额度 + ✎ 改名；▲▼/✕ 仍在 CN 卡）。海外登录态写在 `~/.codebuddy-session-global.json`（绝不写 CN 的历史 session 路径，避免 legacy 迁移把海外号并进 CN 区）。模型目录不再采用桌面包中过期的 `product-ide.json`：其中 Claude 3.7/4.0、GPT-5、Gemini 2.5 已全部实测返回 11102。当前表来自海外客户端在线倍率面板并逐个用真实账号调用通过（2026-10-10），同系列只保留新一代：`hy4-preview`（x0.00）、`gpt-5.6-sol`（x3.47）、`gpt-5.6-terra`（x1.39）、`gpt-5.6-luna`（x0.14）、`gemini-3.5-flash`（x0.99）、`glm-5.3`（x0.79）、`kimi-k3`（x1.62）。
 
 ### 豆包 Provider（可选）
 
@@ -373,6 +373,7 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
   客户端请求**不带 `model` 字段**时自动用它补齐。设置持久化在 `~/.buddy-proxy/settings.json`
   （可用 `BUDDY_PROXY_SETTINGS` 覆盖），重启后仍生效；启动时 `--default-model zcode/glm-5.3`
   可提供初始值（设置文件里已有的值优先）
+- **目录刷新与隐藏** — Qoder、Kimi、Antigravity 这类实现动态目录能力的通道，标题栏显示「↻ 重新拉取」：逐可用账号取并集、原子替换该实例内存目录并报告新增/下架；若所有账号都失败则保留最后一份好目录。模型行的“隐藏”只影响模型页、选择器与 `/v1/models` 两套数组，显式 `provider/model` 仍可调用；与“停用”（直接拒绝调用）严格不同。隐藏键写入 `settings.json` 的 `hidden_models`，上游后来下架也能在「已隐藏」弹窗清理。
 - **一键测试** — 每个模型一个「测试」按钮，向上游发一条 `hi`，弹窗里返回延迟、token 用量、回复预览，以及实际响应的 provider/模型（如 `zcode/glm-5.3`；模型顺序路由时也显示最终命中的通道）
   （非流式、`max_tokens=256`，走真实上游、会产生真实调用）
 - **自动打卡 & 打卡日历** — CodeBuddy / Trae / Qoder 三家上游都提供每日签到：勾选「自动打卡」后
@@ -426,7 +427,7 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
   是总额度的明细，相加双算；CodeBuddy 自己把合计放首条，同样成立）。规则集中在后端
   `benefits._quota_low`，前端只渲染不判规则；恰好卡线（=300 / =8%）不算「不足」，不报。
 - **额度查询** — 各通道剩余额度一目了然：CodeBuddy 积分包余额合计 + 各资源包明细（credits）；
-  每张卡的标题行在总量旁带「已用 N%」。CodeBuddy 原先自立一条「积分余额合计」**明细行**
+  每个专属通道面板只在标题放一个渠道级 ↻（不再每账号重复），一次作废并重查整个 provider，直接采用 POST 返回的新快照。Trae 海外版有独立额度面板和「海外版无每日签到」说明，不提供伪领取按钮；运维性质的 Trae PAT 固定在额度页最后。每张卡的标题行在总量旁带「已用 N%」。CodeBuddy 原先自立一条「积分余额合计」**明细行**
   排在首位，现已去掉（别的通道都没有这种汇总行）——改为声明 `sum_items`，合计由标题行自己算；
   「余额合计」**始终遍历全部包**，明细也不再截断（此前后端只给前 4 条，被砍掉的条目前端
   无从得知、永久看不见；现在展示条数统一交给前端折叠，用户想看能看全）；
@@ -951,6 +952,10 @@ Qoder 通道声明了 `supports_checkin`，因此会和 CodeBuddy 一起出现�
 `Cosy-MachineToken/Code/Type` 再请求，签到条目即正常出现。二进制缺失（没装桌面端）
 或生成失败时回退纯静态头——已被代理领过的账号静态指纹也能看到条目（上游已登记），
 新号则看不到。路径可用 `QODER_UMID_BIN` / `QODER_UMID_BIN_CN` 环境变量覆盖。
+还有一层只读兜底处理进程会话定向：直连 `/sash` 仍没有 `CLAIM_BENEFIT` 时，代理只读
+已安装桌面端最新 `main.log` 的末尾 2 MiB，仅接纳 payload `uid` 与账号逐字一致、日志足够
+新且当前仍在 `startAt/endAt` 窗口内的签到条目；直连已有签到永远优先，别的 uid、坏行、
+未来/过期窗口全部忽略，同 id 的桌面签到只替换直连降级出的 `VIEW_DETAILS` 占位。
 
 三个值得知道的行为（均为 2026-09 真实账号实测）：
 
@@ -1034,7 +1039,11 @@ buddy start
 所以 `reasoning_effort` 按模型表声明的档位映射后缀（`models.json` 的
 `efforts`/`default_effort`——如 `gemini-3.1-pro` 默认 `-low`、
 `gemini-3.8-flash` 实发 `gemini-3.8-flash-tiered`、`gpt-oss-120b` 实发
-`gpt-oss-120b-medium`）。
+`gpt-oss-120b-medium`）。模型页手动刷新会遍历所有可用账号、取
+`fetchAvailableModels` 并集，只裁掉已知 effort 后缀（绝不泛化裁掉 `-thinking` /
+`-image` / `-agent` 这类模型身份），已知条目保留人工 metadata，新发现项立即可路由。
+Kimi 的同一刷新按钮走官方 `GET /v1/models`；两者目录都归 provider 实例持有，整轮失败
+保留旧快照，不污染其它实例。
 
 **thoughtSignature 穿透协议转换**——gemini 系在每个 `functionCall` part 上
 返回 `thoughtSignature`，多轮工具调用时上游强制要求原样带回（缺失 → `400
