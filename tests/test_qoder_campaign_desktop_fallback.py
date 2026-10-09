@@ -51,6 +51,15 @@ def _event(uid: str = UID, campaigns_list=None, status: int = 200) -> dict:
     }
 
 
+def test_desktop_fallback_empty_logs_dir_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(campaigns.Path, "home", classmethod(lambda cls: tmp_path))
+    log_dir = tmp_path / "Library/Application Support/com.qoder.app.stable/logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "empty-run").mkdir()
+
+    assert _desktop_campaigns("global", UID, now=NOW) == []
+
+
 def test_desktop_fallback_loads_same_uid_current_window(tmp_path, monkeypatch):
     _write_log(tmp_path, monkeypatch, _event())
     out = _desktop_campaigns("global", UID, now=NOW)

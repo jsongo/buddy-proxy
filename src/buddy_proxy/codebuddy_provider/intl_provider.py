@@ -91,6 +91,18 @@ class CodeBuddyIntlProvider(CodeBuddyProvider):
             for model in _INTL_MODELS
         ]
 
+    def accepts_model(self, model: str, aliases: bool = True) -> bool:
+        """只认完整 ``codebuddyintl/<模型>``，裸名继续交给默认 CN 通道。
+
+        基类会把目录 id 的 provider 前缀剥掉后匹配；这里若不覆写，发布海外目录
+        便会让 ``hy4-preview`` 这类与 CN 同名的请求静默改道到海外账号。
+        """
+        del aliases
+        want = (model or "").strip()
+        if not want.startswith(f"{self.id}/"):
+            return False
+        return any(model_info.get("id") == want for model_info in self.models())
+
     def ensure_auth(self) -> None:
         """启动校验：必须有海外版账号。
 

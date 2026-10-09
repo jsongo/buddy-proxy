@@ -4,12 +4,14 @@ provider / intl 子类。CODEBUDDY_STATE_DIR 由 conftest autouse 隔离到 tmp_
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
 from buddy_proxy.codebuddy_provider import credentials as creds
 from buddy_proxy.codebuddy_provider import failover
+from buddy_proxy.codebuddy_provider.forward import _resolve_auto
 from buddy_proxy.codebuddy_provider.intl_provider import (
     CodeBuddyIntlProvider,
     intl_enabled,
@@ -171,6 +173,13 @@ def test_intl_enabled_and_provider_region():
         "codebuddyintl/kimi-k3",
     ]
     assert all(m["images"] and m["tool_call"] for m in models)
+    # 海外目录虽公开，但只能用完整前缀路由；裸名不能抢默认 CN CodeBuddy。
+    assert p.accepts_model("codebuddyintl/hy4-preview") is True
+    assert p.accepts_model("hy4-preview") is False
+    assert p.accepts_model("gpt-5.6-terra") is False
+    assert _resolve_auto(
+        SimpleNamespace(providers={"codebuddyintl": p}), "hy4-preview"
+    ) is None
     assert {m["id"].split("/", 1)[1]: m["credits"] for m in models} == {
         "hy4-preview": "x0.00 credits",
         "gpt-5.6-sol": "x3.47 credits",

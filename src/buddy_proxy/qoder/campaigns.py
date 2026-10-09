@@ -175,6 +175,8 @@ def _desktop_campaigns(region_key: str, uid: str, now: float | None = None) -> l
     log_dir = Path.home() / "Library" / "Application Support" / bundle / "logs"
     try:
         candidates = [p for p in log_dir.glob("*/main.log") if p.is_file()]
+        if not candidates:
+            return []
         path = max(candidates, key=lambda p: p.stat().st_mtime)
         stat = path.stat()
         if clock - stat.st_mtime > _DESKTOP_LOG_MAX_AGE_S:

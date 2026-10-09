@@ -66,7 +66,7 @@ def test_fetch_models_parses_openai_shape_and_uses_auth_device_headers(monkeypat
 
 def test_refresh_models_unions_accounts_preserves_local_metadata_and_instance_scope(monkeypatch):
     """多账号取并集、失败账号容忍；已知条目 metadata 保留且不污染别的实例。"""
-    monkeypatch.setattr(kimi_provider.failover, "available_accounts",
+    monkeypatch.setattr(kimi_provider, "list_accounts",
                         lambda: _accounts("bad", "limited", "full"))
     token_calls: list[str] = []
 
@@ -111,8 +111,48 @@ def test_refresh_models_unions_accounts_preserves_local_metadata_and_instance_sc
     assert "brand-new" not in {m["id"] for m in kimi_provider.MODELS}
 
 
+def test_refresh_models_partial_failure_keeps_failed_account_models(monkeypatch):
+    accounts = _accounts("healthy", "cooled")
+    monkeypatch.setattr(kimi_provider, "list_accounts", lambda: accounts)
+    # 聊天选号会剔除 cooled；目录发现仍须查询全量账号。
+    monkeypatch.setattr(kimi_provider.failover, "available_accounts", lambda: [accounts[0]])
+    round_no = 0
+    token_calls: list[str] = []
+
+    def fake_token(account_id: str):
+        token_calls.append(account_id)
+        return f"tok-{account_id}", {
+            "base_url": "https://api.test", "device_id": account_id,
+        }
+
+    def fake_fetch(_base_url, token, _cred, timeout=15.0):
+        if round_no == 0:
+            model_id = token.removeprefix("tok-") + "-only"
+            return [{"id": model_id, "description": model_id}]
+        if token == "tok-cooled":
+            raise OSError("temporary failure")
+        return [
+            {"id": "healthy-only", "description": "healthy-only"},
+            {"id": "brand-new", "description": "brand-new"},
+        ]
+
+    monkeypatch.setattr(kimi_provider, "ensure_account_token", fake_token)
+    monkeypatch.setattr(kimi_provider, "fetch_models", fake_fetch)
+    provider = KimiProvider()
+
+    asyncio.run(provider.refresh_models())
+    assert {m["id"] for m in provider.models()} == {"healthy-only", "cooled-only"}
+    round_no = 1
+    asyncio.run(provider.refresh_models())
+
+    assert token_calls == ["healthy", "cooled", "healthy", "cooled"]
+    assert {m["id"] for m in provider.models()} == {
+        "healthy-only", "cooled-only", "brand-new",
+    }
+
+
 def test_refresh_models_all_fail_raises_and_keeps_previous_catalog(monkeypatch):
-    monkeypatch.setattr(kimi_provider.failover, "available_accounts",
+    monkeypatch.setattr(kimi_provider, "list_accounts",
                         lambda: _accounts("a", "b"))
     monkeypatch.setattr(
         kimi_provider, "ensure_account_token",
@@ -134,7 +174,7 @@ def test_refresh_models_all_fail_raises_and_keeps_previous_catalog(monkeypatch):
 def test_refreshed_model_routes_and_unknown_model_is_rejected(monkeypatch):
     """刷新发现的新 id 可直接转发；未知 id 不再静默落到默认模型。"""
     monkeypatch.setattr(kimi_provider, "has_cred", lambda: True)
-    monkeypatch.setattr(kimi_provider.failover, "available_accounts",
+    monkeypatch.setattr(kimi_provider, "list_accounts",
                         lambda: _accounts("acct"))
     monkeypatch.setattr(
         kimi_provider, "ensure_account_token",
